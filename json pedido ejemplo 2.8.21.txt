@@ -1,0 +1,188 @@
+{
+    "cart": {
+        "number": 0,-->ACA VA CERO
+        "total": 1186.27,-->ACA TOTAL PEDIDIOS
+        "customer": {-->DATOS DE CLIENTE, SE PIDE NUEVO PARA VERIFICAR QUE NO CAMBIE NINGUN DATO.
+            "id": "",-->ACA VACION
+            "document_id": "", -->COMPELTAR SI ES cf SINO VACIO
+            "vat_number": "20235298288", -->COMPLETAR SI ES ri O mo SINO VACIO
+            "sales_tax_group_id": "RI", -->CONDICIOND E IVA
+            "name": "RICARDO RODRIGUEZ",
+            "activity_id": "001", --> CODIGOACTIVIDAD MANDAR 001.
+            "grossincome": "123", -->MANDA NUMERO DE IIBB SI POSEE
+            "state_id": "002",
+            "city": "Capital feder",
+            "zipcode": "2760",
+            "neighborhood": null,
+            "address": "BOLIVAR ",
+            "phone": "XXXXXXX",
+            "email": "ZVICERARCENIORICARDO@mercadolibre.com",
+            "cell_phone": "0000",
+            "notes": "Cliente de Mercado Libre: 80739686"
+        },
+        "products": [ -->NODO PRODUCTOS, SI MANDAN MAS DE 1 REPLICAR LOS NODOS ENTRE LLAVES
+            {
+                "product_id": "01148",
+                "size": null,
+                "quantity": 1,
+                "netPrice": 980.39,
+                "totalPrice": 980.39,
+                "discount": 0,
+                "line_notes" : "adad"
+            }
+        ],
+        "notes": "Mercado Libre Pedido: 4684190966 Nro de pago: 15632434029 Tracking: 360000233331430 Flete: Andreani Estándar Transporte: Normal a domicilio",
+        "price_list_id": "1",
+        "currency_id": "PESOS",
+        "general_discount": 0,
+        "username": "DEMO", -->usuario de flexxus
+        "user_id": "DEMO", -->usuario de flexxus
+        "warehouse_id": "001", -->codigo deposito del sistema flexxus.
+        "type": "NP",
+        "date": "2021-11-02 11:05:56",
+        "payment_method_id": "15",
+        "operation_type_id": "5",
+        "paymentsDetail": {
+            "cash": [
+                {
+                    "currency": {
+                        "currencyId": "PESOS"
+                    },
+                    "amount": 386.27,
+                    "quotationCash": 1
+                }
+            ],
+            "coupon": [
+                {
+                    "plan": {
+                        "name": "1 CUOTA",
+                        "card": {
+                            "idCard": "00019"
+                        }
+                    },
+                    "amount": 200,
+                    "total": 200,
+                    "idCoupon": "012"
+                }
+            ],
+            "wireTransfer": [
+                {
+                    "bankAccount": {
+                        "idBankAccount": "CA  120-15566/8",
+                        "bankBranch": {
+                            "idBankBranch": "120",
+                            "bank": {
+                                "idBank": "017"
+                            }
+                        }
+                    },
+                    "amount": 200,
+                    "comments": "DESDE POSTMAN"
+                },
+                {
+                    "bankAccount": {
+                        "idBankAccount": "130-012685/4",
+                        "bankBranch": {
+                            "idBankBranch": "000",
+                            "bank": {
+                                "idBank": "072"
+                            }
+                        }
+                    },
+                    "amount": 200,
+                    "comments": "DESDE POSTMAN"
+                }
+            ],
+            "checks": [
+                {
+                    "bankBranch": {
+                        "idBankBranch": "033",
+                        "bank": {
+                            "idBank": "388"
+                        }
+                    },
+                    "amount": 200,
+                    "idCheck": "12345678",
+                    "dateCheck": "2021-11-02 11:15:56",
+                    "dateClearing": "2021-11-03 11:15:56",
+                    "own": 1,
+                    "common": 0,
+                    "accountHolder": "147852",
+                    "cuitHolder": "99-99999999-5"
+                }
+            ]
+        },
+              "geolocation":{
+         "latitude":"127",
+         "length":"205"
+      },
+      "multiforms":{
+         "checks":[
+            {
+               "dayssince":1,
+               "daysuntil":1,
+               "percentage":1,
+               "totalamount":1
+            }
+         ],
+         "accountingsaccounts":[
+            {
+               "multiplacecode":1,
+               "percentage":1,
+               "totalamount":1
+            }
+         ],
+         "cashs":[
+            {
+               "coincode":"",
+               "quotation":1,
+               "percentage":1,
+               "totalamount":1
+            }
+         ],
+         "cards":[
+            {
+               "cardcode":"",
+               "cardplan":"",
+               "percentage":1,
+               "totalamount":1
+            }
+         ],
+         "wireTransfers":[
+            {
+               "bankcode":"",
+               "bankbranchcode":"",
+               "account":"",
+               "percentage":1,
+               "totalamount":1
+            }
+         ]
+      },
+      "deliverydata":{
+         "deliverytypecode":1,
+         "address":"",
+         "neighborhood":"",
+         "location":"",
+         "codezone":0,
+         "phone1contact":"",
+         "phone2contact":"",
+         "agreeddate":"1-JAN-1900 00:00:00",
+         "agreedtime":"1-JAN-1900 00:00:00",
+         "responsiblereception":"",
+         "observations":"",
+         "neighborhoodcode":-1,
+         "locationcode":"",
+         "worknumber":-1,
+         "distance":0,
+         "freightarticlecode":""
+      },
+      "vouchersauthorizations":[
+         {
+            "authorizationcode":1,
+            "usercode":"",
+            "statecode":1,
+            "transactionnumber":1
+         }
+      ]
+    }
+}

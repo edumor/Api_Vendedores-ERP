@@ -1,0 +1,35 @@
+# Bases de datos Firebird y SQLite (archivos grandes / sensibles)
+*.fdb
+*.gdb
+*.FDB
+*.GDB
+*.db
+Archivos Flexxus/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Entornos virtuales
+venv/
+env/
+.env
+
+# Archivos grandes de datos
+*.csv
+tablas_pequenas.txt
+
+# Logs
+*.log
+extraccion_log.txt
+
+# Archivos temporales de Office y sistema
+~$*
+Thumbs.db
+.DS_Store
+
+# Archivos de sesión/debug locales
+*.msg
