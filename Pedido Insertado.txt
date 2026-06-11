@@ -1,0 +1,54 @@
+{
+    "cart": {
+        "number": 0,
+        "total": 1186.27,
+        "customer": {
+            "id": "",
+            "document_id": "",
+            "vat_number": "20235298288",
+            "sales_tax_group_id": "RI",
+            "name": "RICARDO RODRIGUEZ",
+            "activity_id": "001",
+            "grossincome": "123",
+            "state_id": "002",
+            "city": "Capital feder",
+            "zipcode": "2760",
+            "neighborhood": null,
+            "address": "BOLIVAR ",
+            "phone": "XXXXXXX",
+            "email": "ZVICERARCENIORICARDO@mercadolibre.com",
+            "cell_phone": "0000",
+            "notes": "Cliente de Mercado Libre: 80739686"
+        },
+        "products": [
+            {
+                "product_id": "000004",
+                "size": null,
+                "quantity": 1,
+                "netPrice": 980.39,
+                "totalPrice": 980.39,
+                "discount": 0,
+                "line_notes" : ""
+            }
+        ],
+        "notes": "Mercado Libre Pedido: 4684190966 Nro de pago: 15632434029 Tracking: 360000233331430 Flete: Andreani Estándar Transporte: Normal a domicilio",
+        "price_list_id": "1",
+        "currency_id": "PESOS",
+        "general_discount": 0,
+        "username": "ADMIN",
+        "user_id": "ADMIN",
+        "warehouse_id": "001",
+        "type": "NP",
+        "date": "2021-11-02 11:05:56",
+        "payment_method_id": "15",
+        "operation_type_id": "5",
+        
+              "geolocation":{
+         "latitude":"",
+         "length":""
+      }
+      
+      
+      
+    }
+}

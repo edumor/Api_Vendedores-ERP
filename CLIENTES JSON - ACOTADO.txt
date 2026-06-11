@@ -1,0 +1,21 @@
+{
+"name": "SKAY BEILINSON",
+"address": "AV.EMILIO OLMOS",
+"state_id": "002",
+"city": "NEW BS AS",
+"neighborhood": "RIQCOTA",
+"user_id": "ADMIN",
+"price_list_id": "002",
+"vat_number": "99-99999999-5",
+"sales_tax_group_id": "0",
+"document_id":"0",
+"phone": "-",
+"email": "-",
+"cell_phone": "-",
+"notes": "-",
+"zipcode": "5000",
+"activity_id": "001",
+"grossincome": "1234",
+"branchs": [],
+"contacts":[]
+}

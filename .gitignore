@@ -1,10 +1,35 @@
-﻿.env
-admin.db
-admin.db-journal
+# Bases de datos Firebird y SQLite (archivos grandes / sensibles)
+*.fdb
+*.gdb
+*.FDB
+*.GDB
+*.db
+Archivos Flexxus/
+
+# Python cache
 __pycache__/
 *.pyc
 *.pyo
-Api Vendedores/
-Api Vendedores Microbell/
-Api Vendedores Microbell SA/
-Api_vendedores_Microbell/
+*.pyd
+.Python
+
+# Entornos virtuales
+venv/
+env/
+.env
+
+# Archivos grandes de datos
+*.csv
+tablas_pequenas.txt
+
+# Logs
+*.log
+extraccion_log.txt
+
+# Archivos temporales de Office y sistema
+~$*
+Thumbs.db
+.DS_Store
+
+# Archivos de sesión/debug locales
+*.msg
