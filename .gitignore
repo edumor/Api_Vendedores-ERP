@@ -1,0 +1,10 @@
+﻿.env
+admin.db
+admin.db-journal
+__pycache__/
+*.pyc
+*.pyo
+Api Vendedores/
+Api Vendedores Microbell/
+Api Vendedores Microbell SA/
+Api_vendedores_Microbell/
