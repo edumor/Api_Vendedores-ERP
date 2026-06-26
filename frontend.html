@@ -4,6 +4,68 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Microbell Vendedores</title>
+<!-- OneSignal Web Push SDK -->
+<script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
+<script>
+  window.OneSignalDeferred = window.OneSignalDeferred || [];
+  OneSignalDeferred.push(async function(OneSignal) {
+    await OneSignal.init({
+      appId: "0212e452-50ad-4c8c-973c-bb70bc6cd2e6",
+      serviceWorkerPath: "/OneSignalSDKWorker.js",
+    });
+    // Ocultar botón si ya tiene permiso concedido
+    if (OneSignal.Notifications.permissionNative === 'granted') {
+      const btn = document.getElementById('btn-push-notif');
+      if (btn) btn.style.display = 'none';
+    }
+    // Ocultar al conceder permiso
+    OneSignal.Notifications.addEventListener('permissionChange', (granted) => {
+      const btn = document.getElementById('btn-push-notif');
+      if (btn) btn.style.display = granted ? 'none' : '';
+    });
+  });
+
+  document.addEventListener('DOMContentLoaded', function() {
+    var btnPush = document.getElementById('btn-push-notif');
+    if (btnPush) {
+      btnPush.addEventListener('click', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        try {
+          if (!('Notification' in window)) {
+            alert('Notificaciones no soportadas en este navegador.');
+            return;
+          }
+          var pActual = Notification.permission;
+          if (pActual === 'denied') {
+            alert('Notificaciones BLOQUEADAS.\nAndá a: Ajustes del navegador → Permisos del sitio → Notificaciones → Permitir para ' + location.hostname);
+            return;
+          }
+          if (pActual === 'granted') {
+            alert('¡Ya tenés notificaciones activadas!');
+            btnPush.style.display = 'none';
+            return;
+          }
+          Notification.requestPermission().then(function(perm) {
+            if (perm === 'granted') {
+              alert('✅ Notificaciones activadas.');
+              btnPush.style.display = 'none';
+              if (window.OneSignalDeferred) {
+                window.OneSignalDeferred.push(function(OS) {
+                  try { OS.User.PushSubscription.optIn(); } catch(ex) {}
+                });
+              }
+            } else {
+              alert('Permiso: ' + perm + '. Habilitá manualmente en ajustes del navegador.');
+            }
+          });
+        } catch(err) {
+          alert('Error al activar: ' + err.message);
+        }
+      });
+    }
+  });
+</script>
 <!-- Favicon estándar -->
 <link rel="icon" type="image/x-icon" href="/favicon.ico">
 <link rel="icon" type="image/png" sizes="16x16"  href="/icons/favicon-16x16.png">
@@ -95,8 +157,9 @@ tr:hover td{background:#f9fafb}
 /* Autocomplete cliente */
 .autocomplete-wrap{position:relative}
 .autocomplete-list{position:absolute;top:100%;left:0;right:0;background:#fff;border:1px solid var(--border);border-radius:0 0 6px 6px;max-height:220px;overflow-y:auto;z-index:50;box-shadow:0 4px 12px rgba(0,0,0,.1)}
-#art-float-list{position:fixed;background:#fff;border:1.5px solid var(--c1);border-radius:8px;max-height:420px;overflow-y:auto;z-index:99999;box-shadow:0 6px 24px rgba(0,0,0,.18);min-width:340px;display:none}
+#art-float-list{position:fixed;background:#fff;border:1.5px solid var(--c1);border-radius:8px;max-height:420px;overflow-y:auto;z-index:99999;box-shadow:0 6px 24px rgba(0,0,0,.18);min-width:280px;max-width:calc(100vw - 12px);display:none}
 #art-float-list .art-opt{padding:.22rem .65rem;cursor:pointer;border-bottom:1px solid var(--border);font-size:.78rem}
+@media(max-width:600px){#art-float-list{font-size:.73rem;max-height:38vh}#art-float-list .art-opt{font-size:.73rem;padding:.18rem .5rem;line-height:1.3}}
 #art-float-list .art-opt:last-child{border-bottom:none}
 #art-float-list .art-opt:hover,#art-float-list .art-opt.active{background:#eff6ff;color:var(--c1)}
 .autocomplete-list div{padding:.45rem .75rem;cursor:pointer;font-size:.875rem;border-bottom:1px solid var(--border)}
@@ -187,6 +250,9 @@ tr:hover td{background:#f9fafb}
   .mob-card-num{font-weight:700;font-size:.92rem}
   .mob-card-total{font-weight:700;color:var(--c1);font-size:.92rem}
   .mob-card-sub{font-size:.78rem;color:var(--sub)}
+  .mob-card-footer{display:flex;justify-content:flex-end;margin-top:.5rem;padding-top:.4rem;border-top:1px solid var(--border)}
+  .mob-copy-btn{background:transparent;border:1.5px solid #059669;color:#059669;border-radius:6px;padding:4px 12px;font-size:.78rem;font-weight:700;cursor:pointer}
+  .mob-copy-btn:active{background:#dcfce7}
 }
 @media(min-width:769px){
   .nav-short{display:none}
@@ -232,7 +298,7 @@ tr:hover td{background:#f9fafb}
     <span class="hdr-title">Vendedores</span>
     <div class="hdr-right">
       <div id="hdr-name" style="font-weight:600"></div>
-      <div style="display:flex;gap:.75rem;justify-content:flex-end">
+      <div style="display:flex;gap:.75rem;justify-content:flex-end;align-items:center">
         <a href="#" onclick="abrirCambiarPass()" style="color:var(--sub);font-size:.75rem;font-weight:500">🔑 Cambiar contraseña</a>
         <a href="#" onclick="logout()" style="color:var(--c1);font-size:.75rem;font-weight:600">Salir</a>
       </div>
@@ -240,6 +306,7 @@ tr:hover td{background:#f9fafb}
   </div>
 </header>
   <nav>
+    <button id="btn-push-notif" style="color:#f59e0b;border-bottom-color:transparent!important">🔔</button>
     <button class="active" onclick="goSection('stock',this)">📦 Stock</button>
     <button onclick="goSection('ctacte',this)">💳 <span class="nav-full">Cta. Corriente</span><span class="nav-short">Cta.</span></button>
     <button onclick="goSection('pedidos',this)">📋 Pedidos</button>
@@ -279,7 +346,10 @@ tr:hover td{background:#f9fafb}
           <button class="btn btn-ghost btn-sm" onclick="stLimpiar()" style="flex:0;align-self:flex-end;padding:5px 10px">✕ Limpiar</button>
         </div>
         <div style="display:flex;align-items:center;justify-content:space-between;margin-top:.6rem;gap:.5rem;flex-wrap:wrap">
-          <div id="st-leyenda" style="font-size:.78rem;color:var(--sub)">Rem. VAC-LOG = Depósito 001 · Rem. Pacheco = Depósito 003 · Rem. Total = ambos.</div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0">
+            <div id="st-leyenda" style="font-size:.78rem;color:var(--sub)">Rem. VAC-LOG = Depósito 001 · Rem. Pacheco = Depósito 003 · Rem. Total = ambos.</div>
+            <span id="st-cache-age" style="display:none;font-size:.72rem;padding:1px 7px;border-radius:8px;white-space:nowrap;cursor:pointer" title="Tiempo desde última actualización de Firebird. Click para actualizar ahora." onclick="stForceRefresh()"></span>
+          </div>
           <div style="display:flex;gap:.4rem;flex-shrink:0">
             <button class="btn btn-outline btn-sm" onclick="exportarStock('excel')" style="display:inline-flex;align-items:center;gap:6px"><svg width="14" height="14" viewBox="0 0 24 24" fill="#1d6f42" xmlns="http://www.w3.org/2000/svg"><path d="M23 1.5q.41 0 .7.3.3.29.3.7v19q0 .41-.3.7-.29.3-.7.3H7q-.41 0-.7-.3-.3-.29-.3-.7V18H1q-.41 0-.7-.3-.3-.29-.3-.7V7q0-.41.3-.7Q.58 6 1 6h5V2.5q0-.41.3-.7.29-.3.7-.3zM6 13.28l1.42 2.66h2.14l-2.38-3.87 2.34-3.8H7.46l-1.3 2.4-.05.08-.04.09q-.46-.93-1.4-2.57H2.43l2.27 3.84-2.4 3.83h2.16zM16.5 21v-3H8v3zm0-4.5v-3.75H12v3.75zm0-5.25V7.5H12v3.75zm0-5.25V3H8v3zm6 10.5v-3H18v3zm0-4.5v-3.75H18v3.75zm0-5.25V7.5H18v3.75zm0-5.25V3H18v3z"/></svg>Excel</button>
             <button class="btn btn-outline btn-sm" onclick="exportarStock('pdf')">📄 PDF</button>
@@ -336,11 +406,12 @@ tr:hover td{background:#f9fafb}
     <!-- PEDIDOS -->
     <div id="sec-pedidos" class="section">
       <div class="card" style="display:flex;gap:.6rem;flex-wrap:wrap;align-items:center">
-        <label class="lbl sel-desktop" style="margin:0;white-space:nowrap">Últimos 10 pedidos:</label>
+        <label class="lbl sel-desktop" style="margin:0;white-space:nowrap">Últimos 20 pedidos:</label>
         <select id="ped-select" class="sel-desktop" style="flex:1;min-width:200px" onchange="verDesdeSelect('pedidos');toggleBtnPedidoPdf()">
           <option value="">— Seleccioná un pedido —</option>
         </select>
         <button id="btn-ped-pdf" class="btn btn-outline btn-sm sel-desktop" style="display:none" onclick="abrirPdfPedido()">🖨️ PDF</button>
+        <button id="btn-ped-copia" class="btn btn-outline btn-sm sel-desktop" style="display:none" onclick="copiarDesdeSelect('pedidos')" title="Copiar este pedido en un nuevo formulario">📋 Copiar</button>
         <button class="btn btn-primary btn-sm" onclick="openNuevo('pedido')">+ Nuevo Pedido</button>
       </div>
       <div id="ped-lista-mobile" class="mob-lista"></div>
@@ -350,11 +421,12 @@ tr:hover td{background:#f9fafb}
     <!-- PRESUPUESTOS -->
     <div id="sec-presupuestos" class="section">
       <div class="card" style="display:flex;gap:.6rem;flex-wrap:wrap;align-items:center">
-        <label class="lbl sel-desktop" style="margin:0;white-space:nowrap">Últimos 10 presupuestos:</label>
+        <label class="lbl sel-desktop" style="margin:0;white-space:nowrap">Últimos 20 presupuestos:</label>
         <select id="pre-select" class="sel-desktop" style="flex:1;min-width:200px" onchange="verDesdeSelect('presupuestos');toggleBtnPdf()">
           <option value="">— Seleccioná un presupuesto —</option>
         </select>
         <button id="btn-pre-pdf" class="btn btn-outline btn-sm sel-desktop" style="display:none" onclick="abrirPdfPresupuesto()">🖨️ PDF</button>
+        <button id="btn-pre-copia" class="btn btn-outline btn-sm sel-desktop" style="display:none" onclick="copiarDesdeSelect('presupuestos')" title="Copiar este presupuesto en un nuevo formulario">📋 Copiar</button>
         <button class="btn btn-primary btn-sm" onclick="openNuevo('presupuesto')">+ Nuevo Presupuesto</button>
       </div>
       <div id="pre-lista-mobile" class="mob-lista"></div>
@@ -474,7 +546,10 @@ tr:hover td{background:#f9fafb}
     <button class="close-btn" onclick="closeOv('ov-detalle')">✕</button>
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.5rem;flex-wrap:wrap;gap:.4rem">
       <h2 id="det-title" style="margin:0">Detalle</h2>
-      <button id="det-pdf-btn" onclick="verDetallePdf()" style="display:none;padding:6px 14px;background:var(--c1);color:#fff;border:none;border-radius:6px;font-size:.82rem;cursor:pointer;font-weight:600">🖨️ Ver PDF</button>
+      <div style="display:flex;gap:.4rem">
+        <button id="det-copy-btn" onclick="copiarDesdeDetalle()" style="display:none;padding:6px 14px;background:#059669;color:#fff;border:none;border-radius:6px;font-size:.82rem;cursor:pointer;font-weight:600" title="Copiar en nuevo formulario">📋 Copiar</button>
+        <button id="det-pdf-btn" onclick="verDetallePdf()" style="display:none;padding:6px 14px;background:var(--c1);color:#fff;border:none;border-radius:6px;font-size:.82rem;cursor:pointer;font-weight:600">🖨️ Ver PDF</button>
+      </div>
     </div>
     <div id="det-body"></div>
   </div>
@@ -496,6 +571,34 @@ tr:hover td{background:#f9fafb}
     <button class="close-btn" onclick="closeOv('ov-presup-pend')">✕</button>
     <h2>Presupuestos Aprobados Pendientes</h2>
     <div id="pp-body"></div>
+  </div>
+</div>
+
+<!-- POPUP COPIA ADMIN: seleccionar vendedor y cliente -->
+<div class="overlay" id="ov-copia-admin">
+  <div class="modal" style="max-width:460px">
+    <button class="close-btn" onclick="closeOv('ov-copia-admin')">✕</button>
+    <h2 id="ov-copia-admin-title">Copiar como...</h2>
+    <div style="display:flex;flex-direction:column;gap:.85rem;margin-top:.5rem">
+      <div>
+        <label class="lbl">Vendedor</label>
+        <select id="ca-vend-sel" style="width:100%;box-sizing:border-box" onchange="caCambiarVendedor()">
+          <option value="">— Cargando... —</option>
+        </select>
+      </div>
+      <div>
+        <label class="lbl">Cliente</label>
+        <div class="autocomplete-wrap">
+          <input id="ca-cli-input" placeholder="Escribí nombre o código..." autocomplete="off" oninput="caFiltrarClientes()">
+          <div id="ca-cli-lista" class="autocomplete-list" style="display:none"></div>
+        </div>
+        <div id="ca-cli-sel" style="margin-top:.4rem;font-size:.85rem;color:var(--c1);display:none"></div>
+      </div>
+      <div style="display:flex;gap:.5rem;justify-content:flex-end;margin-top:.5rem">
+        <button class="btn btn-outline" onclick="closeOv('ov-copia-admin')">Cancelar</button>
+        <button class="btn btn-primary" onclick="caConfirmar()">📋 Copiar</button>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -536,6 +639,7 @@ tr:hover td{background:#f9fafb}
 const API = '';
 let SESSION = null;
 let nvDescuentoGeneral = 0; // % descuento general (solo admin, bloqueado si hay bonif en línea)
+let _adminDefaultDb = 'oficial'; // DB seleccionado en admin.html al abrir (oficial|sw)
 
 const _PERFILES_BONIF = new Set(['ADV','ADVJUAN','GERENTES','GTES FE']);
 
@@ -572,7 +676,7 @@ async function doLogin(){
   if(!u||!p){showErr(err,'Completá usuario y contraseña');return}
   try{
     const r=await apiFetch(API+'/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({usuario:u,password:p})});
-    if(!r.ok){const d=await r.json();const msg=d.detail||'Error';showErr(err,msg);alert('⚠️ '+msg);return}
+    if(!r.ok){const d=await r.json();const msg=d.detail||'Error';showErr(err,msg);document.getElementById('l-pass').value='';document.getElementById('l-pass').focus();return}
     SESSION=await r.json();
     document.getElementById('login-screen').style.display='none';
     document.getElementById('app').style.display='flex';
@@ -593,6 +697,7 @@ async function doLogin(){
   const adminToken = params.get('__admin_token');
   const goto = params.get('__goto');
   const gotoDb = params.get('__db') || 'oficial';  // 'oficial' | 'sw'
+  _adminDefaultDb = gotoDb; // guardar globalmente para usarlo en copia admin
   if(!adminToken) return;
   // Limpiar URL sin recargar
   window.history.replaceState({section:'stock'}, '', '#stock');
@@ -662,6 +767,8 @@ async function cargarOfertas(codigousuario){
 }
 
 async function aplicarFlags(codigousuario){
+  // Cargar depósitos activos en paralelo con los flags
+  _loadDepositosAdmin();
   try{
     const r = await apiFetch(`${API}/flags?vendedor=${encodeURIComponent(codigousuario)}`);
     if(!r.ok) return;
@@ -736,14 +843,36 @@ async function cargarClientesCache(){
 }
 
 // ── Navegación ────────────────────────────────────────────────────────────────
+let _seccionActual = 'stock';
 function goSection(id,btn,_fromPop){
   document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));
   document.querySelectorAll('nav button').forEach(b=>b.classList.remove('active'));
   document.getElementById('sec-'+id).classList.add('active');
   btn.classList.add('active');
+  _seccionActual = id;
   if(id==='catalogos') _loadCatSeccion();
   if(!_fromPop) history.pushState({section:id}, '', '#'+id);
 }
+
+// ── Auto-refresh cada 2 minutos ───────────────────────────────────────────────
+const _REFRESH_MS = 2 * 60 * 1000;
+function _autoRefresh(){
+  // No refrescar si hay modal abierto o el usuario está escribiendo
+  if(document.querySelector('.overlay.open')) return;
+  const tag = (document.activeElement||{}).tagName||'';
+  if(['INPUT','SELECT','TEXTAREA'].includes(tag)) return;
+  try {
+    switch(_seccionActual){
+      case 'stock':        loadStock();            break;
+      case 'ctacte':       if(typeof ctaClienteActual!=='undefined'&&ctaClienteActual) loadCtaCte(); break;
+      case 'pedidos':      loadPedidos();          break;
+      case 'presupuestos': loadPresupuestos();     break;
+      case 'vendidos':     /* loadQueVendi requiere parámetros — skip */ break;
+      case 'catalogos':    _loadCatSeccion();      break;
+    }
+  } catch(e){}
+}
+setInterval(_autoRefresh, _REFRESH_MS);
 
 // Botón Atrás Android: navega entre secciones en vez de salir
 window.addEventListener('popstate', function(e){
@@ -937,6 +1066,43 @@ const _fmtFecha=v=>{if(!v||v==='—')return'—';const s=String(v).substring(0,1
 
 // ── Autocomplete buscador de stock (vendedores) ───────────────────────────
 let _stAutoTimer=null, _stAutoIdx=-1, _stSearchVal='';
+let _stFetchTs=0;          // timestamp JS del último fetch
+let _stCacheAgeTimer=null; // intervalo que actualiza el badge de antigüedad
+let _stAutoRefreshTimer=null; // auto-refresh en background
+
+function _stUpdateCacheAgeBadge(){
+  const badge = document.getElementById('st-cache-age');
+  if(!badge||!_stFetchTs) return;
+  const sec = Math.round((Date.now()-_stFetchTs)/1000);
+  const ttl = 45;
+  let color, bg;
+  if(sec<30){      color='#166534'; bg='#dcfce7'; }
+  else if(sec<ttl){ color='#92400e'; bg='#fef9c3'; }
+  else {            color='#991b1b'; bg='#fee2e2'; }
+  badge.textContent = sec<60 ? `⏱ ${sec}s` : `⏱ ${Math.floor(sec/60)}m ${sec%60}s`;
+  badge.style.background=bg; badge.style.color=color; badge.style.border=`1px solid ${color}44`;
+  badge.style.display='';
+}
+
+function stForceRefresh(){
+  // Fuerza un re-fetch limpiando cache en el server y recargando
+  _stFetchTs=0;
+  clearInterval(_stAutoRefreshTimer);
+  loadStock(0);
+}
+
+function _stStartAutoRefresh(){
+  clearInterval(_stAutoRefreshTimer);
+  _stAutoRefreshTimer = setInterval(()=>{
+    // Solo auto-refresh si la sección Stock está visible y hay resultados
+    const sec = document.getElementById('sec-stock');
+    const body = document.getElementById('st-body');
+    if(!sec||!sec.classList.contains('active')||!body) return;
+    if(!body.querySelector('table,div.st-card')) return; // sin resultados, no refrescar
+    const age = Math.round((Date.now()-_stFetchTs)/1000);
+    if(age >= 45) loadStock(0); // re-run con los mismos filtros actuales
+  }, 15000); // chequea cada 15 segundos
+}
 function stLimpiar(){
   document.getElementById('st-buscar').value='';
   _stSearchVal='';
@@ -948,9 +1114,12 @@ function stLimpiar(){
   document.getElementById('st-body').innerHTML='';
   const pag=document.getElementById('st-pag'); if(pag) pag.innerHTML='';
   const ley=document.getElementById('st-leyenda');
-  if(ley) ley.textContent = (FLAGS&&FLAGS.deposito_exclusivo)
-    ? (FLAGS.deposito_exclusivo.split(',').map(dep=>{const sh=(_NV_DEPOSITOS_ADMIN.find(d=>d.value===dep)||{short:dep}).short;return `Rem. ${sh} = Depósito ${dep}`;}).join(' · ')+' · Rem. Total = suma.')
-    : 'Rem. VAC-LOG = Depósito 001 · Rem. Pacheco = Depósito 003 · Rem. Total = ambos.';
+  const _depConfigured = FLAGS && 'deposito_exclusivo' in FLAGS;
+  if(ley){
+    if(!_depConfigured) ley.textContent = 'Rem. VAC-LOG = Depósito 001 · Rem. Pacheco = Depósito 003 · Rem. Total = ambos.';
+    else if(!FLAGS.deposito_exclusivo) ley.textContent = '⚠️ Sin depósitos habilitados para tu usuario.';
+    else ley.textContent = FLAGS.deposito_exclusivo.split(',').map(dep=>{const sh=(_NV_DEPOSITOS_ADMIN.find(d=>d.value===dep)||{short:dep}).short;return `Rem. ${sh} = Depósito ${dep}`;}).join(' · ')+' · Rem. Total = suma.';
+  }
 }
 async function stAutoInput(){
   _stSearchVal='';
@@ -1015,18 +1184,29 @@ async function loadStock(){
   else if(sr) url+=`&superrubro=${encodeURIComponent(sr)}`;
   else if(gsr) url+=`&gruposuperrubro=${encodeURIComponent(gsr)}`;
   if(marca) url+=`&marca=${encodeURIComponent(marca)}`;
+  const _depConf = FLAGS && 'deposito_exclusivo' in FLAGS;
+  if(_depConf && !FLAGS.deposito_exclusivo){
+    document.getElementById('st-body').innerHTML='<div class="loader" style="color:#dc2626">⚠️ Sin depósitos habilitados para tu usuario. Contactá al administrador.</div>';
+    return;
+  }
   if(FLAGS&&FLAGS.deposito_exclusivo) url+=`&deposito=${encodeURIComponent(FLAGS.deposito_exclusivo)}`;
   try{
     const all=await(await apiFetch(url)).json();
     if(!Array.isArray(all)){document.getElementById('st-body').innerHTML=`<div class="loader" style="color:red">Error: ${all.detail||'respuesta inesperada del servidor'}</div>`;return;}
+    _stFetchTs = Date.now(); // registrar cuando llegaron los datos
     _stHasMore=all.length>ST_LIMIT;
     const rows=all.slice(0,ST_LIMIT);
     if(!rows.length){document.getElementById('st-body').innerHTML='<div class="loader">Sin artículos con stock remanente para ese filtro</div>';return;}
+    // Arrancar badge de antigüedad y auto-refresh
+    clearInterval(_stCacheAgeTimer);
+    _stUpdateCacheAgeBadge();
+    _stCacheAgeTimer = setInterval(_stUpdateCacheAgeBadge, 10000);
+    _stStartAutoRefresh();
     // ── Renderizar ambas vistas; CSS muestra/oculta según pantalla ──
     let cards='', tabla='';
     const tdSub='style="font-size:.72rem;color:var(--sub);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:80px"';
     const tdNum='style="text-align:right;white-space:nowrap;font-size:.78rem"';
-    const _depExcl = FLAGS&&FLAGS.deposito_exclusivo ? FLAGS.deposito_exclusivo : null;
+    const _depExcl = (FLAGS && 'deposito_exclusivo' in FLAGS && FLAGS.deposito_exclusivo) ? FLAGS.deposito_exclusivo : null;
     const _depExclArr = _depExcl ? _depExcl.split(',') : null;
     // colores para depósitos exclusivos múltiples
     const _depColors = {'001':'#2563eb','002':'#2563eb','003':'#7c3aed','005':'#b45309','013':'#0891b2','016':'#6d28d9'};
@@ -1557,13 +1737,13 @@ let pedidosCache=[];
 async function loadPedidos(){
   try{
     const [rowsOf, rowsSw] = await Promise.all([
-      apiFetch(`${API}/pedidos?vendedor=${SESSION.codigousuario}&limit=10&offset=0&db=oficial`).then(r=>r.ok?r.json():[]),
-      apiFetch(`${API}/pedidos?vendedor=${SESSION.codigousuario}&limit=10&offset=0&db=sw`).then(r=>r.ok?r.json():[])
+      apiFetch(`${API}/pedidos?vendedor=${SESSION.codigousuario}&limit=20&offset=0&db=oficial`).then(r=>r.ok?r.json():[]),
+      apiFetch(`${API}/pedidos?vendedor=${SESSION.codigousuario}&limit=20&offset=0&db=sw`).then(r=>r.ok?r.json():[])
     ]);
-    // Fusionar y ordenar por fecha desc, max 10
+    // Fusionar y ordenar por fecha desc, max 20
     const all=[...rowsOf.map(r=>({...r,_db:'oficial'})),...rowsSw.map(r=>({...r,_db:'sw'}))];
     all.sort((a,b)=>String(b.fecha||'').localeCompare(String(a.fecha||'')));
-    const rows=all.slice(0,10);
+    const rows=all.slice(0,20);
     pedidosCache=rows;
     const sel=document.getElementById('ped-select');
     sel.innerHTML='<option value="">— Seleccioná un pedido —</option>';
@@ -1585,8 +1765,13 @@ async function loadPedidos(){
       const nombre=(r.razonsocial||r.cod_cliente||'').replace(/'/g,"\\'");
       const div=document.createElement('div');
       div.className='mob-card';
-      div.innerHTML=`<div class="mob-card-top"><span class="mob-card-num">${estado} #${r.numero}</span><span class="mob-card-total">$${tot.toLocaleString('es-AR',{minimumFractionDigits:2})}</span></div><div class="mob-card-sub">${fecha} · ${r.razonsocial||r.cod_cliente||''}</div>`;
+      div.innerHTML=`<div class="mob-card-top"><span class="mob-card-num">${estado} #${r.numero}</span><span class="mob-card-total">$${tot.toLocaleString('es-AR',{minimumFractionDigits:2})}</span></div><div class="mob-card-sub">${fecha} · ${r.razonsocial||r.cod_cliente||''}</div><div class="mob-card-footer"><button class="mob-copy-btn">📋 Copiar</button></div>`;
       div.onclick=()=>verDetalle('pedidos',r.numero,r.razonsocial||r.cod_cliente||'',r._db);
+      div.querySelector('.mob-copy-btn').addEventListener('click',(e)=>{
+        e.stopPropagation();
+        if(SESSION&&SESSION.admin_perfil) _abrirPopupCopiaAdmin('pedidos',r.numero,r._db);
+        else copiarNV('pedidos',r.numero,r._db);
+      });
       mob.appendChild(div);
     });
     if(!rows.length) mob.innerHTML='<div class="loader">Sin pedidos recientes</div>';
@@ -1595,7 +1780,7 @@ async function loadPedidos(){
 
 async function loadPresupuestos(){
   try{
-    const rows=await(await apiFetch(`${API}/presupuestos?vendedor=${SESSION.codigousuario}&limit=10&offset=0`)).json();
+    const rows=await(await apiFetch(`${API}/presupuestos?vendedor=${SESSION.codigousuario}&limit=20&offset=0`)).json();
     const sel=document.getElementById('pre-select');
     sel.innerHTML='<option value="">— Seleccioná un presupuesto —</option>';
     const mob=document.getElementById('pre-lista-mobile');
@@ -1611,8 +1796,13 @@ async function loadPresupuestos(){
       // card mobile
       const div=document.createElement('div');
       div.className='mob-card';
-      div.innerHTML=`<div class="mob-card-top"><span class="mob-card-num">📄 #${r.numero}</span><span class="mob-card-total">$${tot.toLocaleString('es-AR',{minimumFractionDigits:2})}</span></div><div class="mob-card-sub">${fecha} · ${r.razonsocial||r.cod_cliente||''}</div>`;
+      div.innerHTML=`<div class="mob-card-top"><span class="mob-card-num">📄 #${r.numero}</span><span class="mob-card-total">$${tot.toLocaleString('es-AR',{minimumFractionDigits:2})}</span></div><div class="mob-card-sub">${fecha} · ${r.razonsocial||r.cod_cliente||''}</div><div class="mob-card-footer"><button class="mob-copy-btn">📋 Copiar</button></div>`;
       div.onclick=()=>verDetalle('presupuestos',r.numero,r.razonsocial||r.cod_cliente||'','oficial');
+      div.querySelector('.mob-copy-btn').addEventListener('click',(e)=>{
+        e.stopPropagation();
+        if(SESSION&&SESSION.admin_perfil) _abrirPopupCopiaAdmin('presupuestos',r.numero,'oficial');
+        else copiarNV('presupuestos',r.numero,'oficial');
+      });
       mob.appendChild(div);
     });
     if(!rows.length) mob.innerHTML='<div class="loader">Sin presupuestos recientes</div>';
@@ -1621,13 +1811,22 @@ async function loadPresupuestos(){
 
 // ── PDF viewer ────────────────────────────────────────────────────────────────
 function _verPdf(url){
-  if(window.AndroidBridge){
-    const tok=SESSION&&SESSION.token||'';
-    window.AndroidBridge.openPdf(url,tok,'documento.pdf');
-    return;
-  }
   const tok=SESSION&&SESSION.token||'';
   const headers=tok?{'Authorization':'Bearer '+tok}:{};
+  if(window.AndroidBridge){
+    fetch(url,{headers})
+      .then(r=>{if(!r.ok)throw new Error('HTTP '+r.status);return r.blob();})
+      .then(blob=>{
+        const reader=new FileReader();
+        reader.onloadend=function(){
+          const b64=reader.result.split(',')[1];
+          window.AndroidBridge.saveFileBase64(b64,'documento.pdf','application/pdf');
+        };
+        reader.readAsDataURL(blob);
+      })
+      .catch(e=>window.AndroidBridge.saveError(e.message+' - documento.pdf'));
+    return;
+  }
   fetch(url,{headers})
     .then(r=>{if(!r.ok)throw new Error('Error '+r.status);return r.blob();})
     .then(blob=>{
@@ -1796,6 +1995,7 @@ function _qvRenderPage(p){
 function toggleBtnPdf(){
   const val=document.getElementById('pre-select').value;
   document.getElementById('btn-pre-pdf').style.display=val?'inline-flex':'none';
+  document.getElementById('btn-pre-copia').style.display=val?'inline-flex':'none';
 }
 function abrirPdfPresupuesto(){
   const num=document.getElementById('pre-select').value;
@@ -1804,6 +2004,7 @@ function abrirPdfPresupuesto(){
 function toggleBtnPedidoPdf(){
   const val=document.getElementById('ped-select').value;
   document.getElementById('btn-ped-pdf').style.display=val?'inline-flex':'none';
+  document.getElementById('btn-ped-copia').style.display=val?'inline-flex':'none';
 }
 function abrirPdfPedido(){
   const sel=document.getElementById('ped-select');
@@ -1841,16 +2042,129 @@ function renderComprobantes(id,rows,tipo){
 }
 
 let _detPdfUrl='';
+let _detCtx={tipo:'',numero:'',db:'oficial'}; // contexto para copiar desde detalle
 function verDetallePdf(){ if(_detPdfUrl) _verPdf(_detPdfUrl); }
+
+// ── Variables para copia ──────────────────────────────────────────────────────
+let nvVendedorOverride     = null;   // {codigo, nombre} — seteado por popup admin
+let nvClienteOverride      = null;   // cliente elegido en popup admin
+let _nvVendedorCopiaAdmin  = null;   // se aplica al guardar
+
+function copiarDesdeDetalle(){
+  if(!_detCtx.numero) return;
+  if(SESSION && SESSION.admin_perfil){
+    _abrirPopupCopiaAdmin(_detCtx.tipo, _detCtx.numero, _detCtx.db);
+  } else {
+    copiarNV(_detCtx.tipo, _detCtx.numero, _detCtx.db);
+  }
+}
+function copiarDesdeSelect(tipo){
+  const sel=document.getElementById(tipo==='pedidos'?'ped-select':'pre-select');
+  const num=sel.value; if(!num) return;
+  const db=sel.options[sel.selectedIndex]?.dataset?.db||'oficial';
+  if(SESSION && SESSION.admin_perfil){
+    _abrirPopupCopiaAdmin(tipo, num, db);
+  } else {
+    copiarNV(tipo, num, db);
+  }
+}
+
+// ── Popup de copia admin ──────────────────────────────────────────────────────
+let _caCtx = {tipo:'', numero:'', db:'oficial'};
+let _caCliSel = null; // cliente seleccionado en popup admin
+let _caVendDebTimer = null;
+
+async function _abrirPopupCopiaAdmin(tipo, numero, db){
+  _caCtx = {tipo, numero, db};
+  _caCliSel = null;
+  nvVendedorOverride = null;
+  nvClienteOverride  = null;
+  const tipoLabel = tipo==='pedidos'?'Pedido':'Presupuesto';
+  document.getElementById('ov-copia-admin-title').textContent = 'Copiar '+tipoLabel+' #'+numero;
+  document.getElementById('ca-cli-input').value = '';
+  document.getElementById('ca-cli-lista').style.display = 'none';
+  document.getElementById('ca-cli-sel').style.display = 'none';
+  // Cargar vendedores en el select
+  const selV = document.getElementById('ca-vend-sel');
+  selV.innerHTML = '<option value="">— Cargando... —</option>';
+  try{
+    const r = await apiFetch(`${API}/vendedores-lista`);
+    if(r.ok){
+      const vends = await r.json();
+      selV.innerHTML = vends.map(v=>`<option value="${v.codigo}"${v.codigo===SESSION.codigousuario?' selected':''}>${v.nombre} (${v.codigo})</option>`).join('');
+      // Default: vendedor actual
+      nvVendedorOverride = {codigo: SESSION.codigousuario, nombre: SESSION.razonsocial};
+    } else {
+      selV.innerHTML = `<option value="${SESSION.codigousuario}">${SESSION.razonsocial}</option>`;
+      nvVendedorOverride = {codigo: SESSION.codigousuario, nombre: SESSION.razonsocial};
+    }
+  }catch(_){
+    selV.innerHTML = `<option value="${SESSION.codigousuario}">${SESSION.razonsocial}</option>`;
+    nvVendedorOverride = {codigo: SESSION.codigousuario, nombre: SESSION.razonsocial};
+  }
+  closeOv('ov-detalle');
+  openOv('ov-copia-admin');
+}
+
+function caCambiarVendedor(){
+  const sel = document.getElementById('ca-vend-sel');
+  const cod = sel.value;
+  const nombre = sel.options[sel.selectedIndex]?.textContent || cod;
+  nvVendedorOverride = cod ? {codigo: cod, nombre} : null;
+  // Limpiar selección de cliente al cambiar vendedor
+  _caCliSel = null;
+  document.getElementById('ca-cli-input').value = '';
+  document.getElementById('ca-cli-lista').style.display = 'none';
+  document.getElementById('ca-cli-sel').style.display = 'none';
+}
+
+let _caCliDebTimer = null;
+function caFiltrarClientes(){
+  clearTimeout(_caCliDebTimer);
+  _caCliDebTimer = setTimeout(async()=>{
+    const q = document.getElementById('ca-cli-input').value.trim();
+    const lista = document.getElementById('ca-cli-lista');
+    if(q.length < 2){ lista.style.display='none'; return; }
+    try{
+      const r = await apiFetch(`${API}/clientes?buscar=${encodeURIComponent(q)}&limit=12`);
+      const data = r.ok ? await r.json() : [];
+      if(!data.length){ lista.style.display='none'; return; }
+      lista.innerHTML = data.map(c=>`<div class="autocomplete-item" onclick="caSelCliente(${JSON.stringify(c).replace(/"/g,'&quot;')})">${c.razonsocial} <small style="color:#9ca3af">${c.codigoparticular||c.codigo}</small></div>`).join('');
+      lista.style.display='block';
+    }catch(_){ lista.style.display='none'; }
+  }, 280);
+}
+
+function caSelCliente(c){
+  _caCliSel = c;
+  document.getElementById('ca-cli-input').value = c.razonsocial;
+  document.getElementById('ca-cli-lista').style.display='none';
+  const sel = document.getElementById('ca-cli-sel');
+  sel.textContent = '✓ '+c.razonsocial+' ('+(c.codigoparticular||c.codigo)+')';
+  sel.style.display = 'block';
+}
+
+async function caConfirmar(){
+  const vend = nvVendedorOverride;
+  if(!vend || !vend.codigo){ alert('Seleccioná un vendedor'); return; }
+  nvClienteOverride = _caCliSel || null;
+  closeOv('ov-copia-admin');
+  // Leer desde DB origen (_caCtx.db), guardar en DB destino del admin (_adminDefaultDb)
+  await copiarNV(_caCtx.tipo, _caCtx.numero, _caCtx.db, _adminDefaultDb || _caCtx.db);
+  // Después de cargar el form, forzar el codigousuario del vendedor elegido
+  _nvVendedorCopiaAdmin = vend;
+}
 
 async function verDetalle(tipo,numero,nombre,db='oficial'){
   document.getElementById('det-title').textContent=(tipo==='pedidos'?'Pedido':'Presupuesto')+' #'+numero;
   document.getElementById('det-body').innerHTML='<div class="loader">Cargando...</div>';
-  // configurar botón PDF
+  // configurar botón PDF y contexto copia
   _detPdfUrl = tipo==='pedidos'
     ? `${API}/pedidos/${numero}/pdf?db=${db}`
     : `${API}/presupuestos/${numero}/pdf`;
+  _detCtx = {tipo, numero, db};
   document.getElementById('det-pdf-btn').style.display='inline-block';
+  document.getElementById('det-copy-btn').style.display='inline-block';
   openOv('ov-detalle');
   try{
     const dbParam=(tipo==='pedidos'&&db==='sw')?'?db=sw':'';
@@ -1875,6 +2189,161 @@ async function verDetalle(tipo,numero,nombre,db='oficial'){
   }catch(e){document.getElementById('det-body').innerHTML='<div class="loader" style="color:var(--red)">Error</div>'}
 }
 
+// ── Copiar Pedido / Presupuesto ───────────────────────────────────────────────
+async function copiarNV(tipo, numero, db='oficial', targetDb=null){
+  const tipoLabel = tipo==='pedidos'?'pedido':'presupuesto';
+  try{
+    const endpoint = tipo==='pedidos'
+      ? `${API}/pedidos/${numero}/copia-datos?db=${db}`
+      : `${API}/presupuestos/${numero}/copia-datos`;
+    // Fetch datos del pedido/presupuesto y datos del cliente en paralelo
+    const [rDatos] = await Promise.all([apiFetch(endpoint)]);
+    if(!rDatos.ok){
+      let _errDetail='';
+      try{ const _e=await rDatos.json(); _errDetail=_e.detail||JSON.stringify(_e); }catch(_){}
+      alert('Error al copiar '+tipoLabel+' (HTTP '+rDatos.status+'): '+_errDetail);
+      return;
+    }
+    const datos = await rDatos.json();
+    console.log('[copiarNV] datos recibidos:', JSON.stringify({codigomultiplazo:datos.codigomultiplazo, codigodeposito:datos.codigodeposito, codigocliente:datos.codigocliente, items:datos.items?.length}));
+    // Cerrar overlay de detalle si está abierto
+    closeOv('ov-detalle');
+    // Abrir formulario vacío (resetea nvItems, nvMultiplazo, nvDeposito, etc.)
+    await openNuevo(tipo==='pedidos'?'pedido':'presupuesto', targetDb||db);
+    // ── 1. Setear estado global ANTES de renderNuevoForm para que poblarSelectsForm use nvMultiplazo ──
+    nvDeposito = datos.codigodeposito || '001';
+    nvTransporte = datos.codigotransporte || '0';
+    nvDireccionEntrega = datos.domicilio_entrega || null;
+    nvMultiplazo = datos.codigomultiplazo || null;
+    nvItems = datos.items.map(it=>({
+      codigo: it.codigo, codDisplay: it.codigo,
+      descripcion: it.descripcion, cantidad: it.cantidad,
+      precio: it.precio_unitario, precio_base: it.precio_unitario,
+      descuento: it.descuento, dto_max: null, iva: it.iva,
+      rem001:null,rem002:null,rem003:null,rem005:null,rem013:null,rem016:null,
+      reserva_elegida:null, _es_preventa:false
+    }));
+    if(!nvItems.length) nvItems=[{codigo:'',codDisplay:'',descripcion:'',cantidad:1,precio:0,precio_base:0,descuento:0,dto_max:null,iva:21,rem001:null,rem002:null,rem003:null,rem005:null,rem013:null,rem016:null,reserva_elegida:null}];
+    // ── 2. Re-renderizar con los valores ya seteados (deposito, multiplazo, items) ──
+    renderNuevoForm(); // poblarSelectsForm() selecciona nvMultiplazo; nv-deposito usa nvDeposito
+    // ── 3. Pre-cargar cliente y seleccionarlo DESPUÉS del render ──
+    // Si admin eligió un cliente diferente, usarlo en lugar del original
+    const codigoCliTarget = nvClienteOverride ? nvClienteOverride.codigo : datos.codigocliente;
+    const razonCliTarget  = nvClienteOverride ? nvClienteOverride.razonsocial : datos.razonsocial;
+    nvClienteOverride = null; // consumir
+    if(codigoCliTarget){
+      // reuse same block — alias
+      datos.codigocliente = codigoCliTarget;
+      datos.razonsocial   = razonCliTarget;
+    }
+    if(datos.codigocliente){
+      const [rBasico, rCredito] = await Promise.all([
+        apiFetch(`${API}/clientes/${encodeURIComponent(datos.codigocliente)}`).catch(()=>null),
+        apiFetch(`${API}/clientes/${encodeURIComponent(datos.codigocliente)}/credito`).catch(()=>null)
+      ]);
+      const dBasico = (rBasico&&rBasico.ok) ? await rBasico.json() : {};
+      const dCredito = (rCredito&&rCredito.ok) ? await rCredito.json() : {};
+      _nvCliCache[datos.codigocliente] = {
+        codigo: datos.codigocliente,
+        razonsocial: dBasico.razonsocial || datos.razonsocial || datos.codigocliente,
+        codigoparticular: datos.codigocliente,
+        discrimina_iva: true,
+        reparto_propio: false,
+        codigomultiplazo: dCredito.codigomultiplazo || datos.codigomultiplazo || '0',
+        multiplazofijo: 0, // forzar 0 para que NO sobreescriba el multiplazo del pedido copiado
+        comentarios: dBasico.comentarios || ''
+      };
+      seleccionarClienteNuevo(datos.codigocliente);
+      // Re-aplicar multiplazo y depósito (seleccionarClienteNuevo y crédito async pueden sobreescribirlos)
+      setTimeout(()=>{
+        // Multiplazo
+        if(datos.codigomultiplazo && datos.codigomultiplazo!=='0'){
+          nvMultiplazo = datos.codigomultiplazo;
+          const selM=document.getElementById('nv-multiplazo');
+          if(selM){
+            selM.disabled=false; selM.style.opacity=''; selM.title='';
+            let opt=[...selM.options].find(o=>o.value===nvMultiplazo);
+            if(!opt){
+              // El multiplazo no está en la lista del vendedor — buscarlo en MULTIPLAZOS_ALL y agregarlo
+              const mp=(MULTIPLAZOS_ALL||[]).find(m=>m.codigo===nvMultiplazo)||(MULTIPLAZOS||[]).find(m=>m.codigo===nvMultiplazo);
+              const o=document.createElement('option');
+              o.value=nvMultiplazo; o.textContent=mp?mp.descripcion:nvMultiplazo;
+              selM.appendChild(o); opt=o;
+            }
+            selM.value=nvMultiplazo;
+          }
+        }
+        // Depósito
+        const selDep=document.getElementById('nv-deposito');
+        if(selDep && nvDeposito){
+          const optDep=[...selDep.options].find(o=>o.value===nvDeposito);
+          if(optDep) selDep.value=nvDeposito;
+        }
+      }, 800);
+    }
+    // ── 4. Mostrar domicilio de entrega ──
+    if(nvDireccionEntrega){
+      const wrap=document.getElementById('nv-domicilio-wrap');
+      const txt=document.getElementById('nv-domicilio-texto');
+      if(wrap) wrap.style.display='block';
+      if(txt){ txt.textContent=nvDireccionEntrega; txt.style.display='block'; }
+    }
+    // ── 5. Cargar stock en background — batch si hay varios ítems ──
+    const _codIdxMap = {};
+    const _batchCods = [];
+    nvItems.forEach((it,idx)=>{
+      if(!it.codigo) return;
+      _codIdxMap[it.codigo] = _codIdxMap[it.codigo] ?? [];
+      _codIdxMap[it.codigo].push(idx);
+      _batchCods.push(it.codigo);
+    });
+    if(_batchCods.length){
+      const _unique = [...new Set(_batchCods)];
+      if(_unique.length === 1){
+        // Un solo artículo: endpoint individual
+        apiFetch(`${API}/stock/${encodeURIComponent(_unique[0])}`).then(rs=>rs.ok?rs.json():null).then(d=>{
+          if(!d) return;
+          (_codIdxMap[_unique[0]]||[]).forEach(idx=>{
+            nvItems[idx].rem001=d.remanente_001??null; nvItems[idx].rem002=d.remanente_002??null;
+            nvItems[idx].rem003=d.remanente_003??null; nvItems[idx].rem005=d.remanente_005??null;
+            nvItems[idx].rem013=d.remanente_013??null; nvItems[idx].rem016=d.remanente_016??null;
+            nvItems[idx].dto_max=d.dto_max??null; nvItems[idx].marca=d.marca||'';
+            nvItems[idx].permite_stock_negativo=d.permite_stock_negativo??false;
+            if(d.descripcion) nvItems[idx].descripcion=d.descripcion;
+            if(typeof validarStockItem==='function') validarStockItem(idx);
+            const _dI=document.getElementById('nv-desc-'+idx);
+            if(_dI && nvItems[idx].descripcion) _dI.value=nvItems[idx].descripcion;
+          });
+          renderItems();
+        }).catch(()=>{});
+      } else {
+        // Múltiples artículos: endpoint batch (1 sola llamada)
+        apiFetch(`${API}/stock/batch?codigos=${_unique.map(encodeURIComponent).join(',')}`).then(rs=>rs.ok?rs.json():null).then(arr=>{
+          if(!arr) return;
+          arr.forEach(d=>{
+            const inputCod = d._input_cod || d.codigoparticular || String(d.codigo||'');
+            (_codIdxMap[inputCod]||[]).forEach(idx=>{
+              nvItems[idx].rem001=d.remanente_001??null; nvItems[idx].rem002=d.remanente_002??null;
+              nvItems[idx].rem003=d.remanente_003??null; nvItems[idx].rem005=d.remanente_005??null;
+              nvItems[idx].rem013=d.remanente_013??null; nvItems[idx].rem016=d.remanente_016??null;
+              nvItems[idx].dto_max=d.dto_max??null; nvItems[idx].marca=d.marca||'';
+              nvItems[idx].permite_stock_negativo=d.permite_stock_negativo??false;
+              if(d.descripcion) nvItems[idx].descripcion=d.descripcion;
+              if(typeof validarStockItem==='function') validarStockItem(idx);
+              const _dI=document.getElementById('nv-desc-'+idx);
+              if(_dI && nvItems[idx].descripcion) _dI.value=nvItems[idx].descripcion;
+            });
+          });
+          renderItems();
+        }).catch(()=>{});
+      }
+    }
+  }catch(e){
+    console.error('[copiarNV] error:', e);
+    alert('Error al copiar el '+tipoLabel+': '+e.message);
+  }
+}
+
 // ── Nuevo Pedido / Presupuesto ────────────────────────────────────────────────
 let nvTipo='pedido';
 let nvItems=[];
@@ -1883,12 +2352,13 @@ let nvDB='oficial'; // 'oficial' | 'sw'
 let nvMultiplazo=null,nvTransporte='0',nvSucursales=[],nvDireccionEntrega=null,nvDeposito='001';
 let _nvCliCache={}; // cache codigo→datos completos del cliente
 let _nvReservasActivas=[]; // reservas activas cargadas al abrir form (modo admin)
+let _nvPreventaActiva=false; // true cuando al menos 1 artículo del pedido tiene preventa activa
 const NV_ADMIN_RESERVA_PERFILES=['ADV','ADVJUAN','GERENTES','GTES FE'];
 
 function _nvEsAdminReservas(){
   return !!(SESSION && NV_ADMIN_RESERVA_PERFILES.includes((SESSION.admin_perfil||'').trim().toUpperCase()));
 }
-const _NV_DEPOSITOS_ADMIN = [
+let _NV_DEPOSITOS_ADMIN = [
   {value:'001', label:'001 - DEPOSITO VAC-LOG',    short:'VAC-LOG'},
   {value:'002', label:'002 - DEPOSITO MARKET PLACE', short:'MARKET P.'},
   {value:'003', label:'003 - DEPOSITO PACHECO',    short:'PACHECO'},
@@ -1896,6 +2366,20 @@ const _NV_DEPOSITOS_ADMIN = [
   {value:'013', label:'013 - DEPOSITO FULL ML',    short:'FULL ML'},
   {value:'016', label:'016 - DEPOSITO EXPO',       short:'EXPO'},
 ];
+async function _loadDepositosAdmin(){
+  try{
+    const r = await apiFetch(`${API}/depositos`);
+    if(!r.ok) return;
+    const deps = await r.json();
+    if(!Array.isArray(deps)||!deps.length) return;
+    _NV_DEPOSITOS_ADMIN = deps.map(d=>{
+      const cod = d.codigo;
+      const nombre = (d.nombre||'').replace(/^DEPOSITO\s*/i,'').trim();
+      const short = nombre.length>10 ? nombre.substring(0,9)+'.' : (nombre||cod);
+      return {value:cod, label:`${cod} - ${d.nombre||cod}`, short};
+    });
+  }catch(_){}
+}
 function _nvRemForDep(it, dep){
   const k='rem'+dep; return (it[k]!==undefined&&it[k]!==null)?it[k]:null;
 }
@@ -1937,6 +2421,8 @@ async function openNuevo(tipo, forceDB=null){
   }catch(_){}
   nvClienteSeleccionado=null;
   nvMultiplazo=null; nvTransporte='0'; nvSucursales=[]; nvDireccionEntrega=null; nvDeposito=(FLAGS.deposito_exclusivo||'001').split(',')[0]; nvDescuentoGeneral=0; window._finMontoAplicado=false; window._ofertaActivaTipo=null; window._promoComboDescuento=0; window._promoComboNombre=''; window._promoComboEscalones=[];
+  _nvPreventaActiva=false;
+  _nvVendedorCopiaAdmin=null; // resetear override de vendedor al abrir nuevo doc
   // Refrescar ofertas activas en cada apertura para garantizar datos vigentes sin necesidad de F5
   _lastOfertasRefresh = Date.now();
   if(SESSION?.codigousuario) await cargarOfertas(SESSION.codigousuario).catch(()=>{});
@@ -1980,11 +2466,37 @@ function setNvDB(db){
   actualizarProximoNum(db);
 }
 
+function _nvCopiarDesdeSelect(){
+  const sel=document.getElementById('nv-copia-sel');
+  const num=sel&&sel.value; if(!num) return;
+  const db=(sel.options[sel.selectedIndex]?.dataset?.db)||'oficial';
+  const tipo=nvTipo==='pedido'?'pedidos':'presupuestos';
+  if(SESSION&&SESSION.admin_perfil) _abrirPopupCopiaAdmin(tipo,num,db);
+  else copiarNV(tipo,num,db);
+}
 function renderNuevoForm(){
   const _esAdminForm=!!(SESSION&&SESSION.admin_perfil);
   const _showL1=nvTipo!=='pedido'||FLAGS.pedidos!==false||_esAdminForm;
   const _showSW=nvTipo==='pedido'&&(FLAGS.pedidos_sw!==false||_esAdminForm);
+  // Opciones de docs recientes para el picker "Copiar desde existente"
+  const _srcSel=document.getElementById(nvTipo==='pedido'?'ped-select':'pre-select');
+  const _srcOpts=Array.from(_srcSel?.options||[]).filter(o=>o.value);
+  const _tipoLbl=nvTipo==='pedido'?'pedido':'presupuesto';
+  const _copiaPanel=_srcOpts.length?`
+    <details style="margin-bottom:.75rem;background:#f0fdf4;border:1.5px solid #86efac;border-radius:8px;padding:.6rem .9rem" open>
+      <summary style="cursor:pointer;font-weight:700;font-size:.88rem;color:#166534;list-style:none;display:flex;align-items:center;gap:.4rem">
+        📋 Copiar desde un ${_tipoLbl} existente
+      </summary>
+      <div style="margin-top:.6rem;display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">
+        <select id="nv-copia-sel" style="flex:1;min-width:0;border:1px solid #86efac;border-radius:6px;padding:6px 8px;font-size:.8rem;background:#fff">
+          <option value="">— Seleccioná un ${_tipoLbl} —</option>
+          ${_srcOpts.map(o=>`<option value="${o.value}" data-db="${o.dataset?.db||'oficial'}">${o.textContent}</option>`).join('')}
+        </select>
+        <button class="btn btn-sm" style="background:#16a34a;color:#fff;white-space:nowrap" onclick="_nvCopiarDesdeSelect()">📋 Copiar</button>
+      </div>
+    </details>`:'';
   document.getElementById('nv-body').innerHTML=`
+    ${_copiaPanel}
     <div style="background:#fff3cd;border:1px solid #ffc107;border-radius:6px;padding:.65rem 1rem;margin-bottom:.75rem;font-size:.85rem;color:#856404;font-weight:600">
       ⚠️ ${nvTipo==='pedido'?'Pedido':'Presupuesto'} sujeto a confirmación por Administración de Ventas
     </div>
@@ -2029,7 +2541,13 @@ function renderNuevoForm(){
         <div style="width:100%">
           <label class="lbl">Depósito</label>
           ${(()=>{
-            if(!FLAGS.deposito_exclusivo) {
+            const _depConf = FLAGS && 'deposito_exclusivo' in FLAGS;
+            if(_depConf && !FLAGS.deposito_exclusivo){
+              // Configurado pero sin depósitos habilitados
+              return `<div style="padding:.45rem .6rem;background:#fee2e2;border:1px solid #fca5a5;border-radius:6px;font-size:.85rem;color:#dc2626">⚠️ Sin depósitos habilitados. Contactá al administrador.</div>`;
+            }
+            if(!_depConf || !FLAGS.deposito_exclusivo) {
+              // Sin configuración → opciones por defecto
               const _opts = SESSION&&SESSION.admin_perfil ? _NV_DEPOSITOS_ADMIN : [_NV_DEPOSITOS_ADMIN[0],_NV_DEPOSITOS_ADMIN[2]];
               return `<select id="nv-deposito" onchange="nvDeposito=this.value;renderItems()" style="width:100%;max-width:100%;box-sizing:border-box">${_opts.map(d=>`<option value="${d.value}"${nvDeposito===d.value?' selected':''}>${d.label}</option>`).join('')}</select>`;
             }
@@ -2059,7 +2577,7 @@ function renderNuevoForm(){
     <div id="nv-total" style="text-align:right;font-weight:700;font-size:1rem;margin-bottom:1rem"></div>
     <div style="display:flex;gap:.5rem;justify-content:flex-end">
       <button class="btn btn-outline" onclick="closeOv('ov-nuevo')">Cancelar</button>
-      <button class="btn btn-primary" onclick="guardarDoc()">💾 Guardar ${nvTipo==='pedido'?'Pedido':'Presupuesto'}</button>
+      <button id="nv-btn-guardar" class="btn btn-primary" onclick="guardarDoc()">💾 Guardar ${nvTipo==='pedido'?'Pedido':'Presupuesto'}</button>
     </div>
     <div id="nv-err" style="color:var(--red);font-size:.85rem;margin-top:.5rem;display:none"></div>
   `;
@@ -2141,6 +2659,7 @@ function seleccionarClienteNuevo(codigo){
       nvMultiplazo=codigoMulti;
       // Esperar a que las opciones estén cargadas antes de asignar
       const applyMulti=()=>{
+        if(_nvPreventaActiva) return; // No sobreescribir lock PREVENTA
         if([...selM.options].some(o=>o.value===codigoMulti)){
           selM.value=codigoMulti;
         }
@@ -2208,8 +2727,9 @@ function seleccionarClienteNuevo(codigo){
       if(parseInt(d.multiplazofijo||0)===1 && d.codigomultiplazo && d.codigomultiplazo!=='0'){
         const selM=document.getElementById('nv-multiplazo');
         if(selM){
-          nvMultiplazo=d.codigomultiplazo;
+          if(!_nvPreventaActiva) nvMultiplazo=d.codigomultiplazo; // No sobreescribir lock PREVENTA
           const applyLock=()=>{
+            if(_nvPreventaActiva) return; // No sobreescribir lock PREVENTA
             if([...selM.options].some(o=>o.value===d.codigomultiplazo))
               selM.value=d.codigomultiplazo;
             selM.disabled=true;
@@ -2315,10 +2835,40 @@ function validarStockItem(i){
   // sumar su cantConsumir al stock disponible para esta línea
   const cantReserva=it.reserva_elegida ? (it.reserva_elegida.cantConsumir||0) : 0;
   const remEfectivo=rem+cantReserva;
-  if(remEfectivo<=0){
+  if(remEfectivo<=0 && !it.permite_stock_negativo){
     mostrarAlertaStock(`Imposible Cargar artículo: ${it.codDisplay||it.codigo} ${it.descripcion} - del Depósito seleccionado`);
-  } else if(it.cantidad>remEfectivo){
+  } else if(it.cantidad>remEfectivo && !it.permite_stock_negativo){
     mostrarAlertaStock('Verifique la cantidad seleccionada - es mayor que el Stock Remanente del Depósito Seleccionado');
+  }
+}
+
+function _actualizarBotonGuardar(){
+  const btn = document.getElementById('nv-btn-guardar');
+  if(!btn) return;
+  // Siempre: deshabilitar si no hay ningún artículo válido cargado
+  const itemsValidos = nvItems.filter(it => it.codigo && it.descripcion && it.cantidad > 0 && it.precio >= 0);
+  if(!itemsValidos.length){
+    btn.disabled = true; btn.style.opacity = '0.5'; btn.title = 'Agregá al menos un artículo';
+    return;
+  }
+  // Para admins: solo verificar que haya ítems (sin restricción de stock)
+  if(esAdminActuando()) { btn.disabled=false; btn.style.opacity=''; btn.title=''; return; }
+  // Para VENDEDORES: bloquear si algún ítem válido tiene remanente 0 en el depósito actual
+  // (excepto artículos que permiten stock negativo en Flexxus)
+  const itemSinStock = itemsValidos.find(it => {
+    if(it.permite_stock_negativo) return false;
+    const remAj = _nvGetRemAjustado(it.codigo, it);
+    const rem = remAj['rem'+nvDeposito]??null;
+    return rem !== null && rem <= 0;
+  });
+  if(itemSinStock){
+    btn.disabled = true;
+    btn.style.opacity = '0.5';
+    btn.title = `Sin stock en depósito seleccionado: ${itemSinStock.codDisplay||itemSinStock.codigo}`;
+  } else {
+    btn.disabled = false;
+    btn.style.opacity = '';
+    btn.title = '';
   }
 }
 
@@ -2360,7 +2910,7 @@ function renderItems(){
         <div style="display:flex;gap:.35rem;align-items:center;margin-bottom:.35rem">
           <input value="${it.codDisplay||it.codigo}"
             onchange="nvItems[${i}].codigo=this.value;nvItems[${i}].codDisplay=this.value;autocompletarArticulo(${i})"
-            style="width:64px;font-size:.82rem;flex-shrink:0" placeholder="Cód.">
+            style="width:82px;font-size:.8rem;flex-shrink:0;letter-spacing:.01em;font-weight:600" placeholder="Cód.">
           <div style="position:relative;flex:1">
             <input id="nv-desc-${i}" class="nv-desc-input"
               value="${it.descripcion.replace(/"/g,'&quot;')}"
@@ -2391,12 +2941,12 @@ function renderItems(){
             return `<div style="font-size:.65rem;color:#065f46;background:#dcfce7;border:1px solid #86efac;border-radius:3px;padding:1px 6px;margin-top:3px;display:inline-block">🏷️ ${it._fin_bonif_nombre||'Bonif. financiera'} — ${it._fin_bonif_pcts||it._fin_bonif_pct+'%'} (neto: ${it._fin_bonif_pct}%)</div>`;
           const _mc=it.codDisplay||it.codigo||'';
           let out='';
-          // Botón promo por producto
+          // Botón promo por producto (solo mostrar cuando el stock ya cargó)
           const _mp=_ofertasParaArticulo(_mc);
-          if(_mp.length&&!it._promo_readonly&&!it._from_presupuesto&&!_hayOfertaActivaOtroTipo('producto'))
+          if(_mp.length&&!it._promo_readonly&&!it._from_presupuesto&&!_hayOfertaActivaOtroTipo('producto')&&remText!=='—')
             out+=`<button onclick="_checkOfertasProducto(${i},'${_mc}')" style="background:#2563eb;color:#fff;border:none;border-radius:4px;padding:2px 8px;font-size:.65rem;cursor:pointer;margin-top:3px;margin-right:4px">🏷️ Promo disponible</button>`;
           // Ícono oferta financiera por marca (no mostrar si el artículo tiene promo de producto activa)
-          if(!_mp.length&&!window._finMontoAplicado&&!it._promo_readonly&&!it._from_presupuesto&&!_hayOfertaActivaOtroTipo('bonificacion_linea')&&!it._fin_bonif_oferta){
+          if(!_mp.length&&!window._finMontoAplicado&&!it._promo_readonly&&!it._from_presupuesto&&!_hayOfertaActivaOtroTipo('bonificacion_linea')&&!it._fin_bonif_oferta&&remText!=='—'){
             const _of=_ofertaFinancieraParaArticulo(it);
             if(_of){
               const _pcts=(_of.financial_details||[]).map(d=>d.porcentaje+'%').join('+');
@@ -2445,7 +2995,7 @@ function renderItems(){
             : `<input type="number" value="${it.cantidad}" min="0.001" step="any" onchange="nvItems[${i}].cantidad=+this.value;validarStockItem(${i});renderItems()" style="width:48px;font-size:.8rem">`
           }
           ${(()=>{
-            if(it._promo_readonly || it._oferta_aplicada || it._from_presupuesto || it._fin_bonif_oferta || _hayOfertaActivaOtroTipo('producto')) return '';
+            if(it._promo_readonly || it._oferta_aplicada || it._from_presupuesto || it._fin_bonif_oferta || _hayOfertaActivaOtroTipo('producto') || remText === '—') return '';
             const _cod = it.codDisplay||it.codigo||'';
             const _ps = _ofertasParaArticulo(_cod);
             // Ícono de oferta por producto
@@ -2502,10 +3052,11 @@ function renderItems(){
   }
   wrap.innerHTML=html;
   recalcTotal();
+  _actualizarBotonGuardar();
 }
 
 function addItem(){nvItems.push({codigo:'',codDisplay:'',descripcion:'',cantidad:1,precio:0,precio_base:0,descuento:0,dto_max:null,iva:21,rem001:null,rem002:null,rem003:null,rem005:null,rem013:null,rem016:null,reserva_elegida:null});renderItems()}
-function removeItem(i){if(nvItems.length===1){nvItems[0]={codigo:'',codDisplay:'',descripcion:'',cantidad:1,precio:0,precio_base:0,descuento:0,dto_max:null,iva:21,rem001:null,rem002:null,rem003:null,rem005:null,rem013:null,rem016:null,reserva_elegida:null,_oferta_aplicada:null,_fin_bonif_oferta:null,_fin_bonif_nombre:null,_fin_bonif_pcts:null,_fin_bonif_pct:0,_promo_readonly:false,_from_presupuesto:false};_limpiarOfertaActivaSiVacia(window._ofertaActivaTipo);renderItems();return;}nvItems.splice(i,1);_limpiarOfertaActivaSiVacia(window._ofertaActivaTipo);renderItems();}
+function removeItem(i){if(nvItems.length===1){nvItems[0]={codigo:'',codDisplay:'',descripcion:'',cantidad:1,precio:0,precio_base:0,descuento:0,dto_max:null,iva:21,rem001:null,rem002:null,rem003:null,rem005:null,rem013:null,rem016:null,reserva_elegida:null,_oferta_aplicada:null,_fin_bonif_oferta:null,_fin_bonif_nombre:null,_fin_bonif_pcts:null,_fin_bonif_pct:0,_promo_readonly:false,_from_presupuesto:false};_limpiarOfertaActivaSiVacia(window._ofertaActivaTipo);_refreshModoPreventa();renderItems();return;}nvItems.splice(i,1);_limpiarOfertaActivaSiVacia(window._ofertaActivaTipo);_refreshModoPreventa();renderItems();}
 
 // ── Modal de consumo de reserva ───────────────────────────────────────────────
 function openReservaConsumo(itemIdx){
@@ -2664,12 +3215,32 @@ async function autocompletarArticulo(i){
       nvItems[i].dto_max=d.dto_max??null;
       nvItems[i].marca=d.marca||'';
       nvItems[i].iva=parseFloat(d.iva)||21;
+      nvItems[i].permite_stock_negativo=d.permite_stock_negativo??false;
       nvItems[i].rem001=d.remanente_001??null;nvItems[i].rem002=d.remanente_002??null;
       nvItems[i].rem003=d.remanente_003??null;nvItems[i].rem005=d.remanente_005??null;nvItems[i].rem013=d.remanente_013??null;nvItems[i].rem016=d.remanente_016??null;
+      if(d.es_conjunto) _expandirConjunto(i, d.codigoparticular||d.codigo);
       validarStockItem(i);
       // Si ya hay una oferta de marca activa, evaluar el artículo recién cargado
       if(window._ofertaActivaTipo==='bonificacion_linea') evaluarOfertasFinancieras();
       renderItems(); actualizarDescuentoGeneral();
+      // ── PREVENTA LOCK SINCRÓNICO (entrada por código) ─────────────────────────
+      nvItems[i]._es_preventa = false;
+      nvItems[i].reserva_elegida = null;
+      const _codPrev = nvItems[i].codDisplay||nvItems[i].codigo||cod;
+      const _rvPrevA = (_nvReservasActivas||[]).find(rv =>
+        rv.es_preventa && rv.activo &&
+        [_codPrev, cod].some(c => c===rv.codigo_articulo || c===rv.codigo_particular)
+      );
+      if(_rvPrevA){
+        console.log('[PREVENTA SYNC cod] reserva encontrada:', _rvPrevA);
+        nvItems[i]._es_preventa = true;
+        const _cantD = parseFloat(_rvPrevA.cantidad||0) - parseFloat(_rvPrevA.cantidad_utilizada||0);
+        nvItems[i].reserva_elegida = {..._rvPrevA, cantConsumir: nvItems[i].cantidad||1, restante: _cantD};
+        _activarModoPreventa(_rvPrevA);
+        evaluarOfertasFinancieras();
+      }
+      _checkReservaArticulo(i, _codPrev);
+      // ─────────────────────────────────────────────────────────────────────────
       // Si no hay promo para este artículo y el caché de ofertas tiene >30s, refrescar.
       // Cubre el caso: form abierto ANTES de que el admin creara la promo.
       const _codFinal = nvItems[i].codDisplay||nvItems[i].codigo||'';
@@ -2718,9 +3289,22 @@ async function buscarDescripcion(i, inputEl){
       if(!fl||!arts.length){_artFloatClose();return}
       // position:fixed → coordenadas de viewport directas (sin scrollY)
       const rect=inp.getBoundingClientRect();
-      fl.style.left=rect.left+'px';
-      fl.style.top=(rect.bottom+2)+'px';
-      fl.style.width=Math.max(rect.width,340)+'px';
+      const vw=window.innerWidth;
+      const vh=window.innerHeight;
+      const isMobile=vw<=600;
+      // ancho: en móvil ocupa casi todo el viewport; en desktop mínimo 340px
+      const dropW=isMobile ? Math.min(vw-12, Math.max(rect.width, vw*0.9)) : Math.max(rect.width,340);
+      // left: empieza en rect.left pero clampeado para no salir del viewport
+      let dropL=isMobile ? Math.max(4, (vw-dropW)/2) : Math.min(rect.left, vw-dropW-8);
+      // top: si hay poco espacio abajo (teclado virtual) intentar arriba del input
+      const spaceBelow=vh-(rect.bottom+2);
+      const maxH=isMobile ? Math.min(vh*0.38, 260) : 420;
+      let dropT=rect.bottom+2;
+      if(spaceBelow<120 && rect.top>maxH) dropT=rect.top-maxH-4;
+      fl.style.left=dropL+'px';
+      fl.style.top=dropT+'px';
+      fl.style.width=dropW+'px';
+      fl.style.maxHeight=maxH+'px';
       fl.innerHTML=arts.map(a=>{
         // SIEMPRE usar codigoparticular — nunca el código interno de Firebird
         const cp = (a.codigoparticular||a.codigo).replace(/'/g,"\\'");
@@ -2743,12 +3327,15 @@ async function buscarDescripcion(i, inputEl){
 // esa info se muestra en el popup para que el corredor decida).
 function _ofertasParaArticulo(codigo){
   if(!codigo) return [];
-  return _ofertasActivas.filter(o =>
-    o.tipo === 'producto' &&
-    o.activo !== 0 &&
-    ((o.cupo||0) === 0 || (o.usos||0) < (o.cupo||0)) &&
-    (o.product_details||[]).some(d => d.codigo_producto === codigo)
-  );
+  return _ofertasActivas.filter(o => {
+    if(o.tipo !== 'producto') return false;
+    if(o.activo === 0) return false;
+    if((o.cupo||0) > 0 && (o.usos||0) >= (o.cupo||0)) return false;
+    if(!(o.product_details||[]).some(d => d.codigo_producto === codigo)) return false;
+    // Verificar que TODOS los artículos del combo están en el carrito
+    const codigos = [...new Set((o.product_details||[]).map(d => d.codigo_producto))];
+    return codigos.every(cod => nvItems.some(it => it.codigo === cod));
+  });
 }
 
 // Punto de entrada: llamado desde seleccionarArticulo.
@@ -3454,6 +4041,27 @@ function seleccionarArticulo(i,codigo,codDisplay,descripcion,precio,iva){
   nvItems[i]._oferta_aplicada=null;
   nvItems[i].iva=iva;
   nvItems[i].reserva_elegida=null;
+  nvItems[i]._es_preventa=false;
+
+  // ── PREVENTA LOCK SINCRÓNICO ─────────────────────────────────────────────────
+  // Aplica INMEDIATAMENTE desde _nvReservasActivas (ya cargado al abrir el modal).
+  // No espera la respuesta async de /reservas-activas-articulo.
+  console.log('[SELART] cod='+cod+' _nvReservasActivas len='+(_nvReservasActivas||[]).length);
+  const _codsArt = [cod, codigo, codDisplay].filter(Boolean);
+  const _rvPrev = (_nvReservasActivas||[]).find(rv =>
+    rv.es_preventa && rv.activo &&
+    _codsArt.some(c => c===rv.codigo_articulo || c===rv.codigo_particular)
+  );
+  if(_rvPrev){
+    console.log('[PREVENTA SYNC] reserva encontrada en _nvReservasActivas:', _rvPrev);
+    nvItems[i]._es_preventa = true;
+    const cantDisp = parseFloat(_rvPrev.cantidad||0) - parseFloat(_rvPrev.cantidad_utilizada||0);
+    nvItems[i].reserva_elegida = {..._rvPrev, cantConsumir: nvItems[i].cantidad||1, restante: cantDisp};
+    _activarModoPreventa(_rvPrev);
+    evaluarOfertasFinancieras();
+  }
+  // ─────────────────────────────────────────────────────────────────────────────
+
   const descInput=document.getElementById(`nv-desc-${i}`);
   if(descInput) descInput.value=descripcion;
   renderItems();
@@ -3464,14 +4072,63 @@ function seleccionarArticulo(i,codigo,codDisplay,descripcion,precio,iva){
       if(d.precio1||d.precio5){ const _l5=FLAGS&&FLAGS.usa_lista5; const p=parseFloat(_l5?(d.precio5||d.precio1):d.precio1)||0; if(p) { nvItems[i].precio=p; nvItems[i].precio_base=p; } }
       nvItems[i].dto_max=d.dto_max??null;
       nvItems[i].marca=d.marca||'';
+      nvItems[i].permite_stock_negativo=d.permite_stock_negativo??false;
       if(d.codigoparticular){ nvItems[i].codigo=d.codigoparticular; nvItems[i].codDisplay=d.codigoparticular; }
+      if(d.descripcion) nvItems[i].descripcion=d.descripcion; // forzar descripcion real de la API
+      if(d.es_conjunto) _expandirConjunto(i, d.codigoparticular||d.codigo);
     }
     validarStockItem(i);
     // Si ya hay una oferta de marca activa, evaluar el artículo recién cargado
     if(window._ofertaActivaTipo==='bonificacion_linea') evaluarOfertasFinancieras();
     renderItems(); actualizarDescuentoGeneral();
+    // Sincronizar input de descripcion con valor de nvItems (puede haber sido sobreescrito por oninput)
+    const _dI=document.getElementById(`nv-desc-${i}`);
+    if(_dI && nvItems[i].descripcion) _dI.value=nvItems[i].descripcion;
     _checkReservaArticulo(i, nvItems[i].codDisplay||cod);
   }).catch(()=>renderItems());
+}
+
+async function _expandirConjunto(idxPadre, codPadre){
+  try{
+    const r=await apiFetch(`${API}/conjunto/${encodeURIComponent(codPadre)}/partes`);
+    if(!r.ok) return;
+    const partes=await r.json();
+    if(!partes||!partes.length) return;
+    // batch stock para las partes
+    const codsParte=[...new Set(partes.map(p=>p.codigoparticular||p.codigo))];
+    let stockMap={};
+    if(codsParte.length===1){
+      const sr=await apiFetch(`${API}/stock/${encodeURIComponent(codsParte[0])}`);
+      if(sr.ok){ const sd=await sr.json(); stockMap[codsParte[0]]=sd; }
+    } else {
+      const sb=await apiFetch(`${API}/stock/batch?codigos=${codsParte.map(encodeURIComponent).join(',')}`);
+      if(sb.ok){ const arr=await sb.json(); arr.forEach(d=>{ const k=d._input_cod||d.codigoparticular||d.codigo; stockMap[k]=d; }); }
+    }
+    const _l5=FLAGS&&FLAGS.usa_lista5;
+    const nuevas=partes.map(p=>{
+      const cp=(p.codigoparticular||p.codigo||'').trim();
+      const sd=stockMap[cp]||{};
+      const _coef=p.coeficiente_precio??0;
+      const precio=_coef===0 ? 0 : (parseFloat(_l5?(p.precio5||p.precio1):p.precio1)||0)*_coef;
+      return {
+        codigo:cp, codDisplay:cp,
+        descripcion:p.descripcion||'',
+        cantidad:p.cantidad||1,
+        precio, precio_base:precio,
+        descuento:0, dto_max:sd.dto_max??null,
+        iva:parseFloat(p.iva)||21,
+        marca:sd.marca||'',
+        rem001:sd.remanente_001??null, rem002:sd.remanente_002??null,
+        rem003:sd.remanente_003??null, rem005:sd.remanente_005??null,
+        rem013:sd.remanente_013??null, rem016:sd.remanente_016??null,
+        permite_stock_negativo:p.permite_stock_negativo??sd.permite_stock_negativo??false,
+        _es_parte_conjunto:codPadre,
+        _oferta_aplicada:null, reserva_elegida:null, _es_preventa:false
+      };
+    });
+    nvItems.splice(idxPadre+1,0,...nuevas);
+    renderItems(); actualizarDescuentoGeneral();
+  }catch(e){ console.error('[CONJUNTO]',e); }
 }
 
 async function _checkReservaArticulo(i, codigo){
@@ -3479,36 +4136,209 @@ async function _checkReservaArticulo(i, codigo){
     const r = await apiFetch(`${API}/reservas-activas-articulo/${encodeURIComponent(codigo)}`);
     if(!r.ok) return;
     const reservas = await r.json();
+    console.log('[PREVENTA] reservas-activas-articulo response:', JSON.stringify(reservas));
     if(!reservas.length) return;
-    _mostrarPopupReserva(i, codigo, reservas);
-  }catch(_){}
+
+    // PREVENTA activo mientras remanente_firebird <= cantidad_reservada (stock no llegó suficiente)
+    const preventaRv = reservas.find(rv => {
+      if(!rv.es_preventa) return false;
+      // El endpoint calcula remanente_firebird; si no viene, usar el local del stock fetch
+      const rem = rv.remanente_firebird != null
+        ? parseFloat(rv.remanente_firebird)
+        : _nvRemParaDeposito(i, rv.deposito);
+      const cantReservada = parseFloat(rv.cantidad || 0);
+      return rem <= cantReservada; // PREVENTA mientras stock < lo reservado
+    });
+
+    if(preventaRv){
+      nvItems[i]._es_preventa = true;
+      // Auto-asignar la reserva sin popup (para todos los perfiles)
+      const cantDisp = parseFloat(preventaRv.cantidad || 0) - parseFloat(preventaRv.cantidad_utilizada || 0);
+      nvItems[i].reserva_elegida = { ...preventaRv, cantConsumir: nvItems[i].cantidad || 1, restante: cantDisp };
+      const badge = document.getElementById(`nv-res-badge-${i}`);
+      if(badge){ badge.style.display='inline'; badge.title=`Reserva PREVENTA: ${preventaRv.motivo||'#'+preventaRv.id} (dep ${preventaRv.deposito})`; }
+      // Bloquear condición (incluye crear opción si no existe en el select)
+      _activarModoPreventa(preventaRv);
+      // Re-evaluar ofertas con condición PREVENTA → limpia bonificaciones que no aplican
+      evaluarOfertasFinancieras();
+      return;
+    }
+
+    nvItems[i]._es_preventa = false;
+    // Reservas normales sin preventa: admins pueden asignarlas manualmente
+    if(esAdminActuando()) _mostrarPopupReserva(i, codigo, reservas);
+  }catch(e){
+    console.error('[PREVENTA] _checkReservaArticulo error:', e);
+  }
+}
+
+function _nvRemParaDeposito(i, dep){
+  const it = nvItems[i];
+  if(!it) return -1;
+  const key = 'rem' + String(dep).replace(/^0+/,'').padStart(3,'0');
+  const v = it[key];
+  return (v !== null && v !== undefined) ? parseFloat(v) : -1;
+}
+
+function _activarModoPreventa(rv){
+  console.log('[PREVENTA] _activarModoPreventa INICIO', {
+    codigo_multiplazo: rv.codigo_multiplazo,
+    deposito: rv.deposito,
+    es_preventa: rv.es_preventa,
+    cantidad: rv.cantidad,
+    remanente_firebird: rv.remanente_firebird,
+    MULTIPLAZOS_len: (MULTIPLAZOS||[]).length,
+    MULTIPLAZOS_ALL_len: (MULTIPLAZOS_ALL||[]).length
+  });
+
+  _nvPreventaActiva = true;
+
+  // ── 1. CONDICIÓN DE VENTA ───────────────────────────────────────────────────
+  const cod = rv.codigo_multiplazo || '';
+  const mp  = cod
+    ? (MULTIPLAZOS.find(m=>m.codigo===cod) || (MULTIPLAZOS_ALL||[]).find(m=>m.codigo===cod))
+    : (MULTIPLAZOS.find(m=>(m.descripcion||'').toUpperCase().includes('PREVENTA'))
+       || (MULTIPLAZOS_ALL||[]).find(m=>(m.descripcion||'').toUpperCase().includes('PREVENTA')));
+  const mpCodigo = (mp && mp.codigo) || cod;
+  const mpDesc   = (mp && mp.descripcion) || (mpCodigo ? `Cond. ${mpCodigo}` : 'PREVENTA');
+
+  console.log('[PREVENTA] multiplazo resuelto', {cod, mpCodigo, mpDesc, mp});
+
+  const selM = document.getElementById('nv-multiplazo');
+  console.log('[PREVENTA] nv-multiplazo element', selM, 'options:', selM ? selM.options.length : 'N/A');
+
+  if(!mpCodigo){
+    console.error('[PREVENTA] Sin codigo_multiplazo en reserva ni opción PREVENTA en MULTIPLAZOS. Reserva debe tener codigo_multiplazo configurado en admin.');
+    // Aún así bloqueamos el depósito
+  } else {
+    if(selM){
+      // Reconstruir el select con SOLO la opción PREVENTA
+      selM.innerHTML = '';
+      const opt = document.createElement('option');
+      opt.value = mpCodigo;
+      opt.textContent = mpDesc;
+      selM.appendChild(opt);
+      selM.selectedIndex = 0;
+      nvMultiplazo = mpCodigo;
+      selM.disabled = true;
+      selM.style.opacity = '0.85';
+      selM.style.fontWeight = '600';
+      selM.title = `Condición "${mpDesc}" forzada — artículo PREVENTA sin stock en dep. ${rv.deposito}`;
+      console.log('[PREVENTA] select multiplazo actualizado a', mpCodigo, '— disabled=', selM.disabled);
+    } else {
+      console.error('[PREVENTA] nv-multiplazo NO encontrado en el DOM');
+    }
+    // Banner de aviso
+    const selMRef = document.getElementById('nv-multiplazo');
+    if(selMRef){
+      let banner = document.getElementById('nv-preventa-banner');
+      if(!banner){ banner = document.createElement('div'); banner.id='nv-preventa-banner'; selMRef.insertAdjacentElement('afterend', banner); }
+      banner.style.cssText='margin-top:5px;padding:8px 12px;background:#fef9c3;border:1px solid #fde68a;border-radius:6px;font-size:.82rem;color:#92400e;font-weight:600';
+      banner.innerHTML = `⚡ <strong>PREVENTA:</strong> condición bloqueada a <b>${mpDesc}</b> — sin stock suficiente en depósito <b>${rv.deposito}</b>.`;
+    }
+  }
+
+  // ── 2. DEPÓSITO ────────────────────────────────────────────────────────────
+  const selDep = document.getElementById('nv-deposito');
+  console.log('[PREVENTA] nv-deposito element', selDep, 'rv.deposito=', rv.deposito);
+  if(rv.deposito){
+    nvDeposito = rv.deposito;
+    if(selDep){
+      // Agregar la opción si no existe (puede no estar en el set del vendedor)
+      if(![...selDep.options].some(o=>o.value===rv.deposito)){
+        const depInfo = _NV_DEPOSITOS_ADMIN.find(d=>d.value===rv.deposito);
+        const optDep = document.createElement('option');
+        optDep.value = rv.deposito;
+        optDep.textContent = depInfo ? depInfo.label : rv.deposito;
+        selDep.appendChild(optDep);
+        console.log('[PREVENTA] opción depósito agregada al select:', rv.deposito);
+      }
+      selDep.value = rv.deposito;
+      selDep.disabled = true;
+      selDep.style.opacity = '0.85';
+      selDep.title = `Depósito forzado por PREVENTA — reserva en dep. ${rv.deposito}`;
+      console.log('[PREVENTA] select depósito actualizado a', selDep.value, '— disabled=', selDep.disabled);
+    } else {
+      console.error('[PREVENTA] nv-deposito NO encontrado en el DOM');
+    }
+  } else {
+    console.warn('[PREVENTA] rv.deposito vacío — no se cambia depósito');
+  }
+  console.log('[PREVENTA] _activarModoPreventa FIN — nvMultiplazo=', nvMultiplazo, 'nvDeposito=', nvDeposito);
+}
+
+function _desactivarModoPreventa(){
+  _nvPreventaActiva = false;
+  const selM = document.getElementById('nv-multiplazo');
+  if(selM){
+    // Re-poblar el select desde MULTIPLAZOS (fue vaciado por _activarModoPreventa)
+    selM.innerHTML = '<option value="">— Sin especificar —</option>';
+    (MULTIPLAZOS||[]).forEach(m=>{
+      const o=document.createElement('option');
+      o.value=m.codigo; o.textContent=m.descripcion;
+      selM.appendChild(o);
+    });
+    selM.disabled=false; selM.style.opacity=''; selM.style.fontWeight=''; selM.title='';
+    nvMultiplazo=null;
+  }
+  const banner = document.getElementById('nv-preventa-banner');
+  if(banner) banner.remove();
+  // Liberar depósito
+  const selDep = document.getElementById('nv-deposito');
+  if(selDep){ selDep.disabled=false; selDep.style.opacity=''; selDep.title=''; }
+}
+
+function _refreshModoPreventa(){
+  // Si ya no hay artículos con preventa activa, levantar restricción
+  if(!_nvPreventaActiva) return;
+  const sigueActiva = nvItems.some(it => it._es_preventa);
+  if(!sigueActiva) _desactivarModoPreventa();
 }
 
 function _mostrarPopupReserva(i, codigo, reservas){
   const descArt = nvItems[i].descripcion || codigo;
   let pop = document.getElementById('reserva-eleccion-popup');
   if(!pop){ pop=document.createElement('div'); pop.id='reserva-eleccion-popup'; document.body.appendChild(pop); }
+  const soloPreventas = reservas.every(rv => rv.es_preventa);
   const listaRes = reservas.map((rv,ri)=>`
-    <label style="display:flex;align-items:flex-start;gap:10px;padding:10px;border:1.5px solid #e2e8f0;border-radius:8px;cursor:pointer;margin-bottom:6px;background:#f8fafc">
-      <input type="radio" name="reserva-opt" value="${ri}" style="margin-top:3px;flex-shrink:0">
+    <label style="display:flex;align-items:flex-start;gap:10px;padding:10px;border:1.5px solid ${rv.es_preventa?'#fde68a':'#e2e8f0'};border-radius:8px;cursor:pointer;margin-bottom:6px;background:${rv.es_preventa?'#fffbeb':'#f8fafc'}">
+      <input type="radio" name="reserva-opt" value="${ri}" ${soloPreventas && ri===0 ? 'checked' : ''} style="margin-top:3px;flex-shrink:0">
       <div style="font-size:.87rem;line-height:1.6">
-        <strong>${rv.motivo||'Reserva #'+rv.id}</strong><br>
+        <strong>${rv.es_preventa?'⚡ ':''} ${rv.motivo||'Reserva #'+rv.id}</strong><br>
         <span style="color:#64748b">Dep: <b>${rv.deposito||'—'}</b> · Disponible: <b style="color:#16a34a">${rv.restante}</b> uds ·
         Vence: <b>${rv.fecha_hasta||'sin vencimiento'}</b></span>
       </div>
     </label>`).join('');
+
+  const libreOpt = soloPreventas ? '' : `
+    <label style="display:flex;align-items:center;gap:10px;padding:10px;border:1.5px solid #e2e8f0;border-radius:8px;cursor:pointer;margin-bottom:6px;background:#f0fdf4">
+      <input type="radio" name="reserva-opt" value="libre" ${reservas.length ? '' : 'checked'} style="flex-shrink:0">
+      <div style="font-size:.87rem"><strong>Stock libre</strong> — usar remanente general de Flexxus</div>
+    </label>`;
+  // Selector de multiplazo para preventa (se muestra cuando hay reservas preventa)
+  const mpActual = reservas.find(r=>r.es_preventa)?.codigo_multiplazo || '';
+  const mpOpts = MULTIPLAZOS.filter(m=>m.codigo&&m.descripcion)
+    .map(m=>`<option value="${m.codigo}" ${m.codigo===mpActual?'selected':''}>${m.codigo} — ${m.descripcion}</option>`).join('');
+  const mpSection = soloPreventas ? `
+    <div style="margin-bottom:10px;padding:8px 10px;background:#fef9c3;border:1px solid #fde68a;border-radius:6px">
+      <div style="font-size:.78rem;font-weight:600;color:#92400e;margin-bottom:4px">🔒 Condición de Venta a bloquear <span style="color:#dc2626">*</span></div>
+      <select id="rv-popup-mp" style="width:100%;border:1px solid #d97706;border-radius:5px;padding:5px 8px;font-size:.82rem;background:#fff">
+        <option value="">— Seleccioná la condición —</option>
+        ${mpOpts}
+      </select>
+    </div>` : '';
+  const tituloPopup = soloPreventas ? '⚡ Reserva PREVENTA activa' : '📌 Reserva de Stock activa';
+  const subtituloPopup = soloPreventas
+    ? `<strong>${descArt}</strong> tiene una reserva PREVENTA. Elegí la condición de venta a bloquear y asigná la reserva para registrar el consumo.`
+    : `<strong>${descArt}</strong> tiene stock reservado. ¿Querés tomarlo de la reserva o del stock libre?`;
   pop.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.5);z-index:9999;display:flex;align-items:center;justify-content:center';
-  pop.innerHTML=`<div style="background:#fff;border-radius:12px;padding:1.5rem 1.75rem;max-width:480px;width:93%;box-shadow:0 8px 32px rgba(0,0,0,.25);border-top:4px solid #f59e0b;position:relative">
+  pop.innerHTML=`<div style="background:#fff;border-radius:12px;padding:1.5rem 1.75rem;max-width:480px;width:93%;box-shadow:0 8px 32px rgba(0,0,0,.25);border-top:4px solid ${soloPreventas?'#f59e0b':'#3b82f6'};position:relative">
     <button onclick="document.getElementById('reserva-eleccion-popup').style.display='none'" style="position:absolute;top:8px;right:10px;background:none;border:none;font-size:1.2rem;cursor:pointer;color:#6b7280;line-height:1;padding:2px 4px">✕</button>
-    <div style="font-weight:700;font-size:1rem;margin-bottom:.5rem">📌 Reserva de Stock activa</div>
-    <div style="font-size:.86rem;color:#374151;margin-bottom:1rem">
-      <strong>${descArt}</strong> tiene stock reservado. ¿Querés tomarlo de la reserva o del stock libre?
-    </div>
+    <div style="font-weight:700;font-size:1rem;margin-bottom:.5rem">${tituloPopup}</div>
+    <div style="font-size:.86rem;color:#374151;margin-bottom:1rem">${subtituloPopup}</div>
+    ${mpSection}
     <div style="margin-bottom:1rem">
-      <label style="display:flex;align-items:center;gap:10px;padding:10px;border:1.5px solid #e2e8f0;border-radius:8px;cursor:pointer;margin-bottom:6px;background:#f0fdf4">
-        <input type="radio" name="reserva-opt" value="libre" checked style="flex-shrink:0">
-        <div style="font-size:.87rem"><strong>Stock libre</strong> — usar remanente general de Flexxus</div>
-      </label>
+      ${libreOpt}
       ${listaRes}
     </div>
     <div style="display:flex;gap:10px;justify-content:flex-end">
@@ -3521,14 +4351,39 @@ function _mostrarPopupReserva(i, codigo, reservas){
 function _confirmarReservaOpc(i){
   const sel = document.querySelector('input[name="reserva-opt"]:checked');
   const pop = document.getElementById('reserva-eleccion-popup');
+  // Leer multiplazo elegido en el popup (para reservas preventa)
+  const mpSel = document.getElementById('rv-popup-mp');
+  const mpCodigo = mpSel?.value || null;
   if(sel && sel.value !== 'libre'){
     const rv = pop._reservas[parseInt(sel.value)];
+    // Si hay multiplazo elegido en el popup, persistirlo y usarlo
+    if(rv.es_preventa && mpCodigo){
+      if(!mpCodigo){ alert('Seleccioná la Condición de Venta a bloquear.'); return; }
+      rv.codigo_multiplazo = mpCodigo;
+      // Persistir en todas las reservas preventa del popup (background)
+      pop._reservas.filter(r => r.es_preventa).forEach(r => {
+        r.codigo_multiplazo = mpCodigo;
+        apiFetch(`${API}/admin/reservas-stock/${r.id}`, {
+          method:'PATCH',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({codigo_multiplazo: mpCodigo})
+        }).catch(()=>{});
+      });
+    } else if(rv.es_preventa && !mpCodigo){
+      // No se eligió condición pero la reserva es preventa — advertir y no confirmar
+      const mpEl = document.getElementById('rv-popup-mp');
+      if(mpEl){ mpEl.style.borderColor='#dc2626'; mpEl.focus(); }
+      return;
+    }
     nvItems[i].reserva_elegida = rv;
-    // Indicar visualmente en el renglón
+    nvItems[i]._es_preventa = !!rv.es_preventa;
     const badge = document.getElementById(`nv-res-badge-${i}`);
     if(badge){ badge.style.display='inline'; badge.title=`Usa reserva: ${rv.motivo||'#'+rv.id} (dep ${rv.deposito})`; }
+    if(rv.es_preventa) _activarModoPreventa(rv);
   } else {
     nvItems[i].reserva_elegida = null;
+    nvItems[i]._es_preventa = false;
+    _refreshModoPreventa();
   }
   if(pop) pop.style.display='none';
   renderItems();
@@ -3541,10 +4396,24 @@ async function guardarDoc(){
   const itemsValidos=nvItems.filter(it=>it.codigo&&it.descripcion&&it.cantidad>0&&it.precio>=0);
   if(!itemsValidos.length){showErr(errEl,'Agregá al menos un artículo con código y precio');return}
 
+  // ── Bloqueo stock=0 para perfil VENDEDORES ──────────────────────────────
+  if(!esAdminActuando()){
+    const itemBloqueado = itemsValidos.find(it => {
+      const remAj = _nvGetRemAjustado(it.codigo, it);
+      const rem = remAj['rem'+nvDeposito]??null;
+      return rem !== null && rem <= 0;
+    });
+    if(itemBloqueado){
+      showErr(errEl, `Sin stock remanente en el depósito seleccionado: ${itemBloqueado.codDisplay||itemBloqueado.codigo} — ${itemBloqueado.descripcion}`);
+      return;
+    }
+  }
+
   // ── Validación de límites de crédito ────────────────────────────────────
   // Si el pedido proviene de un presupuesto aprobado, el crédito ya fue validado
   // en ese momento → se omite el control para no bloquear la conversión.
-  if(_nvCredito && !_nvCredito.error && !_ppNumeroUsado){
+  // Admin (ADV/ADVJUAN/GERENTES/GTES FE) puede guardar sin importar el límite de crédito.
+  if(!esAdminActuando() && _nvCredito && !_nvCredito.error && !_ppNumeroUsado){
     const discIva = nvClienteSeleccionado ? nvClienteSeleccionado.discriminaIva : true;
     const totalDoc = itemsValidos.reduce((s,it)=>{
       const sub = it.cantidad * it.precio * (1 - it.descuento/100);
@@ -3603,6 +4472,7 @@ async function guardarDoc(){
   // Validación de stock por depósito (solo pedidos)
   if(nvTipo==='pedido'){
     const sinStock=itemsValidos.filter(it=>{
+      if(it._es_preventa) return false; // PREVENTA: permitir guardar sin stock en depósito
       const rem=it['rem'+nvDeposito]??null;
       return rem!==null && rem<=0;
     });
@@ -3630,7 +4500,7 @@ async function guardarDoc(){
   const payload={
     codigocliente: nvClienteSeleccionado.codigo,
     razonsocial:   nvClienteSeleccionado.nombre,
-    codigousuario: SESSION.codigousuario,
+    codigousuario: (_nvVendedorCopiaAdmin && _nvVendedorCopiaAdmin.codigo) || SESSION.codigousuario,
     comentarios:   document.getElementById('nv-comentarios').value.trim(),
     codigomultiplazo: nvMultiplazo||null,
     codigotransporte: nvTransporte||'0',
@@ -3658,6 +4528,13 @@ async function guardarDoc(){
     if(!r.ok){const d=await r.json();const msg=typeof d.detail==='string'?d.detail:JSON.stringify(d.detail);showErr(errEl,msg||'Error al guardar');return}
     const d=await r.json();
     // Consumir reservas elegidas en cada renglón
+    // Para artículos PREVENTA auto-asignados, actualizar cantConsumir con la cantidad final del pedido
+    itemsValidos.forEach(it=>{
+      if(it._es_preventa && it.reserva_elegida){
+        const cantDisp = parseFloat(it.reserva_elegida.cantidad||0) - parseFloat(it.reserva_elegida.cantidad_utilizada||0);
+        it.reserva_elegida.cantConsumir = Math.min(parseFloat(it.cantidad||0), cantDisp);
+      }
+    });
     const itemsConReserva = itemsValidos.filter(it=>it.reserva_elegida&&it.reserva_elegida.cantConsumir>0);
     for(const it of itemsConReserva){
       const cantConsumida = Math.min(it.reserva_elegida.cantConsumir, it.reserva_elegida.restante);
@@ -3667,6 +4544,8 @@ async function guardarDoc(){
       }).catch(()=>{});
     }
     closeOv('ov-nuevo');
+    _nvVendedorCopiaAdmin = null; // resetear override de vendedor después de guardar
+    _stFetchTs = 0; // invalidar caché local: próxima apertura de Stock irá directo a Firebird
     const _comboPct = (!esAdminActuando() && window._ofertaActivaTipo==='producto') ? (window._promoComboDescuento||0) : 0;
     const _comboNombre = _comboPct > 0 ? encodeURIComponent(window._promoComboNombre||'') : '';
     const _pdfPromoParams = _comboPct > 0 ? `&descuento_promo_pct=${_comboPct}&descuento_promo_nombre=${_comboNombre}` : '';
@@ -4071,33 +4950,22 @@ function seleccionarDomicilio(cod){
 }
 </script>
 <script>
-// ─── Timeout de inactividad: 15 minutos ───────────────────────────────────────
+// ─── Timeout de inactividad: 10 minutos ───────────────────────────────────────
 (function(){
-  const INACTIVITY_MS   = 15 * 60 * 1000;  // 15 minutos
-  const WARNING_MS      = 14 * 60 * 1000;  // aviso al minuto 14
+  const INACTIVITY_MS   = 10 * 60 * 1000;  // 10 minutos
+  const WARNING_MS      =  9 * 60 * 1000;  // aviso al minuto 9
   let timerWarning, timerLogout;
 
   // Crear modal de aviso (se inserta una sola vez)
   const modal = document.createElement('div');
   modal.id = 'inactivity-modal';
-  modal.style.cssText = `
-    display:none;position:fixed;inset:0;z-index:9999;
-    background:rgba(0,0,0,.55);align-items:center;justify-content:center;
-  \`;
-  modal.innerHTML = `
-    <div style="background:#fff;border-radius:10px;padding:32px 28px;max-width:340px;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,.25)">
-      <div style="font-size:2rem;margin-bottom:8px">⏰</div>
-      <h3 style="margin:0 0 10px;color:#1a3a5c">Sesión por expirar</h3>
-      <p style="margin:0 0 20px;color:#555;font-size:.95rem">
-        Llevás 14 minutos sin actividad.<br>
-        Tu sesión se cerrará en <strong id="inactivity-countdown">60</strong> segundos.
-      </p>
-      <button id="inactivity-stay"
-        style="background:#1a3a5c;color:#fff;border:none;border-radius:6px;padding:10px 28px;font-size:1rem;cursor:pointer">
-        Seguir usando la app
-      </button>
-    </div>
-  \`;
+  modal.style.cssText = 'display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.55);align-items:center;justify-content:center;';
+  modal.innerHTML = '<div style="background:#fff;border-radius:10px;padding:32px 28px;max-width:340px;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,.25)">'
+    + '<div style="font-size:2rem;margin-bottom:8px">⏰</div>'
+    + '<h3 style="margin:0 0 10px;color:#1a3a5c">Sesión por expirar</h3>'
+    + '<p style="margin:0 0 20px;color:#555;font-size:.95rem">Llevás 9 minutos sin actividad.<br>Tu sesión se cerrará en <strong id="inactivity-countdown">60</strong> segundos.</p>'
+    + '<button id="inactivity-stay" style="background:#1a3a5c;color:#fff;border:none;border-radius:6px;padding:10px 28px;font-size:1rem;cursor:pointer">Seguir usando la app</button>'
+    + '</div>';
   document.body.appendChild(modal);
 
   let countdownInterval;

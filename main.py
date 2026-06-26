@@ -12,6 +12,7 @@ import json
 import shutil
 import urllib.parse
 import urllib.request
+import urllib.error
 from io import BytesIO
 from typing import Optional, List
 from email.mime.multipart import MIMEMultipart
@@ -57,11 +58,19 @@ SMTP_PORT     = int(os.getenv('SMTP_PORT', 587))
 SMTP_USER     = os.getenv('SMTP_USER', '')
 SMTP_PASS     = os.getenv('SMTP_PASS', '')
 SMTP_FROM     = os.getenv('SMTP_FROM', '')
+
 SMTP_TO_PAGOS = os.getenv('SMTP_TO_PAGOS', '')
 
-# ── WhatsApp Cloud API (Meta) ─────────────────────────────────────────────────
+# ── OneSignal Push Notifications ─────────────────────────────────────────────
+ONESIGNAL_APP_ID  = os.getenv('ONESIGNAL_APP_ID', '')
+ONESIGNAL_API_KEY = os.getenv('ONESIGNAL_API_KEY', '')
+
+# ── WhatsApp Business (Meta Cloud API) ────────────────────────────────────────
 WA_PHONE_NUMBER_ID = os.getenv('WA_PHONE_NUMBER_ID', '')
 WA_ACCESS_TOKEN    = os.getenv('WA_ACCESS_TOKEN', '')
+WA_WABA_ID         = os.getenv('WA_WABA_ID', '')        # para crear plantillas
+WA_TEMPLATE_CAT    = os.getenv('WA_TEMPLATE_CAT', 'microbell_catalogo')   # nombre plantilla catálogo
+WA_TEMPLATE_SLIDE  = os.getenv('WA_TEMPLATE_SLIDE', 'microbell_catalogo') # nombre plantilla slide (puede ser la misma)
 
 # ── Catálogos ──────────────────────────────────────────────────────────────────
 _BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
@@ -74,8 +83,8 @@ def conn(charset='WIN1252', db=None):
                                user=DB_USER, password=DB_PASS, charset=charset)
 
 # ── Cache FMA_STOCK ───────────────────────────────────────────────────────────
-# TTL configurable via .env: FMA_CACHE_TTL=120 (segundos). 0 = sin caché.
-_FMA_CACHE_TTL   = int(os.getenv('FMA_CACHE_TTL', 120))  # default 2 minutos
+# TTL configurable via .env: FMA_CACHE_TTL=45 (segundos). 0 = sin caché.
+_FMA_CACHE_TTL   = int(os.getenv('FMA_CACHE_TTL', 45))   # default 45 segundos
 _FMA_ALL_DEPS    = ['001', '002', '003', '005', '013', '016']
 _fma_cache: dict = {}
 _fma_cache_lock  = threading.Lock()
@@ -570,7 +579,14 @@ def _init_admin_db():
         token       TEXT NOT NULL UNIQUE,
         subido_por  TEXT NOT NULL,
         fecha       TEXT DEFAULT (datetime('now','localtime')),
-        activo      INTEGER DEFAULT 1
+        activo        INTEGER DEFAULT 1,
+        email_enviado INTEGER DEFAULT 0,
+        email_count   INTEGER DEFAULT 0,
+        push_enviado  INTEGER DEFAULT 0,
+        push_count    INTEGER DEFAULT 0,
+        wa_enviado    INTEGER DEFAULT 0,
+        wa_count      INTEGER DEFAULT 0,
+        perfiles_texto TEXT DEFAULT ''
     );
     CREATE TABLE IF NOT EXISTS catalogo_vendedores (
         catalogo_id INTEGER NOT NULL,
@@ -606,6 +622,12 @@ def _init_admin_db():
         descuento_pct REAL NOT NULL,
         FOREIGN KEY (offer_id) REFERENCES offers(id) ON DELETE CASCADE
     )""")
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS app_config (
+        clave TEXT PRIMARY KEY,
+        valor TEXT,
+        updated_at TEXT DEFAULT (datetime('now'))
+    )""")
     # Migraciones no destructivas
     try: cur.execute("ALTER TABLE offers ADD COLUMN deposito TEXT DEFAULT ''")
     except Exception: pass
@@ -634,11 +656,15 @@ def _init_admin_db():
     except Exception: pass
     try: cur.execute("ALTER TABLE catalogos ADD COLUMN wa_enviado INTEGER DEFAULT 0")
     except Exception: pass
+    try: cur.execute("ALTER TABLE catalogos ADD COLUMN push_enviado INTEGER DEFAULT 0")
+    except Exception: pass
     try: cur.execute("ALTER TABLE catalogos ADD COLUMN perfiles_texto TEXT DEFAULT ''")
     except Exception: pass
     try: cur.execute("ALTER TABLE catalogos ADD COLUMN email_count INTEGER DEFAULT 0")
     except Exception: pass
     try: cur.execute("ALTER TABLE catalogos ADD COLUMN wa_count INTEGER DEFAULT 0")
+    except Exception: pass
+    try: cur.execute("ALTER TABLE catalogos ADD COLUMN push_count INTEGER DEFAULT 0")
     except Exception: pass
     # Seed: depósitos exclusivos para ECOMMERCE (002 y 013)
     for _dep_seed in ('deposito_exclusivo_002', 'deposito_exclusivo_013'):
@@ -670,10 +696,42 @@ def _init_admin_db():
     try:
         cur.execute("DELETE FROM feature_flags WHERE feature='pedidos' AND enabled=0")
     except Exception: pass
+
+    # Limpiar filas duplicadas en feature_flags con codigousuario IS NULL
+    # (SQLite no detecta duplicados con NULL en UNIQUE, pueden haberse acumulado)
+    try:
+        cur.execute("""
+            DELETE FROM feature_flags
+            WHERE codigousuario IS NULL
+              AND rowid NOT IN (
+                SELECT MAX(rowid) FROM feature_flags
+                WHERE codigousuario IS NULL
+                GROUP BY feature
+              )
+        """)
+    except Exception: pass
+
     c.commit()
     c.close()
 
 _init_admin_db()
+
+# ─── Config persistente (key-value en admin.db) ──────────────────────────────
+def _config_get(clave: str):
+    db = _admin_db()
+    row = db.execute("SELECT valor FROM app_config WHERE clave=?", (clave,)).fetchone()
+    db.close()
+    return row['valor'] if row else None
+
+def _config_set(clave: str, valor: str):
+    db = _admin_db()
+    db.execute(
+        "INSERT INTO app_config (clave, valor, updated_at) VALUES (?,?,datetime('now')) "
+        "ON CONFLICT(clave) DO UPDATE SET valor=excluded.valor, updated_at=excluded.updated_at",
+        (clave, valor)
+    )
+    db.commit()
+    db.close()
 
 # ─── Helper auditoría ────────────────────────────────────────────────────────
 def _audit(usuario: str, accion: str, detalle: str = '', ip: str = '', seccion: str = ''):
@@ -701,6 +759,26 @@ def get_admin_user(credentials: HTTPAuthorizationCredentials = Depends(_bearer))
         raise HTTPException(401, "No autenticado")
     try:
         payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGO])
+        if payload.get('role') != 'admin':
+            raise HTTPException(403, "Acceso denegado")
+        return payload
+    except JWTError:
+        raise HTTPException(401, "Token inválido o expirado")
+
+def get_admin_download_auth(
+    request: Request,
+    access_token: Optional[str] = Query(None)
+):
+    """Dependency para descargas: acepta Bearer header O ?access_token= (WebView)."""
+    token = access_token
+    if not token:
+        auth = request.headers.get('Authorization', '')
+        if auth.startswith('Bearer '):
+            token = auth[7:]
+    if not token:
+        raise HTTPException(401, "No autenticado")
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGO])
         if payload.get('role') != 'admin':
             raise HTTPException(403, "Acceso denegado")
         return payload
@@ -801,6 +879,24 @@ def admin_get_vendedores(_u=Depends(get_admin_user)):
     return [{"codigo": str(r[0] or '').strip(), "nombre": str(r[1] or '').strip(),
              "perfil_flexxus": str(r[2] or '').strip()} for r in rows]
 
+@app.get("/vendedores-lista")
+def get_vendedores_lista(u=Depends(get_current_user)):
+    """Lista de vendedores accesible con token de impersonación admin."""
+    if not u.get('admin_perfil'):
+        raise HTTPException(403, "Requiere perfil admin")
+    try:
+        c = conn('WIN1252')
+        cur = c.cursor()
+        cur.execute(
+            "SELECT CODIGOUSUARIO, RAZONSOCIAL FROM \"USUARIOS\" "
+            "WHERE ACTIVO='1' AND UPPER(TRIM(CODIGOPERFIL))='VENDEDORES' ORDER BY RAZONSOCIAL"
+        )
+        rows = cur.fetchall()
+        c.close()
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    return [{"codigo": str(r[0] or '').strip(), "nombre": str(r[1] or '').strip()} for r in rows]
+
 # ─── Admin: perfiles de vendedor ABM ─────────────────────────────────────────
 @app.get("/admin/perfiles")
 def admin_get_perfiles(_u=Depends(get_admin_user)):
@@ -884,9 +980,14 @@ def admin_set_flag(data: dict, _u=Depends(get_admin_user)):
     if not feature:
         raise HTTPException(400, "feature requerido")
     c = _admin_db()
-    c.execute("""INSERT INTO feature_flags (codigousuario, feature, enabled) VALUES (?,?,?)
-                 ON CONFLICT(codigousuario, feature) DO UPDATE SET enabled=excluded.enabled""",
-              (cod, feature, enabled))
+    if cod is None:
+        # SQLite no detecta duplicados con NULL en UNIQUE, usar DELETE+INSERT explícito
+        c.execute("DELETE FROM feature_flags WHERE codigousuario IS NULL AND feature=?", (feature,))
+        c.execute("INSERT INTO feature_flags (codigousuario, feature, enabled) VALUES (NULL,?,?)", (feature, enabled))
+    else:
+        c.execute("""INSERT INTO feature_flags (codigousuario, feature, enabled) VALUES (?,?,?)
+                     ON CONFLICT(codigousuario, feature) DO UPDATE SET enabled=excluded.enabled""",
+                  (cod, feature, enabled))
     c.commit(); c.close()
     return {"ok": True}
 
@@ -922,22 +1023,54 @@ def get_vendor_perfiles(vendedor: str):
 @app.get("/flags")
 def get_flags_for_vendor(vendedor: Optional[str] = None):
     c = _admin_db()
-    rows = c.execute(
-        """SELECT feature, enabled FROM feature_flags
-           WHERE codigousuario IS NULL OR codigousuario=?
-           ORDER BY CASE WHEN codigousuario IS NULL THEN 0 ELSE 1 END""",
-        (vendedor.upper() if vendedor else '',)
+    vend_upper = vendedor.upper() if vendedor else ''
+
+    # 1. Global flags (codigousuario IS NULL)
+    global_rows = c.execute(
+        "SELECT feature, enabled FROM feature_flags WHERE codigousuario IS NULL"
     ).fetchall()
+
+    # 2. Profile flags del vendedor (codigousuario = 'PERFIL:XXX')
+    perfil_rows = []
+    if vend_upper:
+        perfil_codigos = c.execute("""
+            SELECT 'PERFIL:' || vp.codigo
+            FROM vendor_profiles vp
+            JOIN vendor_profile_assignments vpa ON vpa.profile_id = vp.id
+            WHERE UPPER(vpa.codigousuario) = ?
+        """, (vend_upper,)).fetchall()
+        if perfil_codigos:
+            placeholders = ','.join('?' * len(perfil_codigos))
+            keys = [r[0] for r in perfil_codigos]
+            perfil_rows = c.execute(
+                f"SELECT feature, enabled FROM feature_flags WHERE codigousuario IN ({placeholders})",
+                keys
+            ).fetchall()
+
+    # 3. Individual flags del vendedor
+    ind_rows = c.execute(
+        "SELECT feature, enabled FROM feature_flags WHERE codigousuario=?",
+        (vend_upper,)
+    ).fetchall() if vend_upper else []
+
     c.close()
+
+    # Aplicar precedencia: global → perfil → individual
     result = {}
-    for r in rows:
-        # específico sobreescribe global
+    for r in global_rows:
         result[r['feature']] = bool(r['enabled'])
-    # Derivar deposito_exclusivo desde flags como deposito_exclusivo_002, deposito_exclusivo_013...
-    dep_flags = sorted([k.replace('deposito_exclusivo_', '') for k in result
-                        if k.startswith('deposito_exclusivo_') and result[k]])
-    if dep_flags:
-        result['deposito_exclusivo'] = ','.join(dep_flags)
+    for r in perfil_rows:
+        result[r['feature']] = bool(r['enabled'])
+    for r in ind_rows:
+        result[r['feature']] = bool(r['enabled'])
+
+    # Derivar deposito_exclusivo desde flags deposito_exclusivo_XXX
+    # Si hay ALGÚN flag configurado (aunque todos estén deshabilitados), siempre incluir la clave
+    # para que el frontend distinga "sin configurar" (clave ausente) de "configurado a vacío" (clave = "")
+    dep_all = [k for k in result if k.startswith('deposito_exclusivo_')]
+    dep_enabled = sorted([k.replace('deposito_exclusivo_', '') for k in dep_all if result[k]])
+    if dep_all:
+        result['deposito_exclusivo'] = ','.join(dep_enabled)  # puede ser '' si todos deshabilitados
     return result
 
 @app.post("/admin/flags/bulk")
@@ -965,6 +1098,26 @@ def admin_reset_flags_individuales(data: dict, _u=Depends(get_admin_user)):
         raise HTTPException(400, "feature requerida")
     c = _admin_db()
     c.execute("DELETE FROM feature_flags WHERE feature=? AND codigousuario IS NOT NULL AND TRIM(codigousuario)<>''", (feature,))
+    c.commit(); c.close()
+    return {"ok": True}
+
+@app.delete("/admin/flags/depositos-vendedor/{codigousuario}")
+def admin_delete_depositos_vendedor(codigousuario: str, _u=Depends(get_admin_user)):
+    """Elimina todas las filas deposito_exclusivo_* para un vendedor o perfil, dejando que herede global/perfil."""
+    cod = codigousuario.strip()
+    if not cod:
+        raise HTTPException(400, "codigousuario requerido")
+    c = _admin_db()
+    c.execute("DELETE FROM feature_flags WHERE codigousuario=? AND feature LIKE 'deposito_exclusivo_%'", (cod,))
+    c.commit(); c.close()
+    return {"ok": True}
+
+@app.delete("/admin/flags/depositos-todos-individuales")
+def admin_delete_depositos_todos_individuales(_u=Depends(get_admin_user)):
+    """Elimina TODOS los overrides individuales y de perfil de deposito_exclusivo_*, dejando solo el global."""
+    c = _admin_db()
+    # Borrar individual y de perfiles (PERFIL:XXX), mantener solo codigousuario IS NULL (global)
+    c.execute("DELETE FROM feature_flags WHERE feature LIKE 'deposito_exclusivo_%' AND codigousuario IS NOT NULL")
     c.commit(); c.close()
     return {"ok": True}
 
@@ -1252,6 +1405,33 @@ def admin_get_depositos(_u=Depends(get_admin_user)):
         {"codigo": "016", "nombre": "DEPOSITO EXPO"},
     ]
 
+@app.get("/depositos")
+def get_depositos_publico():
+    """Endpoint público: lista de depósitos activos (para frontend de vendedores)."""
+    try:
+        c = conn('WIN1252')
+        cur = c.cursor()
+        cur.execute('SELECT CODIGODEPOSITO, DESCRIPCION FROM "DEPOSITOS" WHERE ACTIVO=1 ORDER BY CODIGODEPOSITO')
+        rows = cur.fetchall()
+        c.close()
+        result = [
+            {"codigo": str(r[0] or '').strip(), "nombre": str(r[1] or '').strip()}
+            for r in rows
+            if str(r[0] or '').strip()
+        ]
+        if result:
+            return result
+    except Exception:
+        pass
+    return [
+        {"codigo": "001", "nombre": "DEPOSITO VAC-LOG"},
+        {"codigo": "002", "nombre": "DEPOSITO MARKET PLACE"},
+        {"codigo": "003", "nombre": "DEPOSITO PACHECO"},
+        {"codigo": "005", "nombre": "DEPOSITO OUTLET"},
+        {"codigo": "013", "nombre": "DEPOSITO FULL ML"},
+        {"codigo": "016", "nombre": "DEPOSITO EXPO"},
+    ]
+
 # ─── Admin: Ajuste de Stock ───────────────────────────────────────────────────
 _PERFILES_GERENTES = {'GERENTES', 'GTES FE'}
 
@@ -1476,7 +1656,7 @@ def ajuste_stock_procesar(data: dict, _u=Depends(get_gerente_user)):
                 """, (next_num, hoy_date, usuario, ingreso, egreso,
                       cod_art, '000', stock_desc,
                       f'Ajuste inventario {hoy_str} dep {deposito}', deposito,
-                      hoy_date, hora_time))
+                      ahora, ahora))
                 next_num += 1
                 # 1. CASILLEROS: stock real por depósito (FMA_STOCK lee de aquí)
                 fb_cur.execute(
@@ -1489,7 +1669,7 @@ def ajuste_stock_procesar(data: dict, _u=Depends(get_gerente_user)):
                 # 2. STOCK global: recalcular como SUM(CASILLEROS) para mantener consistencia
                 fb_cur.execute(
                     "UPDATE \"STOCK\" SET STOCKACTUAL=(SELECT SUM(STOCKACTUAL) FROM \"CASILLEROS\" WHERE CODIGOARTICULO=?),FECHAMODIFICACION=? WHERE CODIGOARTICULO=?",
-                    (cod_art, hoy_date, cod_art))
+                    (cod_art, ahora, cod_art))
                 procesados += 1
             except Exception as e_art:
                 detalle_errors.append(f"{cod_art}: {e_art}")
@@ -1522,8 +1702,8 @@ def ajuste_stock_revertir(log_id: int, _u=Depends(get_gerente_user)):
         db.close(); raise HTTPException(404, "Sin backup para este ajuste")
     db.close()
 
-    from datetime import date as _d, datetime as _dt
-    hoy_date = _d.today()
+    from datetime import datetime as _dt
+    ahora_rev = _dt.now()
     revertidos = []; errores = []
     try:
         fb = conn('WIN1252'); cur = fb.cursor()
@@ -1540,7 +1720,7 @@ def ajuste_stock_revertir(log_id: int, _u=Depends(get_gerente_user)):
                         (stock_ant, cod_art, deposito))
                 cur.execute(
                     "UPDATE \"STOCK\" SET STOCKACTUAL=(SELECT SUM(STOCKACTUAL) FROM \"CASILLEROS\" WHERE CODIGOARTICULO=?),FECHAMODIFICACION=? WHERE CODIGOARTICULO=?",
-                    (cod_art, hoy_date, cod_art))
+                    (cod_art, ahora_rev, cod_art))
                 revertidos.append(cod_art)
             except Exception as e:
                 errores.append(f"{cod_art}: {e}")
@@ -1662,71 +1842,101 @@ def _send_email_catalogo(destinatarios: list[str], nombre_catalogo: str, url: st
         print(f"[EMAIL] Error: {e}\n{traceback.format_exc()}")
         raise  # propagar para que _notificar_catalogo_bg lo capture
 
-def _send_whatsapp_catalogo(contactos: list[dict], nombre_catalogo: str, url: str, descripcion: str = '') -> int:
-    """Envía WhatsApp via Green API a cada contacto que tenga celular.
-    Retorna cantidad de mensajes enviados (0 si no configurado).
+def _send_push_catalogo(nombre_catalogo: str, url: str, descripcion: str = '') -> int:
+    """Envía push notification via OneSignal a todos los suscriptores.
+    Retorna 1 si se envió OK, 0 si no configurado o error.
     """
-    if not WA_PHONE_NUMBER_ID or not WA_ACCESS_TOKEN:
+    if not ONESIGNAL_APP_ID or not ONESIGNAL_API_KEY:
         return 0
-    enviados = 0
+    try:
+        mensaje = descripcion if descripcion else f"Nuevo catálogo disponible: {nombre_catalogo}"
+        payload = json.dumps({
+            "app_id": ONESIGNAL_APP_ID,
+            "included_segments": ["Total Subscriptions"],
+            "headings": {"es": nombre_catalogo, "en": nombre_catalogo},
+            "contents": {"es": mensaje, "en": mensaje},
+            "url": url,
+        }).encode()
+        req = urllib.request.Request(
+            "https://onesignal.com/api/v1/notifications",
+            data=payload,
+            headers={
+                'Authorization': f'Key {ONESIGNAL_API_KEY}',
+                'Content-Type': 'application/json'
+            },
+            method='POST'
+        )
+        resp = urllib.request.urlopen(req, timeout=15)
+        body = resp.read().decode('utf-8', errors='replace')
+        print(f"[PUSH] OK: {body}")
+        return 1
+    except urllib.error.HTTPError as e:
+        print(f"[PUSH] HTTPError {e.code}: {e.read().decode('utf-8', errors='replace')}")
+    except Exception as e:
+        print(f"[PUSH] Error: {e}")
+    return 0
+
+def _send_whatsapp_catalogo(celulares: list, nombre_catalogo: str, url: str, descripcion: str = '', template_name: str = None) -> int:
+    """Envía WA vía Meta Cloud API con template aprobada. Retorna cantidad enviada OK."""
+    if not WA_PHONE_NUMBER_ID or not WA_ACCESS_TOKEN:
+        print("[WA] WA_PHONE_NUMBER_ID o WA_ACCESS_TOKEN no configurados")
+        return 0
+    tpl = template_name or WA_TEMPLATE_CAT
     api_url = f"https://graph.facebook.com/v20.0/{WA_PHONE_NUMBER_ID}/messages"
-    headers_wa = {'Authorization': f'Bearer {WA_ACCESS_TOKEN}', 'Content-Type': 'application/json'}
-    for c in contactos:
-        cel = str(c.get('celular') or '').strip().replace(' ', '').replace('-', '').replace('+', '')
+    headers = {'Authorization': f'Bearer {WA_ACCESS_TOKEN}', 'Content-Type': 'application/json'}
+    ok_count = 0
+    for cel in celulares:
+        cel = str(cel).strip().replace(' ', '').replace('-', '').replace('+', '')
         if not cel:
             continue
-        # Normalizar número argentino: formato guardado 54+área+15+nro → API necesita 54+9+área+nro
-        # Ejemplo: 54111568560011 → 5491168560011
-        if cel.startswith('54') and len(cel) >= 12:
-            resto = cel[2:]  # quitar "54"
-            for area_len in (2, 3):
-                area = resto[:area_len]
-                if resto[area_len:area_len+2] == '15':
-                    cel = '549' + area + resto[area_len+2:]
-                    break
+        payload = json.dumps({
+            "messaging_product": "whatsapp",
+            "to": cel,
+            "type": "template",
+            "template": {
+                "name": tpl,
+                "language": {"code": "es"},
+                "components": [{
+                    "type": "body",
+                    "parameters": [
+                        {"type": "text", "text": nombre_catalogo},
+                        {"type": "text", "text": descripcion or '-'},
+                        {"type": "text", "text": url}
+                    ]
+                }]
+            }
+        }).encode()
         try:
-            payload = json.dumps({
-                "messaging_product": "whatsapp",
-                "to": cel,
-                "type": "template",
-                "template": {
-                    "name": "microbell_catalogo",
-                    "language": {"code": "es_AR"},
-                    "components": [{
-                        "type": "body",
-                        "parameters": [
-                            {"type": "text", "text": nombre_catalogo},
-                            {"type": "text", "text": descripcion or ""}
-                        ]
-                    }]
-                }
-            }).encode()
-            req = urllib.request.Request(api_url, data=payload, headers=headers_wa, method='POST')
-            resp = urllib.request.urlopen(req, timeout=15)
-            print(f"[WA] OK {cel}: {resp.read().decode()}")
-            enviados += 1
+            req_http = urllib.request.Request(api_url, data=payload, headers=headers, method='POST')
+            with urllib.request.urlopen(req_http, timeout=15) as resp:
+                body = resp.read().decode('utf-8', errors='replace')
+                print(f"[WA] OK → {cel}: {body}")
+                ok_count += 1
         except urllib.error.HTTPError as e:
-            body = e.read().decode('utf-8', errors='replace')
-            print(f"[WA] HTTPError {e.code} para {cel}: {body}")
+            err_body = ''
+            try: err_body = e.read().decode('utf-8', errors='replace')
+            except Exception: pass
+            print(f"[WA] HTTPError {e.code} → {cel}: {err_body}")
         except Exception as e:
-            print(f"[WA] Error para {cel}: {e}")
-    return enviados
+            print(f"[WA] Error → {cel}: {e}")
+    return ok_count
+
 
 def _notificar_catalogo_bg(catalogo_id: int, nombre: str, token: str, base_url: str):
-    """Corre en background: lee destinatarios, envía email + WA y registra resultado."""
+    """Corre en background: lee destinatarios, envía email + push y registra resultado."""
     db = _admin_db()
     rows = db.execute("""
-        SELECT vc.mail, vc.celular, vc.nombre
+        SELECT vc.mail, vc.nombre, vc.celular
         FROM catalogo_vendedores cv
         JOIN vendedores_contacto vc ON vc.codigo = cv.codigo
         WHERE cv.catalogo_id = ? AND vc.activo = 1
     """, (catalogo_id,)).fetchall()
     cat_row = db.execute("SELECT descripcion FROM catalogos WHERE id=?", (catalogo_id,)).fetchone()
     descripcion = (cat_row['descripcion'] or '') if cat_row else ''
-    url       = f"{base_url}/catalogo/{token}"
-    mails     = [r['mail']  for r in rows if (r['mail'] or '').strip()]
-    contactos = [dict(r)    for r in rows]
-    # Enviar y registrar resultado
+    url   = f"{base_url}/catalogo/{token}"
+    mails    = [r['mail']    for r in rows if (r['mail']    or '').strip()]
+    celulares = [r['celular'] for r in rows if (r['celular'] or '').strip()]
+    # Enviar email
     email_ok = 0
     if mails:
         try:
@@ -1734,19 +1944,16 @@ def _notificar_catalogo_bg(catalogo_id: int, nombre: str, token: str, base_url: 
             email_ok = len(mails)
         except Exception as e:
             print(f"[CAT] Email error: {e}")
-    wa_ok = 0
-    for c in contactos:
-        cel = str(c.get('celular') or '').strip()
-        if cel:
-            try:
-                _send_whatsapp_catalogo([c], nombre, url, descripcion)
-                wa_ok += 1
-            except Exception:
-                pass
+    # Enviar push notification
+    push_ok = _send_push_catalogo(nombre, url, descripcion)
+    # Enviar WhatsApp
+    wa_ok = _send_whatsapp_catalogo(celulares, nombre, url, descripcion)
+    print(f"[CAT] Notificaciones: email={email_ok} push={push_ok} wa={wa_ok}")
     db.execute(
-        "UPDATE catalogos SET email_enviado=?, email_count=?, wa_enviado=?, wa_count=? WHERE id=?",
+        "UPDATE catalogos SET email_enviado=?, email_count=?, push_enviado=?, push_count=?, wa_enviado=?, wa_count=? WHERE id=?",
         (1 if email_ok > 0 else 0, email_ok,
-         1 if wa_ok    > 0 else 0, wa_ok,
+         push_ok, push_ok,
+         1 if wa_ok > 0 else 0, wa_ok,
          catalogo_id)
     )
     db.commit()
@@ -1872,8 +2079,8 @@ def admin_list_catalogos(
             "SELECT id,nombre,descripcion,filename,token,subido_por,fecha,"
             "COALESCE(email_enviado,0) AS email_enviado,"
             "COALESCE(email_count,0)   AS email_count,"
-            "COALESCE(wa_enviado,0)    AS wa_enviado,"
-            "COALESCE(wa_count,0)      AS wa_count,"
+            "COALESCE(push_enviado,0)  AS push_enviado,"
+            "COALESCE(push_count,0)    AS push_count,"
             "COALESCE(perfiles_texto,'') AS perfiles_texto "
             "FROM catalogos WHERE activo=1 ORDER BY fecha DESC LIMIT ? OFFSET ?",
             (limit, offset)
@@ -1882,7 +2089,7 @@ def admin_list_catalogos(
         # Fallback si las columnas nuevas aún no existen (servidor no reiniciado)
         rows = db.execute(
             "SELECT id,nombre,descripcion,filename,token,subido_por,fecha,"
-            "0 AS email_enviado,0 AS email_count,0 AS wa_enviado,0 AS wa_count,'' AS perfiles_texto "
+            "0 AS email_enviado,0 AS email_count,0 AS push_enviado,0 AS push_count,'' AS perfiles_texto "
             "FROM catalogos WHERE activo=1 ORDER BY fecha DESC LIMIT ? OFFSET ?",
             (limit, offset)
         ).fetchall()
@@ -1950,9 +2157,7 @@ async def reenviar_catalogo(cat_id: int, data: dict, background_tasks: Backgroun
     url = f"{base_url}/catalogo/{token}"
     mails = [c['mail'] for c in contactos if (c['mail'] or '').strip()]
     background_tasks.add_task(_send_email_catalogo, mails, nombre, url)
-    for c in contactos:
-        if (c.get('celular') or '').strip():
-            background_tasks.add_task(_send_whatsapp_catalogo, [c], nombre, url)
+    background_tasks.add_task(_send_push_catalogo, nombre, url)
     _audit(_u.get('sub','?'), 'Reenvió catálogo', f'{nombre} → {len(contactos)} destinatarios', '', 'Catálogos')
     return {"ok": True, "destinatarios": len(contactos), "emails": len(mails)}
 
@@ -2183,6 +2388,54 @@ def admin_test_whatsapp(req: _TestWAReq, _u=Depends(get_admin_user)):
         resultado["error"] = f"{type(e).__name__}: {e}"
     return resultado
 
+@app.post("/admin/wa/crear-plantilla")
+def admin_wa_crear_plantilla(_u=Depends(get_admin_user)):
+    """Crea (o actualiza) la plantilla 'microbell_catalogo' en Meta Business.
+    Requiere WA_WABA_ID y WA_ACCESS_TOKEN configurados en .env"""
+    if not WA_WABA_ID or not WA_ACCESS_TOKEN:
+        raise HTTPException(400, "WA_WABA_ID y WA_ACCESS_TOKEN deben estar configurados en .env")
+    api_url = f"https://graph.facebook.com/v20.0/{WA_WABA_ID}/message_templates"
+    payload = json.dumps({
+        "name": "microbell_catalogo",
+        "language": "es_AR",
+        "category": "MARKETING",
+        "components": [
+            {
+                "type": "HEADER",
+                "format": "TEXT",
+                "text": "📚 Nuevo catálogo Microbell"
+            },
+            {
+                "type": "BODY",
+                "text": (
+                    "Se publicó el catálogo *{{1}}*.\n\n"
+                    "Podés verlo desde la app Vendedores Microbell S.A.:\n{{2}}"
+                )
+            },
+            {
+                "type": "FOOTER",
+                "text": "Microbell S.A. — Sistema de Vendedores"
+            }
+        ]
+    }).encode()
+    try:
+        req_http = urllib.request.Request(
+            api_url, data=payload,
+            headers={'Authorization': f'Bearer {WA_ACCESS_TOKEN}', 'Content-Type': 'application/json'},
+            method='POST'
+        )
+        with urllib.request.urlopen(req_http, timeout=15) as resp:
+            body = resp.read().decode('utf-8', errors='replace')
+        return {"ok": True, "response": json.loads(body)}
+    except urllib.error.HTTPError as e:
+        err = ''
+        try: err = e.read().decode('utf-8', errors='replace')
+        except Exception: pass
+        raise HTTPException(e.code, f"Meta API error: {err}")
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
 @app.post("/admin/cambiar-password")
 def admin_cambiar_password(req: _CambiarPassReq, _u=Depends(get_admin_user)):
     try:
@@ -2213,6 +2466,10 @@ def _migrate_stock_reservas():
         c.execute("ALTER TABLE stock_reservas ADD COLUMN deposito TEXT DEFAULT ''")
     if 'cantidad_utilizada' not in cols:
         c.execute("ALTER TABLE stock_reservas ADD COLUMN cantidad_utilizada REAL DEFAULT 0")
+    if 'es_preventa' not in cols:
+        c.execute("ALTER TABLE stock_reservas ADD COLUMN es_preventa INTEGER DEFAULT 0")
+    if 'codigo_multiplazo' not in cols:
+        c.execute("ALTER TABLE stock_reservas ADD COLUMN codigo_multiplazo TEXT")
     c.commit()
     c.close()
 
@@ -2347,6 +2604,8 @@ class ReservaStock(BaseModel):
     motivo: str = ''
     fecha_hasta: Optional[str] = None
     activo: int = 1
+    es_preventa: bool = False
+    codigo_multiplazo: Optional[str] = None
 
 class ConsumoReserva(BaseModel):
     cantidad: float
@@ -2366,8 +2625,8 @@ def get_reservas_activas_frontend(_u=Depends(get_current_user)):
 
 @app.post("/admin/reservas-stock")
 def create_reserva_stock(body: ReservaStock, _u=Depends(get_admin_user)):
-    # Validar stock disponible en depósito si es reserva por artículo
-    if body.tipo == 'articulo' and body.codigo_articulo and body.deposito and body.tipo_cantidad == 'unidades':
+    # Validar stock disponible en depósito si es reserva por artículo (no aplica para preventa)
+    if not body.es_preventa and body.tipo == 'articulo' and body.codigo_articulo and body.deposito and body.tipo_cantidad == 'unidades':
         try:
             fb = conn('WIN1252')
             cur = fb.cursor()
@@ -2399,12 +2658,12 @@ def create_reserva_stock(body: ReservaStock, _u=Depends(get_admin_user)):
     c.execute(
         """INSERT INTO stock_reservas (tipo, codigo_articulo, codigo_particular, descripcion_articulo,
            tipo_grupo, valor_grupo, nombre_grupo, tipo_cantidad, cantidad, deposito, cantidad_utilizada,
-           motivo, fecha_hasta, creado_por, activo)
-           VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?,?,1)""",
+           motivo, fecha_hasta, creado_por, activo, es_preventa, codigo_multiplazo)
+           VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?,?,1,?,?)""",
         (body.tipo, body.codigo_articulo, body.codigo_particular, body.descripcion_articulo,
          body.tipo_grupo, body.valor_grupo, body.nombre_grupo,
          body.tipo_cantidad, body.cantidad, body.deposito,
-         body.motivo, body.fecha_hasta, _u['sub'])
+         body.motivo, body.fecha_hasta, _u['sub'], int(body.es_preventa), body.codigo_multiplazo)
     )
     c.commit()
     new_id = c.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -2418,12 +2677,12 @@ def update_reserva_stock(rid: int, body: ReservaStock, _u=Depends(get_admin_user
     c.execute(
         """UPDATE stock_reservas SET tipo=?, codigo_articulo=?, codigo_particular=?, descripcion_articulo=?,
            tipo_grupo=?, valor_grupo=?, nombre_grupo=?, tipo_cantidad=?, cantidad=?, deposito=?,
-           motivo=?, fecha_hasta=?, activo=?
+           motivo=?, fecha_hasta=?, activo=?, es_preventa=?, codigo_multiplazo=?
            WHERE id=?""",
         (body.tipo, body.codigo_articulo, body.codigo_particular, body.descripcion_articulo,
          body.tipo_grupo, body.valor_grupo, body.nombre_grupo,
          body.tipo_cantidad, body.cantidad, body.deposito,
-         body.motivo, body.fecha_hasta, body.activo, rid)
+         body.motivo, body.fecha_hasta, body.activo, int(body.es_preventa), body.codigo_multiplazo, rid)
     )
     c.commit()
     c.close()
@@ -2434,7 +2693,7 @@ def update_reserva_stock(rid: int, body: ReservaStock, _u=Depends(get_admin_user
 def patch_reserva_stock(rid: int, body: dict, _u=Depends(get_admin_user)):
     """Actualización parcial: solo los campos enviados en el body."""
     allowed = {'cantidad','activo','motivo','deposito','fecha_hasta','tipo_cantidad',
-               'codigo_articulo','codigo_particular','descripcion_articulo'}
+               'codigo_articulo','codigo_particular','descripcion_articulo','es_preventa','codigo_multiplazo'}
     fields = {k: v for k, v in body.items() if k in allowed}
     if not fields:
         raise HTTPException(400, "No se enviaron campos válidos para actualizar")
@@ -2467,6 +2726,17 @@ def consumir_reserva(rid: int, body: ConsumoReserva, _u=Depends(get_current_user
     _audit(_u['sub'], 'Consumo de reserva stock', f"reserva_id={rid} cantidad={body.cantidad} pedido={body.pedido_id}")
     return {"ok": True, "cantidad_utilizada": nueva_utilizada, "restante": float(r['cantidad'] or 0) - nueva_utilizada}
 
+@app.get("/debug/reserva/{codigo}")
+def debug_reserva(codigo: str):
+    """Endpoint de diagnóstico — muestra reservas raw de admin.db para un código. Sin auth."""
+    c = _admin_db()
+    rows = c.execute(
+        "SELECT id, codigo_articulo, codigo_particular, deposito, cantidad, cantidad_utilizada, es_preventa, codigo_multiplazo, activo, motivo, fecha_hasta FROM stock_reservas WHERE codigo_articulo=? OR codigo_particular=? ORDER BY id DESC",
+        (codigo, codigo)
+    ).fetchall()
+    c.close()
+    return [dict(r) for r in rows]
+
 @app.get("/reservas-activas-articulo/{codigo}")
 def get_reservas_activas_articulo(codigo: str, _u=Depends(get_current_user)):
     """Devuelve reservas activas con remanente disponible para un artículo (para usar en pedido)."""
@@ -2475,17 +2745,40 @@ def get_reservas_activas_articulo(codigo: str, _u=Depends(get_current_user)):
     today = datetime.now().strftime('%Y-%m-%d')
     rows = c.execute(
         """SELECT * FROM stock_reservas
-           WHERE activo=1 AND tipo='articulo' AND codigo_articulo=?
+           WHERE activo=1 AND tipo='articulo'
+           AND (codigo_articulo=? OR codigo_particular=?)
            AND (fecha_hasta IS NULL OR fecha_hasta >= ?)
            ORDER BY CASE WHEN fecha_hasta IS NULL THEN 1 ELSE 0 END, fecha_hasta ASC""",
-        (codigo, today)
+        (codigo, codigo, today)
     ).fetchall()
     c.close()
+    reservas = [dict(row) for row in rows]
+
+    # Consultar remanente en Firebird para reservas tipo articulo con es_preventa
+    art_preventa = [r for r in reservas if r.get('es_preventa') and r.get('codigo_articulo')]
+    rem_map = {}
+    if art_preventa:
+        try:
+            fb = conn('WIN1252')
+            cur = fb.cursor()
+            cur.execute('SELECT ID_ARTICULO, STOCKREMANENTE FROM "FMA_STOCK"(NULL, NULL, NULL, 1, 1)')
+            art_set = {str(r['codigo_articulo']) for r in art_preventa}
+            for row in cur.fetchall():
+                if str(row[0]) in art_set:
+                    rem_map[str(row[0])] = float(row[1] or 0)
+            fb.close()
+        except Exception:
+            pass
+
     result = []
-    for r in [dict(row) for row in rows]:
+    for r in reservas:
         restante = float(r['cantidad'] or 0) - float(r['cantidad_utilizada'] or 0)
         if restante > 0:
             r['restante'] = round(restante)
+            if r.get('es_preventa') and r.get('codigo_articulo'):
+                r['remanente_firebird'] = rem_map.get(str(r['codigo_articulo']))
+            else:
+                r['remanente_firebird'] = None
             result.append(r)
     return result
 
@@ -2691,79 +2984,52 @@ def admin_get_stock(
 # ─── Admin: exportar stock ───────────────────────────────────────────────────
 def _admin_stock_data(buscar=None, depositos=None, gruposuperrubro=None,
                       superrubro=None, rubro=None, marca=None):
-    """Devuelve todos los artículos activos según filtros (sin paginación) para export."""
-    dep_lista = [d.strip() for d in (depositos or '001,002,003,005,013,016').split(',') if d.strip()]
-    dep_sql   = ','.join(dep_lista)
-    c = conn('WIN1252'); cur = c.cursor()
-    cur.execute('SELECT CAMBIO FROM "MONEDAS" WHERE CODIGOMONEDA=?', ('DOLARES',))
-    row_m = cur.fetchone()
-    cambio_usd = float(row_m[0]) if row_m else 1.0
-
-    wheres = ["a.ACTIVO = '1'"]
-    params: list = []
-    if buscar:
-        buscar = _sanitizar_buscar(buscar)
-        b = f"%{buscar.upper()}%"
-        wheres.append("(UPPER(a.DESCRIPCION) LIKE ? OR UPPER(a.CODIGOPARTICULAR) LIKE ?)")
-        params += [b, b]
-    if rubro:
-        wheres.append("a.CODIGORUBRO = ?"); params.append(rubro)
-    elif superrubro:
-        wheres.append("r.CODIGOSUPERRUBRO = ?"); params.append(superrubro)
-    elif gruposuperrubro:
-        wheres.append("sr.CODIGOGRUPOSUPERRUBRO = ?"); params.append(gruposuperrubro)
-    if marca:
-        wheres.append("a.CODIGOMARCA = ?"); params.append(marca)
-
-    sql = f"""
-        SELECT s.ID_ARTICULO, a.CODIGOPARTICULAR, a.DESCRIPCION,
-               a.PRECIOLISTA1, a.COEFICIENTE, a.CODIGOMONEDA, a.CODIGOMARCA,
-               r.DESCRIPCION, sr.DESCRIPCION, g.DESCRIPCION
-        FROM "FMA_STOCK"(NULL, NULL, ?, 1, 1) s
-        JOIN "ARTICULOS" a ON a.CODIGOARTICULO = s.ID_ARTICULO
-        LEFT JOIN "RUBROS" r ON r.CODIGORUBRO = a.CODIGORUBRO
-        LEFT JOIN "SUPERRUBROS" sr ON sr.CODIGOSUPERRUBRO = r.CODIGOSUPERRUBRO
-        LEFT JOIN "GRUPOSUPERRUBROS" g ON g.CODIGOGRUPOSUPERRUBRO = sr.CODIGOGRUPOSUPERRUBRO
-        WHERE {" AND ".join(wheres)}
-        ORDER BY a.CODIGOPARTICULAR
+    """Devuelve todos los artículos activos según filtros (sin paginación) para export.
+    Usa catálogo + FMA por depósito individual (igual que Rotación) porque FMA_STOCK
+    no acepta CSV de depósitos — retorna resultados incorrectos/vacíos con varios deps.
     """
-    cur.execute(sql, [dep_sql] + params)
-    rows = cur.fetchall()
+    dep_lista = [d.strip() for d in (depositos or '001,002,003,005,013,016').split(',') if d.strip()]
 
-    from concurrent.futures import ThreadPoolExecutor
+    catalog, cambio_usd = _get_catalog()
+    fma_data = _fma_stock_parallel(dep_lista)  # {dep: {art_id: stock}}
 
-    def _fetch_dep_export(dep):
-        c2 = conn('WIN1252')
-        cur2 = c2.cursor()
-        cur2.execute(f'SELECT ID_ARTICULO, STOCKREMANENTE FROM "FMA_STOCK"(NULL, NULL, \'{dep}\', 1, 1)')
-        data = {r[0]: float(r[1] or 0) for r in cur2.fetchall()}
-        c2.close()
-        return dep, data
-
-    dep_rem_maps = {}
-    with ThreadPoolExecutor(max_workers=len(dep_lista)) as ex:
-        for dep, data in ex.map(_fetch_dep_export, dep_lista):
-            dep_rem_maps[dep] = data
-    c.close()
+    buscar_norm = _sanitizar_buscar(buscar).upper() if buscar else None
 
     resultado = []
-    for r in rows:
-        factor = cambio_usd if (r[5] or '').strip().upper() == 'DOLARES' else 1.0
-        precio = math.ceil(float(r[3] or 0) * factor * 100) / 100
+    for art_id, art in catalog.items():
+        # Filtros de texto y jerarquía
+        if buscar_norm:
+            if buscar_norm not in art['descripcion'].upper() and buscar_norm not in art['codigoparticular'].upper():
+                continue
+        if rubro           and art.get('codigo_rubro')            != rubro:           continue
+        if superrubro      and art.get('codigo_superrubro')       != superrubro:      continue
+        if gruposuperrubro and art.get('codigo_gruposuperrubro')  != gruposuperrubro: continue
+        if marca           and art.get('codigomarca')             != marca:           continue
+
+        rem_dep = {dep: fma_data.get(dep, {}).get(art_id, 0) for dep in dep_lista}
+        rem_total = sum(rem_dep.values())
+        if rem_total <= 0:
+            continue
+
+        factor = cambio_usd if art.get('codigomoneda', '').upper() == 'DOLARES' else 1.0
+        precio = math.ceil(float(art.get('precio1', 0)) * factor * 100) / 100
+
         item = {
-            "codigo": str(r[1] or r[0]).strip(),
-            "descripcion": str(r[2] or '').strip(),
-            "precio1": precio,
-            "iva": round(float(r[4] or 0) * 21, 1),
-            "marca": str(r[6] or '').strip(),
-            "rubro": str(r[7] or '').strip(),
-            "superrubro": str(r[8] or '').strip(),
-            "gruposuperrubro": str(r[9] or '').strip(),
+            "codigo":        art.get('codigoparticular', ''),
+            "descripcion":   art.get('descripcion', ''),
+            "precio1":       precio,
+            "iva":           round(float(art.get('coeficiente', 0)) * 21, 1),
+            "marca":         art.get('codigomarca', ''),
+            "rubro":         art.get('rubro', ''),
+            "superrubro":    art.get('superrubro', ''),
+            "gruposuperrubro": art.get('gruposuperrubro', ''),
         }
         for dep in dep_lista:
-            item[f"rem_{dep}"] = dep_rem_maps[dep].get(r[0], 0)
-        item["rem_total"] = sum(dep_rem_maps[dep].get(r[0], 0) for dep in dep_lista)
+            item[f"rem_{dep}"] = rem_dep[dep]
+        item["rem_total"] = rem_total
         resultado.append(item)
+
+    resultado.sort(key=lambda x: x['codigo'])
     return resultado, dep_lista
 
 
@@ -2775,7 +3041,7 @@ def admin_exportar_stock_excel(
     superrubro: Optional[str] = None,
     rubro: Optional[str] = None,
     marca: Optional[str] = None,
-    _u=Depends(get_admin_user)
+    _u=Depends(get_admin_download_auth)
 ):
     try:
         import openpyxl
@@ -2848,7 +3114,7 @@ def admin_exportar_stock_pdf(
     superrubro: Optional[str] = None,
     rubro: Optional[str] = None,
     marca: Optional[str] = None,
-    _u=Depends(get_admin_user)
+    _u=Depends(get_admin_download_auth)
 ):
     try:
         from reportlab.lib.pagesizes import A4, landscape
@@ -2939,6 +3205,998 @@ def _load_offer_relations(c, o):
     for k,d in [('deposito',''),('tipo_financiero','descuento_total'),('monto_minimo',0),('cupo',0),('usos',0)]:
         if k not in o: o[k] = d
     return o
+
+@app.get("/admin/rotacion-filtros")
+def admin_rotacion_filtros(_u=Depends(get_admin_user)):
+    """Devuelve GrupoSuperRubros, SuperRubros, Rubros y Marcas para los filtros de Rotación."""
+    try:
+        c = conn('WIN1252', db=DATABASE)
+        cur = c.cursor()
+        cur.execute('SELECT TRIM(CODIGOGRUPOSUPERRUBRO), TRIM(DESCRIPCION) FROM "GRUPOSUPERRUBROS" ORDER BY DESCRIPCION')
+        grupos = [{'codigo': r[0], 'descripcion': r[1] or r[0]} for r in cur.fetchall() if r[0]]
+        cur.execute('SELECT TRIM(CODIGOSUPERRUBRO), TRIM(DESCRIPCION), TRIM(CODIGOGRUPOSUPERRUBRO) FROM "SUPERRUBROS" ORDER BY DESCRIPCION')
+        superrubros = [{'codigo': r[0], 'descripcion': r[1] or r[0], 'grupo': r[2] or ''} for r in cur.fetchall() if r[0]]
+        cur.execute('SELECT TRIM(CODIGORUBRO), TRIM(DESCRIPCION), TRIM(CODIGOSUPERRUBRO) FROM "RUBROS" ORDER BY DESCRIPCION')
+        rubros = [{'codigo': r[0], 'descripcion': r[1] or r[0], 'superrubro': r[2] or ''} for r in cur.fetchall() if r[0]]
+        try:
+            cur.execute('SELECT TRIM(CODIGOMARCA), TRIM(DESCRIPCION) FROM "MARCAS" ORDER BY DESCRIPCION')
+            marcas = [{'codigo': r[0], 'descripcion': r[1] or r[0]} for r in cur.fetchall() if r[0]]
+        except Exception:
+            marcas = []
+        c.close()
+        return {'grupos': grupos, 'superrubros': superrubros, 'rubros': rubros, 'marcas': marcas}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/admin/analisis-rotacion")
+def admin_analisis_rotacion(
+    meses: int = 12,
+    grupo: str = None,
+    superrubro: str = None,
+    rubro: str = None,
+    marca: str = None,
+    articulo: str = None,
+    depositos: str = None,   # CSV de códigos, ej "001,003" — vacío/None = todos
+    pct_operativo: float = 30,   # % gasto operativo sobre Costo
+    pct_utilidad: float = 25,    # % utilidad sobre (Costo + Operativo)
+    pct_meli: float = 80,        # % para Pub. ML sobre el Mayorista resultante
+    pct_venta_max: float = 20,   # % máx. de (vendido en el período / stock) para entrar
+    _u=Depends(get_admin_user)
+):
+    """
+    Artículos con stockremanente > 0 (stock físico, siempre L1) y BAJA ROTACIÓN
+    en el período: (cantidad vendida neta / stock remanente actual) × 100 <= pct_venta_max.
+    Solo cuentan como "venta" las facturas/remitos (FA, FB, FE) — NO pedidos (NP)
+    ni presupuestos, que no son ventas confirmadas. Las notas de crédito
+    (FCA, FCB, FCE, FCCA, FCCB, FCCE) restan, son devoluciones.
+    Considera ventas tanto de Línea 1 como de SW (comparten el mismo stock físico).
+    Calcula precio lista1 en ARS, precio ML sugerido, costo, margen%, bulto sugerido.
+    """
+    fecha_corte = (datetime.now() - timedelta(days=meses * 30.44))
+
+    try:
+        # 1. Catálogo completo + cambio USD — misma fuente que "Stock por Depósito"
+        #    (clave = CODIGOARTICULO interno, NO CODIGOPARTICULAR).
+        catalog, cambio_usd = _get_catalog()
+
+        # 2. Stock remanente — misma función _fma_stock_parallel que usa
+        #    "Stock por Depósito" (probada y consistente). Pasar un CSV de
+        #    varios depósitos directo a FMA_STOCK en una sola llamada daba
+        #    resultados incorrectos; acá se llama una vez por depósito.
+        dep_lista = [d.strip() for d in depositos.split(',') if d.strip()] if depositos and depositos.strip() else list(_FMA_ALL_DEPS)
+        fma_data = _fma_stock_parallel(dep_lista)  # {dep: {art_id: stock}}
+        stock_map = {}  # art_id (CODIGOARTICULO) -> stock total
+        for art_id in catalog.keys():
+            total = sum(fma_data.get(dep, {}).get(art_id, 0) for dep in dep_lista)
+            if total > 0:
+                stock_map[art_id] = total
+
+        if not stock_map:
+            return []
+
+        # 3. Ventas reales (facturas/remitos) por artículo en el período —
+        #    combinado de L1 y SW. NO se cuentan NP (pedido) ni presupuestos:
+        #    no son ventas confirmadas. Facturas (FA/FB/FE) suman; notas de
+        #    crédito (FCA/FCB/FCE/FCCA/FCCB/FCCE) restan (son devoluciones).
+        #    También se guarda la fecha de la última venta (solo informativo).
+        # FA/FB/FE: cantidad positiva; NCA/NCB/FC*: cantidad negativa (ya firmada en DB).
+        # No se invierte signo: la suma directa da la cantidad neta correcta.
+        TIPOS_VENTA_TODOS = ('FA', 'FB', 'FE', 'NCA', 'NCB', 'FCA', 'FCB', 'FCE', 'FCCA', 'FCCB', 'FCCE')
+        vendido_map  = {}  # CODIGOARTICULO -> cantidad vendida neta en el período
+        ultimo_venta = {}  # CODIGOARTICULO -> fecha de la venta más reciente (cualquier período)
+
+        ph_tipos = ','.join(f"'{t}'" for t in TIPOS_VENTA_TODOS)
+
+        # L1: facturas reales en CABEZACOMPROBANTES/CUERPOCOMPROBANTES.
+        # CABEZAPEDIDOS/CUERPOPEDIDOS solo contiene pedidos NP, NO facturas FA.
+        c = conn('WIN1252', db=DATABASE)
+        cur = c.cursor()
+        try:
+            cur.execute(f"""
+                SELECT cu.CODIGOARTICULO, cb.FECHACOMPROBANTE, cu.CANTIDAD, cb.TIPOCOMPROBANTE
+                FROM "CUERPOCOMPROBANTES" cu
+                JOIN "CABEZACOMPROBANTES" cb
+                  ON cb.TIPOCOMPROBANTE=cu.TIPOCOMPROBANTE
+                 AND cb.NUMEROCOMPROBANTE=cu.NUMEROCOMPROBANTE
+                WHERE cu.TIPOCOMPROBANTE IN ({ph_tipos}) AND cb.ANULADA=0
+            """)
+            for r in cur.fetchall():
+                cod = (r[0] or '').strip()
+                if not cod or not r[1]:
+                    continue
+                cant = float(r[2] or 0)
+                if cant == 0:
+                    continue
+                dt = r[1] if isinstance(r[1], datetime) else datetime.strptime(str(r[1])[:10], '%Y-%m-%d')
+                if cant > 0:
+                    ultimo_venta[cod] = max(ultimo_venta.get(cod, datetime.min), dt)
+                if dt >= fecha_corte:
+                    vendido_map[cod] = vendido_map.get(cod, 0) + cant
+        except Exception:
+            pass
+        c.close()
+
+        # Ventas SW — conexión aparte (DATABASE_MLT, LATIN1). Si SW no está
+        # disponible, no debe romper el análisis: se sigue solo con L1.
+        try:
+            c_sw = conn('LATIN1', db=DATABASE_MLT)
+            cur_sw = c_sw.cursor()
+            try:
+                cur_sw.execute(f"""
+                    SELECT cu.CODIGOARTICULO, cb.FECHACOMPROBANTE, cu.CANTIDAD, cb.TIPOCOMPROBANTE
+                    FROM "CUERPOCOMPROBANTES" cu
+                    JOIN "CABEZACOMPROBANTES" cb
+                      ON cb.TIPOCOMPROBANTE=cu.TIPOCOMPROBANTE
+                     AND cb.NUMEROCOMPROBANTE=cu.NUMEROCOMPROBANTE
+                    WHERE cu.TIPOCOMPROBANTE IN ({ph_tipos}) AND cb.ANULADA=0
+                """)
+                for r in cur_sw.fetchall():
+                    cod = (r[0] or '').strip()
+                    if not cod or not r[1]:
+                        continue
+                    cant = float(r[2] or 0)
+                    if cant == 0:
+                        continue
+                    dt = r[1] if isinstance(r[1], datetime) else datetime.strptime(str(r[1])[:10], '%Y-%m-%d')
+                    if cant > 0:
+                        ultimo_venta[cod] = max(ultimo_venta.get(cod, datetime.min), dt)
+                    if dt >= fecha_corte:
+                        vendido_map[cod] = vendido_map.get(cod, 0) + cant
+            finally:
+                c_sw.close()
+        except Exception:
+            pass
+
+        # 4. Costo (PRECIOCOMPRA) — confirmado que solo aparece correcto
+        #    buscando por CODIGOPARTICULAR (no por CODIGOARTICULO). Se indexa
+        #    por codigoparticular y se cruza con catalog[art_id]['codigoparticular'].
+        costo_por_particular = {}
+        particulares = list({catalog[aid]['codigoparticular'] for aid in stock_map if aid in catalog})
+        c2 = conn('WIN1252', db=DATABASE)
+        cur2 = c2.cursor()
+        for i in range(0, len(particulares), 400):
+            chunk = particulares[i:i + 400]
+            ph = ','.join(['?' for _ in chunk])
+            try:
+                cur2.execute(
+                    f'SELECT CODIGOPARTICULAR, PRECIOCOMPRA FROM "ARTICULOS" WHERE CODIGOPARTICULAR IN ({ph})',
+                    chunk
+                )
+                for row in cur2.fetchall():
+                    cp = (row[0] or '').strip()
+                    if cp:
+                        costo_por_particular[cp] = float(row[1] or 0)
+            except Exception:
+                pass
+        c2.close()
+
+        # 5. Filtrar por jerarquía/marca/artículo usando el catálogo en memoria
+        #    (igual criterio que _search_stock_cache) y construir resultado.
+        resultado = []
+        for art_id, rem in stock_map.items():
+            art = catalog.get(art_id)
+            if not art:
+                continue
+            if rubro and art['codigo_rubro'] != rubro:
+                continue
+            if superrubro and art['codigo_superrubro'] != superrubro:
+                continue
+            if grupo and art['codigo_gruposuperrubro'] != grupo:
+                continue
+            if marca and art['codigomarca'] != marca:
+                continue
+            if articulo:
+                au = articulo.upper()
+                if au not in (art['codigoparticular'] or '').upper() and au not in (art['descripcion'] or '').upper():
+                    continue
+
+            cod = art['codigoparticular']
+            art_id_str = str(art_id).strip()
+            vendido = vendido_map.get(art_id_str, 0) or vendido_map.get(cod, 0)
+            vendido = max(vendido, 0)  # más notas de crédito que ventas no es "rotación negativa", es 0
+            pct_venta = round((vendido / rem * 100), 1) if rem > 0 else 0.0
+            # Baja rotación: solo entran los que vendieron <= pct_venta_max
+            # de su stock actual en el período (0% = no vendieron nada).
+            if pct_venta > pct_venta_max:
+                continue
+            ultimo_mov = ultimo_venta.get(art_id_str) or ultimo_venta.get(cod)
+
+            precio1 = art['precio1']
+            moneda  = art['codigomoneda']
+            precio1_ars = precio1 * cambio_usd if moneda == 'DOLARES' else precio1
+
+            # Costo en ARS y margen sobre lista
+            costo = costo_por_particular.get(cod)
+            costo_ars = None
+            margen_lista = None
+            if costo and costo > 0:
+                costo_ars = costo * cambio_usd if moneda == 'DOLARES' else costo
+                if precio1_ars > 0:
+                    margen_lista = round((precio1_ars - costo_ars) / costo_ars * 100, 1)
+
+            # Precio Oferta Mayorista (Lista1 ARS = techo, nunca se supera).
+            # Mercadería sin reposición futura: el costo de reposición cargado
+            # en Flexxus es la única referencia de costo disponible.
+            # Cálculo EN CASCADA con los % ingresados como variables en el modal:
+            #   1) Punto de equilibrio = Costo × (1 + pct_operativo/100)
+            #   2) Precio Mayorista objetivo = equilibrio × (1 + pct_utilidad/100)
+            #      (la utilidad se aplica sobre el resultado del paso 1, no
+            #      sobre el costo original)
+            #   3) Pub. ML = Mayorista × (1 + pct_meli/100)
+            # margen_mayorista_pct = utilidad real lograda sobre el punto de
+            # equilibrio: pct_utilidad = cumple objetivo, 0% = breakeven,
+            # negativo = ni cubre el gasto operativo (tope de Lista1 de por medio).
+            op_factor   = 1 + (pct_operativo / 100)
+            util_factor = 1 + (pct_utilidad / 100)
+            meli_factor = 1 + (pct_meli / 100)
+            if costo_ars and costo_ars > 0:
+                punto_equilibrio = costo_ars * op_factor
+                precio_objetivo  = punto_equilibrio * util_factor
+                precio_mayorista = round(min(precio1_ars, precio_objetivo), 2)
+                margen_mayorista = round((precio_mayorista / punto_equilibrio - 1) * 100, 1)
+                precio_bulto_unitario = round(min(precio1_ars, punto_equilibrio), 2)
+            else:
+                precio_mayorista  = round(precio1_ars, 2)
+                margen_mayorista  = None
+                precio_bulto_unitario = round(precio1_ars, 2)
+                punto_equilibrio = None
+
+            # Precio competitivo en MercadoLibre = Mayorista (oferta) × meli_factor.
+            # Se basa en el precio de OFERTA, no en Lista1, para que la
+            # publicación en ML refleje la liquidación real.
+            precio_meli_pub = round(precio_mayorista * meli_factor, 2)
+            puede_pub_meli = (precio_meli_pub > punto_equilibrio) if punto_equilibrio else True
+
+            # Sugerencia de bulto según precio unitario en ARS (artículos de bajo valor)
+            if precio1_ars < 1000:
+                bulto = 100
+            elif precio1_ars < 5000:
+                bulto = 20
+            elif precio1_ars < 15000:
+                bulto = 10
+            else:
+                bulto = None
+
+            # No sugerir bulto si el stock disponible no alcanza para armar al menos un pack
+            if bulto and rem < bulto:
+                bulto = None
+
+            # Precios de bulto (total del pack)
+            precio_bulto_meli      = round(precio_meli_pub        * bulto, 2) if bulto else None
+            precio_bulto_mayorista = round(precio_bulto_unitario  * bulto, 2) if bulto else None
+
+            ultimo_str = None
+            if ultimo_mov and ultimo_mov != datetime.min:
+                try:
+                    ultimo_str = ultimo_mov.strftime('%Y-%m-%d')
+                except Exception:
+                    ultimo_str = str(ultimo_mov)[:10]
+
+            resultado.append({
+                'codigo':             cod,
+                'art_id':             art_id_str,
+                'codigoparticular':   art['codigoparticular'] or cod,
+                'descripcion':        art['descripcion'],
+                'stock':              round(rem),
+                'precio1':            round(precio1, 2),
+                'moneda':             moneda,
+                'precio1_ars':        round(precio1_ars, 2),
+                'precio_meli_pub':    precio_meli_pub,
+                'precio_mayorista':   precio_mayorista,
+                'margen_mayorista_pct': margen_mayorista,
+                'costo':              round(costo_ars, 2) if costo_ars else None,
+                'margen_lista_pct':   margen_lista,
+                'puede_pub_meli':     puede_pub_meli,
+                'ultimo_movimiento':  ultimo_str,
+                'cantidad_vendida_periodo': round(vendido, 2),
+                'pct_venta':          pct_venta,
+                'bulto_sugerido':     bulto,
+                'precio_bulto_meli':      precio_bulto_meli,
+                'precio_bulto_mayorista': precio_bulto_mayorista,
+                'alicuotaiva':        art['alicuotaiva'],
+                'cambio_usd':         cambio_usd,
+                'pct_operativo':      pct_operativo,
+                'pct_utilidad':       pct_utilidad,
+                'pct_meli':           pct_meli,
+                'pct_venta_max':      pct_venta_max,
+            })
+
+        # Ordenar por valor de stock desc
+        resultado.sort(key=lambda x: x['stock'] * x['precio1_ars'], reverse=True)
+        return resultado
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/admin/rotacion/exportar-excel")
+def admin_rotacion_exportar_excel(
+    meses: int = 12,
+    grupo: str = None,
+    superrubro: str = None,
+    rubro: str = None,
+    marca: str = None,
+    articulo: str = None,
+    depositos: str = None,
+    pct_operativo: float = 30,
+    pct_utilidad: float = 25,
+    pct_meli: float = 80,
+    pct_venta_max: float = 20,
+    _u=Depends(get_admin_download_auth)
+):
+    try:
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment
+        from openpyxl.utils import get_column_letter
+        import io
+
+        rows = admin_analisis_rotacion(
+            meses=meses, grupo=grupo, superrubro=superrubro, rubro=rubro, marca=marca,
+            articulo=articulo, depositos=depositos, pct_operativo=pct_operativo,
+            pct_utilidad=pct_utilidad, pct_meli=pct_meli, pct_venta_max=pct_venta_max,
+            _u=_u
+        )
+        if not rows:
+            raise HTTPException(404, "Sin datos de rotación para los filtros indicados")
+
+        cambio   = rows[0].get('cambio_usd', 1)
+        pct_op   = rows[0].get('pct_operativo', pct_operativo)
+        pct_ut   = rows[0].get('pct_utilidad', pct_utilidad)
+        pct_ml   = rows[0].get('pct_meli', pct_meli)
+        pct_vtx  = rows[0].get('pct_venta_max', pct_venta_max)
+
+        sin_ventas   = sum(1 for r in rows if not (r.get('cantidad_vendida_periodo', 0) > 0))
+        total_costo  = sum(r['stock'] * (r.get('costo') or 0) for r in rows)
+        sin_costo    = sum(1 for r in rows if not r.get('costo'))
+        con_bulto    = sum(1 for r in rows if r.get('bulto_sugerido'))
+        con_perdida  = sum(1 for r in rows if r.get('margen_mayorista_pct') is not None and r['margen_mayorista_pct'] < 0)
+
+        linea_resumen = (
+            f"{len(rows)} artículos de baja rotación (ventas ≤ {pct_vtx}% del stock)"
+            f" · {sin_ventas} sin ninguna venta en el período"
+            f" · Capital inmovilizado (costo): ${round(total_costo):,} ARS"
+            f" · Cambio USD: ${cambio:,}"
+            + (f" · {con_bulto} con venta por bulto sugerida" if con_bulto else "")
+            + (f" · {con_perdida} no cubren ni el punto de equilibrio" if con_perdida else "")
+            + (f" · {sin_costo} sin costo cargado (no incluidos en capital)" if sin_costo else "")
+        )
+        linea_leyenda = (
+            f"Baja rotación = ventas NV en el período ÷ stock actual ≤ {pct_vtx}%"
+            f"  |  Punto de equilibrio = Costo × (1+{pct_op}%)"
+            f"  |  Mayorista = equilibrio × (1+{pct_ut}%), sin superar Lista1"
+            f"  |  Pub. ML = Mayorista × (1+{pct_ml}%)"
+            f"  |  Bulto = al punto de equilibrio (más agresivo)"
+            f"  |  Margen May. = utilidad real ya cubierto el operativo"
+        )
+        fecha_gen = datetime.now().strftime('%d/%m/%Y %H:%M')
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Rotación"
+
+        hdr_fill  = PatternFill("solid", fgColor="1A56DB")
+        hdr_font  = Font(bold=True, color="FFFFFFFF", size=10)
+        alt_fill  = PatternFill("solid", fgColor="EFF6FF")
+        title_font = Font(bold=True, size=13, color="111827")
+        sub_font   = Font(size=9, color="374151")
+        leg_font   = Font(size=8, italic=True, color="6B7280")
+        right_al  = Alignment(horizontal="right", vertical="center")
+        center_al = Alignment(horizontal="center", vertical="center")
+        left_al   = Alignment(horizontal="left", vertical="center", wrap_text=True)
+        NUM_COLS  = 12
+
+        # Fila 1: Título
+        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=NUM_COLS)
+        c = ws.cell(1, 1, f"MICROBELL S.A. — Análisis de Rotación de Stock  ({meses} meses)  ·  Generado: {fecha_gen}")
+        c.font = title_font; c.alignment = left_al
+        ws.row_dimensions[1].height = 22
+
+        # Fila 2: Resumen
+        ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=NUM_COLS)
+        c2 = ws.cell(2, 1, linea_resumen)
+        c2.font = sub_font; c2.alignment = left_al
+        ws.row_dimensions[2].height = 18
+
+        # Fila 3: Leyenda
+        ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=NUM_COLS)
+        c3 = ws.cell(3, 1, linea_leyenda)
+        c3.font = leg_font; c3.alignment = left_al
+        ws.row_dimensions[3].height = 16
+
+        # Fila 4: vacía
+        ws.row_dimensions[4].height = 6
+
+        # Fila 5: Encabezados de tabla
+        HEADERS = ["Código", "Descripción", "Stock", "Lista1 ARS", "Mayorista",
+                   "Pub. ML", "Margen May.%", "Bulto", "Pack May.", "Vendido (u.)", "Rotación %", "Último movimiento"]
+        for ci, h in enumerate(HEADERS, 1):
+            cell = ws.cell(5, ci, h)
+            cell.font = hdr_font; cell.fill = hdr_fill; cell.alignment = center_al
+        ws.row_dimensions[5].height = 20
+
+        # Datos
+        for ri, r in enumerate(rows, 6):
+            is_alt = ri % 2 == 0
+            fill = alt_fill if is_alt else None
+
+            def wc(col, val, al=None, fmt=None):
+                c = ws.cell(ri, col, val)
+                if fill: c.fill = fill
+                if al: c.alignment = al
+                if fmt: c.number_format = fmt
+                return c
+
+            wc(1,  r.get('codigoparticular', ''))
+            wc(2,  r.get('descripcion', ''),       left_al)
+            wc(3,  round(r.get('stock', 0)),        right_al)
+            wc(4,  round(r.get('precio1_ars', 0)),  right_al, '#,##0')
+            wc(5,  round(r.get('precio_mayorista', 0) or 0), right_al, '#,##0')
+            wc(6,  round(r.get('precio_meli_pub', 0) or 0),  right_al, '#,##0')
+            mg = r.get('margen_mayorista_pct')
+            c_mg = wc(7, (str(mg)+'%') if mg is not None else '—', center_al)
+            if mg is not None:
+                if mg < 0:   c_mg.font = Font(color="DC2626", bold=True)
+                elif mg < pct_ut: c_mg.font = Font(color="D97706")
+                else:         c_mg.font = Font(color="15803D", bold=True)
+            bulto = r.get('bulto_sugerido')
+            wc(8,  f"×{bulto}" if bulto else '—',  center_al)
+            pbm = r.get('precio_bulto_mayorista')
+            wc(9,  round(pbm) if pbm else '—',      right_al, '#,##0' if pbm else None)
+            wc(10, round(r.get('cantidad_vendida_periodo', 0) or 0), right_al)
+            wc(11, str(r.get('pct_venta', 0) or 0)+'%', center_al)
+            wc(12, r.get('ultimo_movimiento') or '—')
+
+        # Anchos de columna
+        ws.column_dimensions['A'].width = 11
+        ws.column_dimensions['B'].width = 42
+        ws.column_dimensions['C'].width = 9
+        ws.column_dimensions['D'].width = 13
+        ws.column_dimensions['E'].width = 13
+        ws.column_dimensions['F'].width = 13
+        ws.column_dimensions['G'].width = 13
+        ws.column_dimensions['H'].width = 9
+        ws.column_dimensions['I'].width = 13
+        ws.column_dimensions['J'].width = 13
+        ws.column_dimensions['K'].width = 12
+        ws.column_dimensions['L'].width = 16
+
+        buf = io.BytesIO()
+        wb.save(buf); buf.seek(0)
+        from fastapi.responses import StreamingResponse
+        fname = f"rotacion_{meses}m_{datetime.now().strftime('%Y%m%d')}.xlsx"
+        return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                 headers={"Content-Disposition": f"attachment; filename={fname}"})
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.get("/admin/rotacion/exportar-pdf")
+def admin_rotacion_exportar_pdf(
+    meses: int = 12,
+    grupo: str = None,
+    superrubro: str = None,
+    rubro: str = None,
+    marca: str = None,
+    articulo: str = None,
+    depositos: str = None,
+    pct_operativo: float = 30,
+    pct_utilidad: float = 25,
+    pct_meli: float = 80,
+    pct_venta_max: float = 20,
+    _u=Depends(get_admin_download_auth)
+):
+    try:
+        import io
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.lib import colors
+        from reportlab.lib.units import mm
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+
+        rows = admin_analisis_rotacion(
+            meses=meses, grupo=grupo, superrubro=superrubro, rubro=rubro, marca=marca,
+            articulo=articulo, depositos=depositos, pct_operativo=pct_operativo,
+            pct_utilidad=pct_utilidad, pct_meli=pct_meli, pct_venta_max=pct_venta_max,
+            _u=_u
+        )
+        if not rows:
+            raise HTTPException(404, "Sin datos de rotación para los filtros indicados")
+
+        cambio   = rows[0].get('cambio_usd', 1)
+        pct_op   = rows[0].get('pct_operativo', pct_operativo)
+        pct_ut   = rows[0].get('pct_utilidad', pct_utilidad)
+        pct_ml   = rows[0].get('pct_meli', pct_meli)
+        pct_vtx  = rows[0].get('pct_venta_max', pct_venta_max)
+
+        sin_ventas   = sum(1 for r in rows if not (r.get('cantidad_vendida_periodo', 0) > 0))
+        total_costo  = sum(r['stock'] * (r.get('costo') or 0) for r in rows)
+        sin_costo    = sum(1 for r in rows if not r.get('costo'))
+        con_bulto    = sum(1 for r in rows if r.get('bulto_sugerido'))
+        con_perdida  = sum(1 for r in rows if r.get('margen_mayorista_pct') is not None and r['margen_mayorista_pct'] < 0)
+
+        linea_resumen = (
+            f"<b>{len(rows)}</b> artículos de baja rotación (ventas ≤ {pct_vtx}% del stock)"
+            f" &nbsp;·&nbsp; {sin_ventas} sin ninguna venta en el período"
+            f" &nbsp;·&nbsp; Capital inmovilizado (costo): <b>${round(total_costo):,} ARS</b>"
+            f" &nbsp;·&nbsp; Cambio USD: ${cambio:,}"
+            + (f" &nbsp;·&nbsp; <font color='#7c3aed'><b>{con_bulto} con venta por bulto sugerida</b></font>" if con_bulto else "")
+            + (f" &nbsp;·&nbsp; <font color='#dc2626'><b>{con_perdida} no cubren el punto de equilibrio</b></font>" if con_perdida else "")
+            + (f" &nbsp;·&nbsp; <font color='#d97706'>{sin_costo} sin costo cargado</font>" if sin_costo else "")
+        )
+        linea_leyenda = (
+            f"Baja rotación = ventas NV ÷ stock actual ≤ {pct_vtx}%  |  "
+            f"Punto de equilibrio = Costo × (1+{pct_op}%)  |  "
+            f"Mayorista = equilibrio × (1+{pct_ut}%), sin superar Lista1  |  "
+            f"Pub. ML = Mayorista × (1+{pct_ml}%)  |  "
+            f"Bulto = al punto de equilibrio (más agresivo)  |  "
+            f"Margen May. = utilidad real ya cubierto el operativo"
+        )
+        fecha_gen = datetime.now().strftime('%d/%m/%Y %H:%M')
+
+        buf = io.BytesIO()
+        doc = SimpleDocTemplate(buf, pagesize=landscape(A4),
+                                leftMargin=10*mm, rightMargin=10*mm,
+                                topMargin=12*mm, bottomMargin=12*mm)
+
+        styles = getSampleStyleSheet()
+        st_title = ParagraphStyle('rot_title', fontName='Helvetica-Bold', fontSize=13,
+                                  textColor=colors.HexColor('#111827'), spaceAfter=4)
+        st_sub   = ParagraphStyle('rot_sub',   fontName='Helvetica', fontSize=9,
+                                  textColor=colors.HexColor('#374151'), spaceAfter=2)
+        st_leg   = ParagraphStyle('rot_leg',   fontName='Helvetica-Oblique', fontSize=7.5,
+                                  textColor=colors.HexColor('#6b7280'), spaceAfter=8)
+        st_desc  = ParagraphStyle('rot_desc',  fontName='Helvetica', fontSize=7.5,
+                                  textColor=colors.HexColor('#111827'), leading=9,
+                                  wordWrap='LTR')
+
+        story = []
+        story.append(Paragraph(f"MICROBELL S.A. — Análisis de Rotación de Stock &nbsp;({meses} meses) &nbsp;·&nbsp; Generado: {fecha_gen}", st_title))
+        story.append(Paragraph(linea_resumen, st_sub))
+        story.append(Paragraph(linea_leyenda, st_leg))
+
+        # Tabla
+        BLUE    = colors.HexColor('#1A56DB')
+        RED     = colors.HexColor('#DC2626')
+        ORANGE  = colors.HexColor('#D97706')
+        GREEN   = colors.HexColor('#15803D')
+        PURPLE  = colors.HexColor('#7C3AED')
+        ALTBG   = colors.HexColor('#EFF6FF')
+
+        def fmt_ars(v): return f"${round(v):,}".replace(',', '.') if v else '—'
+        def fmt_pct(v): return f"{v}%" if v is not None else '—'
+
+        col_headers = ["Código", "Descripción", "Stock", "Lista1", "Mayorista",
+                       "Pub. ML", "Margen\nMay.%", "Bulto", "Pack\nMay.", "Vendido\n(u.)", "Rot.%", "Último\nmov."]
+        col_widths  = [22*mm, 68*mm, 16*mm, 22*mm, 22*mm, 22*mm, 18*mm, 14*mm, 22*mm, 18*mm, 15*mm, 22*mm]
+
+        tbl_data = [col_headers]
+        row_colors = []  # (row_idx, color) for margen color
+        for ri, r in enumerate(rows, 1):
+            mg   = r.get('margen_mayorista_pct')
+            bulto = r.get('bulto_sugerido')
+            pbm   = r.get('precio_bulto_mayorista')
+            if mg is not None:
+                if mg < 0:      row_colors.append((ri, RED, 6))
+                elif mg < pct_ut: row_colors.append((ri, ORANGE, 6))
+                else:             row_colors.append((ri, GREEN, 6))
+            tbl_data.append([
+                r.get('codigoparticular', ''),
+                Paragraph(r.get('descripcion', ''), st_desc),
+                str(round(r.get('stock', 0))),
+                fmt_ars(r.get('precio1_ars')),
+                fmt_ars(r.get('precio_mayorista')),
+                fmt_ars(r.get('precio_meli_pub')),
+                fmt_pct(mg),
+                f"×{bulto}" if bulto else '—',
+                fmt_ars(pbm),
+                str(round(r.get('cantidad_vendida_periodo', 0) or 0)),
+                fmt_pct(r.get('pct_venta')),
+                r.get('ultimo_movimiento') or '—',
+            ])
+
+        base_style = [
+            ('BACKGROUND',  (0,0), (-1,0), BLUE),
+            ('TEXTCOLOR',   (0,0), (-1,0), colors.white),
+            ('FONTNAME',    (0,0), (-1,0), 'Helvetica-Bold'),
+            ('FONTSIZE',    (0,0), (-1,0), 8),
+            ('ALIGN',       (0,0), (-1,0), 'CENTER'),
+            ('VALIGN',      (0,0), (-1,-1), 'MIDDLE'),
+            ('FONTNAME',    (0,1), (-1,-1), 'Helvetica'),
+            ('FONTSIZE',    (0,1), (-1,-1), 7.5),
+            ('ROWBACKGROUND', (0,1), (-1,-1), [colors.white, ALTBG]),
+            ('GRID',        (0,0), (-1,-1), 0.3, colors.HexColor('#D1D5DB')),
+            ('ALIGN',       (2,1), (2,-1), 'RIGHT'),
+            ('ALIGN',       (3,1), (5,-1), 'RIGHT'),
+            ('ALIGN',       (8,1), (9,-1), 'RIGHT'),
+            ('ALIGN',       (6,1), (7,-1), 'CENTER'),
+            ('ALIGN',       (10,1), (10,-1), 'CENTER'),
+        ]
+        for (ri, clr, ci) in row_colors:
+            base_style.append(('TEXTCOLOR', (ci, ri), (ci, ri), clr))
+            base_style.append(('FONTNAME',  (ci, ri), (ci, ri), 'Helvetica-Bold'))
+
+        tbl = Table(tbl_data, colWidths=col_widths, repeatRows=1)
+        tbl.setStyle(TableStyle(base_style))
+        story.append(tbl)
+
+        doc.build(story)
+        buf.seek(0)
+        from fastapi.responses import StreamingResponse
+        fname = f"rotacion_{meses}m_{datetime.now().strftime('%Y%m%d')}.pdf"
+        return StreamingResponse(buf, media_type="application/pdf",
+                                 headers={"Content-Disposition": f"inline; filename={fname}"})
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.get("/admin/rotacion-detalle-ventas")
+def admin_rotacion_detalle_ventas(art_id: str, meses: int = 12, _u=Depends(get_admin_user)):
+    """Detalle de comprobantes de venta (FA/FB/FE) y notas de crédito
+    (FCA/FCB/FCE/FCCA/FCCB/FCCE, con signo negativo) de un artículo puntual
+    en el período, para el modal que se abre al hacer clic en la columna de
+    ventas de Rotación.
+
+    art_id = CODIGOARTICULO interno (NO CODIGOPARTICULAR) — el mismo valor
+    usado para construir vendido_map en /admin/analisis-rotacion. Se busca
+    directo por ese campo en CUERPOPEDIDOS (L1) y CUERPOCOMPROBANTES (SW),
+    sin pasar por un lookup adicional en ARTICULOS por CODIGOPARTICULAR,
+    porque ese lookup puede resolver a un CODIGOARTICULO distinto cuando
+    hay códigos particulares duplicados — causaba que el modal apareciera
+    vacío aunque el análisis principal sí contara ventas."""
+    # FA/FB/FE: cantidad positiva; NCA/NCB/FC*: cantidad negativa (ya firmada en DB).
+    TIPOS_VENTA_TODOS = ('FA', 'FB', 'FE', 'NCA', 'NCB', 'FCA', 'FCB', 'FCE', 'FCCA', 'FCCB', 'FCCE')
+    ph_tipos = ','.join(f"'{t}'" for t in TIPOS_VENTA_TODOS)
+    fecha_corte = (datetime.now() - timedelta(days=meses * 30.44))
+    detalle = []
+
+    def _calc(cant_raw, precio_u, dto, iva_pct):
+        cant = float(cant_raw or 0)  # ya firmada (negativa para NC*)
+        precio_u = float(precio_u or 0)
+        dto = float(dto or 0)
+        iva_pct = float(iva_pct) if iva_pct is not None else 21.0
+        importe_neto = round(cant * precio_u * (1 - dto / 100), 2)
+        iva_monto = round(importe_neto * iva_pct / 100, 2)
+        importe_con_iva = round(importe_neto + iva_monto, 2)
+        return cant, importe_neto, iva_pct, iva_monto, importe_con_iva
+
+    # L1: CABEZACOMPROBANTES/CUERPOCOMPROBANTES (DATABASE, WIN1252).
+    # CABEZAPEDIDOS solo contiene pedidos NP, no facturas FA.
+    try:
+        c = conn('WIN1252', db=DATABASE)
+        cur = c.cursor()
+        cur.execute(f"""
+            SELECT cb.FECHACOMPROBANTE, cb.TIPOCOMPROBANTE, cb.NUMEROCOMPROBANTE,
+                   cu.CANTIDAD, cu.PRECIOUNITARIO, cu.DESCUENTO, cu.PORCENTAJEIVA,
+                   cb.RAZONSOCIAL
+            FROM "CUERPOCOMPROBANTES" cu
+            JOIN "CABEZACOMPROBANTES" cb
+              ON cb.TIPOCOMPROBANTE=cu.TIPOCOMPROBANTE
+             AND cb.NUMEROCOMPROBANTE=cu.NUMEROCOMPROBANTE
+            WHERE cu.CODIGOARTICULO=? AND cu.TIPOCOMPROBANTE IN ({ph_tipos}) AND cb.ANULADA=0
+              AND cb.FECHACOMPROBANTE >= ?
+            ORDER BY cb.FECHACOMPROBANTE DESC
+        """, (art_id, fecha_corte))
+        for r in cur.fetchall():
+            tipo = (r[1] or '').strip().upper()
+            cant, importe, iva_pct, iva_monto, importe_con_iva = _calc(r[3], r[4], r[5], r[6])
+            detalle.append({
+                'origen': 'L1',
+                'fecha': r[0].strftime('%Y-%m-%d') if hasattr(r[0], 'strftime') else str(r[0])[:10],
+                'tipo': tipo,
+                'numero': (r[2] or '').strip() if isinstance(r[2], str) else r[2],
+                'razonsocial': (r[7] or '').strip() if isinstance(r[7], str) else r[7],
+                'cantidad': cant,
+                'importe': importe,
+                'iva_pct': iva_pct,
+                'iva_monto': iva_monto,
+                'importe_con_iva': importe_con_iva,
+            })
+        c.close()
+    except Exception:
+        pass
+
+    try:
+        c_sw = conn('LATIN1', db=DATABASE_MLT)
+        cur_sw = c_sw.cursor()
+        cur_sw.execute(f"""
+            SELECT cb.FECHACOMPROBANTE, cb.TIPOCOMPROBANTE, cb.NUMEROCOMPROBANTE,
+                   cu.CANTIDAD, cu.PRECIOUNITARIO, cu.DESCUENTO, cu.PORCENTAJEIVA,
+                   cb.RAZONSOCIAL
+            FROM "CUERPOCOMPROBANTES" cu
+            JOIN "CABEZACOMPROBANTES" cb
+              ON cb.TIPOCOMPROBANTE=cu.TIPOCOMPROBANTE
+             AND cb.NUMEROCOMPROBANTE=cu.NUMEROCOMPROBANTE
+            WHERE cu.CODIGOARTICULO=? AND cu.TIPOCOMPROBANTE IN ({ph_tipos}) AND cb.ANULADA=0
+              AND cb.FECHACOMPROBANTE >= ?
+            ORDER BY cb.FECHACOMPROBANTE DESC
+        """, (art_id, fecha_corte))
+        for r in cur_sw.fetchall():
+            tipo = (r[1] or '').strip().upper()
+            cant, importe, iva_pct, iva_monto, importe_con_iva = _calc(r[3], r[4], r[5], r[6])
+            detalle.append({
+                'origen': 'SW',
+                'fecha': r[0].strftime('%Y-%m-%d') if hasattr(r[0], 'strftime') else str(r[0])[:10],
+                'tipo': tipo,
+                'numero': (r[2] or '').strip() if isinstance(r[2], str) else r[2],
+                'razonsocial': (r[7] or '').strip() if isinstance(r[7], str) else r[7],
+                'cantidad': cant,
+                'importe': importe,
+                'iva_pct': iva_pct,
+                'iva_monto': iva_monto,
+                'importe_con_iva': importe_con_iva,
+            })
+        c_sw.close()
+    except Exception:
+        pass
+
+    detalle.sort(key=lambda d: d['fecha'], reverse=True)
+    return detalle
+
+
+@app.get("/debug/rotacion-fca-articulo")
+def debug_rotacion_fca_articulo(art_id: str = None, codigoparticular: str = None, _u=Depends(get_admin_user)):
+    """DEBUG TEMPORAL: trae TODAS las filas de CUERPOPEDIDOS/CABEZAPEDIDOS (L1)
+    y CUERPOCOMPROBANTES/CABEZACOMPROBANTES (SW) para un CODIGOARTICULO dado,
+    de CUALQUIER tipo de comprobante, fecha y estado ANULADA — sin ningún
+    filtro — para detectar si un comprobante puntual (ej. una FCA que el
+    usuario sabe que existe en Flexxus) está en la base, y por qué no pasa
+    los filtros normales de /admin/rotacion-detalle-ventas (fecha, ANULADA,
+    o el tipo de comprobante).
+
+    Acepta art_id (CODIGOARTICULO, recomendado) o, si no se tiene a mano,
+    codigoparticular (resuelve a CODIGOARTICULO vía ARTICULOS — solo para
+    este debug, no usar este camino en lógica de producción)."""
+    if not art_id and codigoparticular:
+        try:
+            c0 = conn('WIN1252', db=DATABASE)
+            cur0 = c0.cursor()
+            cur0.execute('SELECT CODIGOARTICULO FROM "ARTICULOS" WHERE CODIGOPARTICULAR=?', (codigoparticular,))
+            row0 = cur0.fetchone()
+            art_id = str(row0[0]).strip() if row0 else None
+            c0.close()
+        except Exception:
+            pass
+    if not art_id:
+        raise HTTPException(status_code=400, detail="Debes pasar art_id o codigoparticular")
+    out = {'art_id_usado': art_id, 'l1': [], 'sw': [], 'error_l1': None, 'error_sw': None}
+    try:
+        c = conn('WIN1252', db=DATABASE)
+        cur = c.cursor()
+        cur.execute("""
+            SELECT cb.TIPOCOMPROBANTE, cb.NUMEROCOMPROBANTE, cb.FECHACOMPROBANTE,
+                   cb.ANULADA, cp.CANTIDAD, cp.PRECIOUNITARIO, cb.RAZONSOCIAL
+            FROM "CUERPOPEDIDOS" cp
+            JOIN "CABEZAPEDIDOS" cb
+              ON cb.TIPOCOMPROBANTE=cp.TIPOCOMPROBANTE
+             AND cb.NUMEROCOMPROBANTE=cp.NUMEROCOMPROBANTE
+            WHERE cp.CODIGOARTICULO=?
+            ORDER BY cb.FECHACOMPROBANTE DESC
+        """, (art_id,))
+        for r in cur.fetchall():
+            out['l1'].append({
+                'tipo': (r[0] or '').strip() if isinstance(r[0], str) else r[0],
+                'numero': (r[1] or '').strip() if isinstance(r[1], str) else r[1],
+                'fecha': r[2].strftime('%Y-%m-%d') if hasattr(r[2], 'strftime') else str(r[2]),
+                'anulada': r[3],
+                'cantidad': r[4],
+                'precio_u': r[5],
+                'razonsocial': (r[6] or '').strip() if isinstance(r[6], str) else r[6],
+            })
+        c.close()
+    except Exception as e:
+        out['error_l1'] = str(e)
+
+    # Test de hipótesis: ¿existe también CABEZACOMPROBANTES/CUERPOCOMPROBANTES
+    # DENTRO de la base de Línea1 (no la de SW), con las facturas FA reales que
+    # no aparecen en CABEZAPEDIDOS (que parece guardar solo NP/pedidos)?
+    out['l1_comprobantes'] = []
+    out['error_l1_comprobantes'] = None
+    try:
+        c1c = conn('WIN1252', db=DATABASE)
+        cur1c = c1c.cursor()
+        cur1c.execute("""
+            SELECT cb.TIPOCOMPROBANTE, cb.NUMEROCOMPROBANTE, cb.FECHACOMPROBANTE,
+                   cb.ANULADA, cu.CANTIDAD, cu.PRECIOUNITARIO, cb.RAZONSOCIAL
+            FROM "CUERPOCOMPROBANTES" cu
+            JOIN "CABEZACOMPROBANTES" cb
+              ON cb.TIPOCOMPROBANTE=cu.TIPOCOMPROBANTE
+             AND cb.NUMEROCOMPROBANTE=cu.NUMEROCOMPROBANTE
+            WHERE cu.CODIGOARTICULO=?
+            ORDER BY cb.FECHACOMPROBANTE DESC
+        """, (art_id,))
+        for r in cur1c.fetchall():
+            out['l1_comprobantes'].append({
+                'tipo': (r[0] or '').strip() if isinstance(r[0], str) else r[0],
+                'numero': (r[1] or '').strip() if isinstance(r[1], str) else r[1],
+                'fecha': r[2].strftime('%Y-%m-%d') if hasattr(r[2], 'strftime') else str(r[2]),
+                'anulada': r[3],
+                'cantidad': r[4],
+                'precio_u': r[5],
+                'razonsocial': (r[6] or '').strip() if isinstance(r[6], str) else r[6],
+            })
+        c1c.close()
+    except Exception as e:
+        out['error_l1_comprobantes'] = str(e)
+
+    try:
+        c_sw = conn('LATIN1', db=DATABASE_MLT)
+        cur_sw = c_sw.cursor()
+        cur_sw.execute("""
+            SELECT cb.TIPOCOMPROBANTE, cb.NUMEROCOMPROBANTE, cb.FECHACOMPROBANTE,
+                   cb.ANULADA, cu.CANTIDAD, cu.PRECIOUNITARIO, cb.RAZONSOCIAL
+            FROM "CUERPOCOMPROBANTES" cu
+            JOIN "CABEZACOMPROBANTES" cb
+              ON cb.TIPOCOMPROBANTE=cu.TIPOCOMPROBANTE
+             AND cb.NUMEROCOMPROBANTE=cu.NUMEROCOMPROBANTE
+            WHERE cu.CODIGOARTICULO=?
+            ORDER BY cb.FECHACOMPROBANTE DESC
+        """, (art_id,))
+        for r in cur_sw.fetchall():
+            out['sw'].append({
+                'tipo': (r[0] or '').strip() if isinstance(r[0], str) else r[0],
+                'numero': (r[1] or '').strip() if isinstance(r[1], str) else r[1],
+                'fecha': r[2].strftime('%Y-%m-%d') if hasattr(r[2], 'strftime') else str(r[2]),
+                'anulada': r[3],
+                'cantidad': r[4],
+                'precio_u': r[5],
+                'razonsocial': (r[6] or '').strip() if isinstance(r[6], str) else r[6],
+            })
+        c_sw.close()
+    except Exception as e:
+        out['error_sw'] = str(e)
+
+    return out
+
+
+@app.get("/debug/fma-stock-articulo")
+def debug_fma_stock_articulo(codigo: str = '03375', _u=Depends(get_admin_user)):
+    """DEBUG TEMPORAL: llama FMA_STOCK depósito por depósito (igual que el
+    resto del proyecto) y muestra el STOCKREMANENTE crudo de un artículo
+    puntual en cada uno, para comparar contra lo que muestra Stock por
+    Depósito y aislar dónde está la discrepancia. Una sola conexión
+    reutilizada (la versión anterior abría 24 conexiones y daba timeout)."""
+    deps = ['001', '002', '003', '005', '006', '007', '008', '010', '011', '013', '016', '017']
+    try:
+        c = conn('WIN1252', db=DATABASE)
+        cur = c.cursor()
+        cur.execute('SELECT CODIGOARTICULO, CODIGOPARTICULAR FROM "ARTICULOS" WHERE CODIGOPARTICULAR=?', (codigo,))
+        row0 = cur.fetchone()
+        codigo_articulo_interno = str(row0[0]).strip() if row0 and row0[0] is not None else None
+
+        por_codigoparticular = {}
+        por_codigoarticulo = {}
+        for dep in deps:
+            try:
+                cur.execute(
+                    f'SELECT ID_ARTICULO, STOCKREMANENTE FROM "FMA_STOCK"(NULL, NULL, \'{dep}\', 1, 1) '
+                    f'WHERE ID_ARTICULO=?', (codigo,)
+                )
+                row = cur.fetchone()
+                por_codigoparticular[dep] = float(row[1]) if row else None
+            except Exception as e_dep:
+                por_codigoparticular[dep] = f"ERROR: {e_dep}"
+            if codigo_articulo_interno and codigo_articulo_interno != codigo:
+                try:
+                    cur.execute(
+                        f'SELECT ID_ARTICULO, STOCKREMANENTE FROM "FMA_STOCK"(NULL, NULL, \'{dep}\', 1, 1) '
+                        f'WHERE ID_ARTICULO=?', (codigo_articulo_interno,)
+                    )
+                    row_i = cur.fetchone()
+                    por_codigoarticulo[dep] = float(row_i[1]) if row_i else None
+                except Exception as e_dep2:
+                    por_codigoarticulo[dep] = f"ERROR: {e_dep2}"
+        c.close()
+        suma_part = sum(v for v in por_codigoparticular.values() if isinstance(v, (int, float)))
+        suma_art  = sum(v for v in por_codigoarticulo.values() if isinstance(v, (int, float)))
+        return {
+            "codigo_buscado_codigoparticular": codigo,
+            "codigoarticulo_interno_real": codigo_articulo_interno,
+            "stock_por_deposito_usando_CODIGOPARTICULAR": por_codigoparticular,
+            "suma_usando_CODIGOPARTICULAR": suma_part,
+            "stock_por_deposito_usando_CODIGOARTICULO_interno": por_codigoarticulo,
+            "suma_usando_CODIGOARTICULO_interno": suma_art,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/debug/articulos-columnas-costo")
+def debug_articulos_columnas_costo(codigo: str = '03748', _u=Depends(get_admin_user)):
+    """DEBUG TEMPORAL: lista todas las columnas de ARTICULOS y sus valores para
+    un código puntual, para identificar cuál corresponde al Costo Reposición
+    que se ve en Flexxus (la columna COSTO no lo trae)."""
+    try:
+        c = conn('WIN1252', db=DATABASE)
+        cur = c.cursor()
+        cur.execute('SELECT * FROM "ARTICULOS" WHERE CODIGOARTICULO=?', (codigo,))
+        row = cur.fetchone()
+        if not row:
+            c.close()
+            return {"error": f"artículo {codigo} no encontrado"}
+        cols = [d[0] for d in cur.description]
+        c.close()
+        # Solo columnas que contengan COSTO o PRECIO en el nombre, para no saturar
+        relevantes = {cols[i]: row[i] for i in range(len(cols)) if 'COSTO' in cols[i].upper() or 'PRECIO' in cols[i].upper()}
+        return {"codigo": codigo, "columnas_costo_precio": relevantes, "todas_las_columnas": cols}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/debug/tablas-costo")
+def debug_tablas_costo(_u=Depends(get_admin_user)):
+    """DEBUG TEMPORAL: lista tablas del esquema cuyo nombre sugiere que guardan
+    el costo de reposición de artículos (no está en ARTICULOS directamente)."""
+    try:
+        c = conn('WIN1252', db=DATABASE)
+        cur = c.cursor()
+        cur.execute(
+            "SELECT TRIM(RDB$RELATION_NAME) FROM RDB$RELATIONS "
+            "WHERE RDB$SYSTEM_FLAG = 0 AND ("
+            "UPPER(RDB$RELATION_NAME) CONTAINING 'COSTO' OR "
+            "UPPER(RDB$RELATION_NAME) CONTAINING 'REPOSICION' OR "
+            "UPPER(RDB$RELATION_NAME) CONTAINING 'ARTICULOPRECIO' OR "
+            "UPPER(RDB$RELATION_NAME) CONTAINING 'PRECIOCOSTO'"
+            ") ORDER BY 1"
+        )
+        tablas = [r[0] for r in cur.fetchall()]
+        c.close()
+        return {"tablas_candidatas": tablas}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/debug/cambiosdecostos")
+def debug_cambiosdecostos(codigo: str = '03748', _u=Depends(get_admin_user)):
+    """DEBUG TEMPORAL: inspecciona CAMBIOSDECOSTOS, candidata a guardar el
+    Costo Reposición actual de un artículo (no está en ARTICULOS)."""
+    try:
+        c = conn('WIN1252', db=DATABASE)
+        cur = c.cursor()
+        cur.execute('SELECT FIRST 1 * FROM "CAMBIOSDECOSTOS"')
+        row0 = cur.fetchone()
+        cols = [d[0] for d in cur.description] if row0 else []
+        # Buscar columna de artículo entre las disponibles
+        col_art = next((cc for cc in cols if 'ARTICULO' in cc.upper()), None)
+        registros = []
+        if col_art:
+            cur.execute(
+                f'SELECT FIRST 5 * FROM "CAMBIOSDECOSTOS" WHERE {col_art}=? ORDER BY 1 DESC',
+                (codigo,)
+            )
+            for r in cur.fetchall():
+                registros.append({cols[i]: r[i] for i in range(len(cols))})
+        c.close()
+        return {"columnas": cols, "columna_articulo_detectada": col_art, "registros_para_codigo": registros}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/admin/articulos-buscar")
+def admin_articulos_buscar(q: str = Query("", min_length=2), _u=Depends(get_admin_user)):
+    """Autocomplete rápido de artículos para filtro Rotación (sin FMA_STOCK)."""
+    try:
+        c = conn('WIN1252', db=DATABASE)
+        cur = c.cursor()
+        cur.execute(
+            "SELECT FIRST 15 CODIGOARTICULO, CODIGOPARTICULAR, DESCRIPCION "
+            "FROM \"ARTICULOS\" WHERE ACTIVO = '1' "
+            "AND (UPPER(CODIGOPARTICULAR) CONTAINING UPPER(?) OR UPPER(DESCRIPCION) CONTAINING UPPER(?)) "
+            "ORDER BY CASE WHEN UPPER(CODIGOPARTICULAR) STARTING WITH UPPER(?) THEN 0 ELSE 1 END, "
+            "CODIGOPARTICULAR, DESCRIPCION",
+            (q, q, q)
+        )
+        rows = cur.fetchall()
+        c.close()
+        return [{'codigo': r[0], 'codigoparticular': r[1] or r[0], 'descripcion': r[2] or ''} for r in rows]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/admin/ofertas")
 def admin_get_ofertas(_u=Depends(get_admin_user)):
@@ -3093,42 +4351,77 @@ def get_ofertas_for_vendor(vendedor: Optional[str] = None, perfil: Optional[str]
         params.append(perf_up)
     base_cond += ")"
     offers = c.execute(base_cond, params).fetchall()
+    if not offers:
+        c.close()
+        return []
+
+    # ── Recolectar condiciones de texto para resolver en UNA sola conexión Firebird ──
+    # (Evita abrir N conexiones Firebird — una por cada condición de texto — que
+    # causaba demoras de 5-15 s en cargarOfertas() del frontend.)
+    ids = [o['id'] for o in offers]
+    ph  = ','.join('?' * len(ids))
+    all_conds_rows = c.execute(
+        f"SELECT offer_id, condicion_comercial FROM offer_conditions WHERE offer_id IN ({ph})", ids
+    ).fetchall()
+
+    # Separar las que ya son código numérico de las que son texto libre
+    text_conds = set()
+    for row in all_conds_rows:
+        val = str(row[1] or '').strip()
+        if val and not val.isdigit():
+            text_conds.add(val)
+
+    # Una sola conexión Firebird para resolver TODOS los textos pendientes
+    text_to_code = {}
+    if text_conds:
+        try:
+            fb = conn('WIN1252')
+            cur_fb = fb.cursor()
+            for txt in text_conds:
+                cur_fb.execute(
+                    'SELECT FIRST 1 CODIGOMULTIPLAZO FROM "MULTIPLAZOS" '
+                    'WHERE UPPER(TRIM(DESCRIPCION)) = UPPER(TRIM(?))', (txt,))
+                row = cur_fb.fetchone()
+                text_to_code[txt] = str(row[0]).strip() if row else txt
+            fb.close()
+        except Exception:
+            pass  # si Firebird falla, se usa el texto tal cual
+
+    # Agrupar condiciones por offer_id con resolución ya lista
+    conds_by_offer = {}
+    for row in all_conds_rows:
+        oid = row[0]
+        val = str(row[1] or '').strip()
+        resolved_val = val if val.isdigit() else text_to_code.get(val, val)
+        conds_by_offer.setdefault(oid, []).append(resolved_val)
+
+    # ── Batch queries SQLite para el resto de tablas relacionadas ──────────────
+    fin_by_offer  = {}
+    for row in c.execute(f"SELECT offer_id, porcentaje, orden FROM offer_financial_details WHERE offer_id IN ({ph}) ORDER BY orden", ids):
+        fin_by_offer.setdefault(row[0], []).append({'porcentaje': row[1], 'orden': row[2]})
+
+    prod_by_offer = {}
+    for row in c.execute(f"SELECT * FROM offer_product_details WHERE offer_id IN ({ph})", ids):
+        prod_by_offer.setdefault(row['offer_id'], []).append(dict(row))
+
+    cat_by_offer  = {}
+    for row in c.execute(f"SELECT offer_id, nivel, valor FROM offer_category_filters WHERE offer_id IN ({ph})", ids):
+        cat_by_offer.setdefault(row[0], []).append({'nivel': row[1], 'valor': row[2]})
+
+    esc_by_offer  = {}
+    for row in c.execute(f"SELECT offer_id, min_combos, descuento_pct FROM offer_combo_escalones WHERE offer_id IN ({ph}) ORDER BY min_combos", ids):
+        esc_by_offer.setdefault(row[0], []).append({'min_combos': row[1], 'descuento_pct': row[2]})
+
     result = []
     for o in offers:
         od = dict(o)
-        od['financial_details']  = [dict(r) for r in c.execute(
-            "SELECT porcentaje, orden FROM offer_financial_details WHERE offer_id=? ORDER BY orden", (od['id'],)).fetchall()]
-        od['product_details']    = [dict(r) for r in c.execute(
-            "SELECT * FROM offer_product_details WHERE offer_id=?", (od['id'],)).fetchall()]
-        raw_conds = [r[0] for r in c.execute(
-            "SELECT condicion_comercial FROM offer_conditions WHERE offer_id=?", (od['id'],)).fetchall()]
-        # Resolver condiciones guardadas como texto → CODIGOMULTIPLAZO numérico.
-        # Backward-compat: ofertas antiguas guardaban la descripción; las nuevas guardan el código.
-        resolved = []
-        for cond in raw_conds:
-            cond_str = str(cond or '').strip()
-            if cond_str.isdigit():
-                # Ya es código numérico — usar tal cual
-                resolved.append(cond_str)
-            else:
-                # Texto: buscar el CODIGOMULTIPLAZO en Firebird
-                try:
-                    fb = conn('WIN1252')
-                    cur_fb = fb.cursor()
-                    cur_fb.execute(
-                        'SELECT FIRST 1 CODIGOMULTIPLAZO FROM "MULTIPLAZOS" '
-                        'WHERE UPPER(TRIM(DESCRIPCION)) = UPPER(TRIM(?))', (cond_str,))
-                    row = cur_fb.fetchone()
-                    fb.close()
-                    resolved.append(str(row[0]).strip() if row else cond_str)
-                except Exception:
-                    resolved.append(cond_str)
-        od['conditions'] = resolved
-        od['category_filters']   = [dict(r) for r in c.execute(
-            "SELECT nivel, valor FROM offer_category_filters WHERE offer_id=?", (od['id'],)).fetchall()]
-        od['combo_escalones']    = [dict(r) for r in c.execute(
-            "SELECT min_combos, descuento_pct FROM offer_combo_escalones WHERE offer_id=? ORDER BY min_combos", (od['id'],)).fetchall()]
-        for k,d in [('deposito',''),('tipo_financiero','descuento_total'),('monto_minimo',0),('cupo',0),('usos',0)]:
+        oid = od['id']
+        od['financial_details'] = fin_by_offer.get(oid, [])
+        od['product_details']   = prod_by_offer.get(oid, [])
+        od['conditions']        = conds_by_offer.get(oid, [])
+        od['category_filters']  = cat_by_offer.get(oid, [])
+        od['combo_escalones']   = esc_by_offer.get(oid, [])
+        for k, d in [('deposito',''),('tipo_financiero','descuento_total'),('monto_minimo',0),('cupo',0),('usos',0)]:
             if k not in od: od[k] = d
         result.append(od)
     c.close()
@@ -3228,6 +4521,16 @@ def get_icon(filename: str):
 
 
 # ─── Stock ─────────────────────────────────────────────────────────────────────
+@app.get("/stock/cache-ts")
+def stock_cache_ts():
+    """Devuelve la antigüedad en segundos de cada depósito en cache."""
+    now = time.time()
+    result = {}
+    with _fma_cache_lock:
+        for dep, (ts, _) in _fma_cache.items():
+            result[dep] = round(now - ts)
+    return {"cache": result, "ttl": _FMA_CACHE_TTL, "ts": now}
+
 @app.get("/stock")
 def get_stock(
     buscar: Optional[str] = None,
@@ -3733,6 +5036,131 @@ def exportar_stock_pdf(
         headers={"Content-Disposition": "inline; filename=stock_remanente.pdf"})
 
 
+@app.get("/stock/batch")
+def get_articulos_batch(codigos: str = Query(..., description="Códigos separados por coma")):
+    """Devuelve stock y datos de múltiples artículos en una sola llamada."""
+    codes = [c.strip() for c in codigos.split(',') if c.strip()]
+    if not codes:
+        return []
+    c = conn()
+    cur = c.cursor()
+    # Cotización USD
+    try:
+        cur.execute('SELECT CAMBIO FROM "MONEDAS" WHERE CODIGOMONEDA = ?', ('DOLARES',))
+        rm = cur.fetchone()
+        cambio_usd = float(rm[0]) if rm else 1.0
+    except Exception:
+        cambio_usd = 1.0
+    _COLS = ('SELECT a.CODIGOARTICULO, a.DESCRIPCION, a.CODIGOMARCA, '
+             'a.PRECIOLISTA1, a.PRECIOLISTA5, a.ALICUOTAIVA, '
+             'a.CODIGOMONEDA, a.CODIGOPARTICULAR, a.DTOMAXIMO1, a.APLICABLEABONIFICACION, '
+             'a.PERMITESTOCKNEGATIVO '
+             'FROM "ARTICULOS" a WHERE ')
+    placeholders = ','.join(['?' for _ in codes])
+    # Buscar por CODIGOPARTICULAR
+    cur.execute(_COLS + f'a.CODIGOPARTICULAR IN ({placeholders})', codes)
+    rows_by_part = {str(r[7] or '').strip(): r for r in cur.fetchall()}
+    # Los no encontrados, buscar por CODIGOARTICULO
+    missing = [c2 for c2 in codes if c2 not in rows_by_part]
+    rows_by_art = {}
+    if missing:
+        ph2 = ','.join(['?' for _ in missing])
+        cur.execute(_COLS + f'a.CODIGOARTICULO IN ({ph2})', missing)
+        rows_by_art = {str(r[0] or '').strip(): r for r in cur.fetchall()}
+    c.close()
+    # FMA stock (cache compartido, una llamada paralela)
+    _DEPS = ['001', '002', '003', '005', '013', '016']
+    rem_bulk = _fma_stock_parallel(_DEPS)
+    reservas = _get_reservas_activas()
+    results = []
+    for cod in codes:
+        row = rows_by_part.get(cod) or rows_by_art.get(cod)
+        if not row:
+            continue
+        moneda = (row[6] or '').strip().upper()
+        factor = cambio_usd if moneda == 'DOLARES' else 1.0
+        def conv(v, f=factor): return math.ceil(float(v) * f * 100) / 100 if v else 0
+        codigoarticulo = row[0]
+        cod_key = str(codigoarticulo).strip()
+        rem = {dep: rem_bulk[dep].get(codigoarticulo, rem_bulk[dep].get(cod_key, 0.0)) for dep in _DEPS}
+        dto_max_raw = row[8]
+        aplica_b = str(row[9] or '0').strip() == '1'
+        dto_max = float(dto_max_raw) if (dto_max_raw is not None and aplica_b) else None
+        permite_neg = str(row[10] or '0').strip() == '1'
+        item = {
+            "codigo": codigoarticulo,
+            "codigoparticular": (row[7] or row[0] or '').strip(),
+            "descripcion": row[1],
+            "marca": (row[2] or '').strip(),
+            "precio1": conv(row[3]), "precio5": conv(row[4]),
+            "iva": row[5], "moneda": row[6],
+            "remanente_001": rem['001'], "remanente_002": rem['002'],
+            "remanente_003": rem['003'], "remanente_005": rem['005'],
+            "remanente_013": rem['013'], "remanente_016": rem['016'],
+            "dto_max": dto_max,
+            "permite_stock_negativo": permite_neg,
+            "_input_cod": cod,
+        }
+        _apply_reservas([item], reservas, rem_key='remanente_001')
+        item.pop('reservado', None)
+        item.pop('reservado_por_deposito', None)
+        results.append(item)
+    return results
+
+
+@app.get("/conjunto/{codigo}/partes")
+def get_conjunto_partes(codigo: str):
+    """Dado CODIGOPARTICULAR de un Conjunto, devuelve sus artículos componentes."""
+    c = conn()
+    cur = c.cursor()
+    cur.execute('SELECT CODIGOARTICULO FROM "ARTICULOS" WHERE CODIGOPARTICULAR = ?', (codigo,))
+    row = cur.fetchone()
+    if not row:
+        cur.execute('SELECT CODIGOARTICULO FROM "ARTICULOS" WHERE CODIGOARTICULO = ?', (codigo,))
+        row = cur.fetchone()
+    if not row:
+        c.close()
+        raise HTTPException(404, "Conjunto no encontrado")
+    cod_interno = row[0]
+    cur.execute(
+        'SELECT cj.CODIGOARTICULO, cj.CANTIDAD, a.DESCRIPCION, a.DESCRIPCIONADICIONAL, '
+        'a.CODIGOPARTICULAR, a.PRECIOLISTA1, a.PRECIOLISTA2, a.PRECIOLISTA3, a.PRECIOLISTA5, '
+        'a.ALICUOTAIVA, a.CODIGOUNIDADMEDIDA, a.CODIGOMONEDA, a.PERMITESTOCKNEGATIVO, cj.COEFICIENTEPRECIO '
+        'FROM "CONJUNTOS" cj '
+        'JOIN "ARTICULOS" a ON a.CODIGOARTICULO = cj.CODIGOARTICULO '
+        'WHERE cj.CODIGOCONJUNTO = ? ORDER BY cj.LINEA',
+        (cod_interno,)
+    )
+    partes_rows = cur.fetchall()
+    c.close()
+    try:
+        c2 = conn(); cur2 = c2.cursor()
+        cur2.execute('SELECT CAMBIO FROM "MONEDAS" WHERE CODIGOMONEDA = ?', ('DOLARES',))
+        rm = cur2.fetchone()
+        cambio_usd = float(rm[0]) if rm else 1.0
+        c2.close()
+    except Exception:
+        cambio_usd = 1.0
+    partes = []
+    for p in partes_rows:
+        moneda = (p[11] or '').strip().upper()
+        factor = cambio_usd if moneda == 'DOLARES' else 1.0
+        def conv(v): return math.ceil(float(v) * factor * 100) / 100 if v else 0
+        partes.append({
+            "codigo": (p[0] or '').strip(),
+            "codigoparticular": (p[4] or p[0] or '').strip(),
+            "cantidad": float(p[1] or 1),
+            "descripcion": p[2],
+            "descripcion_adicional": p[3],
+            "precio1": conv(p[5]), "precio2": conv(p[6]),
+            "precio3": conv(p[7]), "precio5": conv(p[8]),
+            "iva": p[9], "unidad": p[10], "moneda": p[11],
+            "permite_stock_negativo": str(p[12] or '0').strip() == '1',
+            "coeficiente_precio": float(p[13] or 0)
+        })
+    return partes
+
+
 @app.get("/stock/{codigo}")
 def get_articulo(codigo: str):
     c = conn()
@@ -3747,7 +5175,7 @@ def get_articulo(codigo: str):
     _COLS = ('SELECT a.CODIGOARTICULO, a.DESCRIPCION, a.DESCRIPCIONADICIONAL, a.CODIGOMARCA, '
              'a.PRECIOLISTA1, a.PRECIOLISTA2, a.PRECIOLISTA3, a.PRECIOLISTA5, a.ALICUOTAIVA, a.CODIGOUNIDADMEDIDA, '
              'a.CODIGOMONEDA, a.CODIGOPARTICULAR, a.DTOMAXIMO1, a.APLICABLEABONIFICACION, '
-             'a.CODIGORUBRO, r.CODIGOSUPERRUBRO, sr.CODIGOGRUPOSUPERRUBRO '
+             'a.CODIGORUBRO, r.CODIGOSUPERRUBRO, sr.CODIGOGRUPOSUPERRUBRO, a.PERMITESTOCKNEGATIVO, a.PARTECONJUNTO '
              'FROM "ARTICULOS" a '
              'LEFT JOIN "RUBROS" r ON r.CODIGORUBRO = a.CODIGORUBRO '
              'LEFT JOIN "SUPERRUBROS" sr ON sr.CODIGOSUPERRUBRO = r.CODIGOSUPERRUBRO '
@@ -3790,7 +5218,9 @@ def get_articulo(codigo: str):
         "codigo_rubro":           (row[14] or '').strip(),
         "codigo_superrubro":      (row[15] or '').strip(),
         "codigo_gruposuperrubro": (row[16] or '').strip(),
-        "dto_max": dto_max
+        "dto_max": dto_max,
+        "permite_stock_negativo": str(row[17] or '0').strip() == '1',
+        "es_conjunto": str(row[18] or '').strip().upper() == 'C'
     }
     # Aplicar reservas activas: descuenta remanente_XXX por depósito
     _apply_reservas([item], _get_reservas_activas(), rem_key='remanente_001')
@@ -5763,6 +7193,128 @@ def get_pedido_detalle(numero: str, db: str = Query("oficial")):
         "precio_unitario": r[5], "precio_total": r[6], "iva": r[7]
     } for r in rows]
 
+@app.get("/pedidos/{numero}/copia-datos")
+def get_pedido_copia(numero: str, db: str = Query("oficial"), _u=Depends(get_current_user)):
+    """Devuelve cabecera + items de un pedido para pre-cargar en nuevo NV."""
+    db_path = DATABASE_MLT if db == 'sw' else DATABASE
+    c = conn(db=db_path)
+    cur = c.cursor()
+    cur.execute(
+        'SELECT CODIGOCLIENTE, RAZONSOCIAL, CODIGOMULTIPLAZO, CODIGOTRANSPORTE, '
+        'DIRECCION, CODIGOUSUARIO '
+        'FROM "CABEZAPEDIDOS" WHERE NUMEROCOMPROBANTE = ? AND TIPOCOMPROBANTE = \'NP\'',
+        (numero,)
+    )
+    cab = cur.fetchone()
+    if not cab:
+        c.close()
+        raise HTTPException(404, f"Pedido {numero} no encontrado")
+    codigocliente, razonsocial, codigomultiplazo, codigotransporte, direccion, codigousuario = cab
+    # Deposito del primer item
+    cur.execute(
+        'SELECT FIRST 1 CODIGODEPOSITO FROM "CUERPOPEDIDOS" WHERE NUMEROCOMPROBANTE = ? AND TIPOCOMPROBANTE = \'NP\'',
+        (numero,)
+    )
+    dep_row = cur.fetchone()
+    codigodeposito = str(dep_row[0] or '001').strip() if dep_row else '001'
+    # Items (misma conexión, mismo DB)
+    cur.execute(
+        'SELECT COALESCE(NULLIF(TRIM(it.CODIGOPARTICULAR),\'\'), NULLIF(TRIM(a.CODIGOPARTICULAR),\'\'), TRIM(it.CODIGOARTICULO)), '
+        'it.DESCRIPCION, it.CANTIDAD, it.PRECIOUNITARIO, it.DESCUENTO, it.PORCENTAJEIVA '
+        'FROM "CUERPOPEDIDOS" it '
+        'LEFT JOIN "ARTICULOS" a ON a.CODIGOARTICULO = it.CODIGOARTICULO '
+        'WHERE it.NUMEROCOMPROBANTE = ? AND it.TIPOCOMPROBANTE = \'NP\' ORDER BY it.LINEA',
+        (numero,)
+    )
+    items = [{"codigo": r[0], "descripcion": r[1], "cantidad": float(r[2] or 1),
+              "precio_unitario": float(r[3] or 0), "descuento": float(r[4] or 0),
+              "iva": float(r[5] or 21)} for r in cur.fetchall()]
+    c.close()
+    return {
+        "codigocliente": str(codigocliente or '').strip(),
+        "razonsocial": str(razonsocial or '').strip(),
+        "codigomultiplazo": str(codigomultiplazo or '').strip(),
+        "codigotransporte": str(codigotransporte or '0').strip(),
+        "domicilio_entrega": str(direccion or '').strip(),
+        "codigodeposito": codigodeposito,
+        "codigousuario": str(codigousuario or '').strip(),
+        "items": items
+    }
+
+@app.get("/presupuestos/{numero}/debug-raw")
+def get_presupuesto_debug(numero: str):
+    """DEBUG TEMPORAL: devuelve todos los campos de CABEZAPRESUPUESTOS para comparar."""
+    try:
+        c = conn(db=DATABASE)
+        cur = c.cursor()
+        cur.execute(
+            'SELECT TIPOCOMPROBANTE, NUMEROCOMPROBANTE, CODIGOCLIENTE, RAZONSOCIAL, '
+            'FECHACOMPROBANTE, FECHAVENCIMIENTO, TOTAL, ANULADA, CODIGOUSUARIO, '
+            'CODIGOMULTIPLAZO, CODIGOTRANSPORTE, CODIGOOPERACION, CLASECOMPROBANTE, '
+            'CODIGORESPONSABLE, CODIGOUSUARIO2, DESCUENTOPORCENTAJE, FECHAAPROBADO, '
+            'CODIGOUSUARIOAPROBACION, TIPOIVA '
+            'FROM "CABEZAPRESUPUESTOS" WHERE NUMEROCOMPROBANTE = ?', (numero,)
+        )
+        row = cur.fetchone()
+        c.close()
+        if not row:
+            raise HTTPException(404, f"Presupuesto {numero} no encontrado")
+        cols = ['tipocomprobante','numerocomprobante','codigocliente','razonsocial',
+                'fechacomprobante','fechavencimiento','total','anulada','codigousuario',
+                'codigomultiplazo','codigotransporte','codigooperacion','clasecomprobante',
+                'codigoresponsable','codigousuario2','descuentoporcentaje','fechaaprobado',
+                'codigousuarioaprobacion','tipoiva']
+        return {c: str(v) if v is not None else None for c, v in zip(cols, row)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+@app.get("/presupuestos/{numero}/copia-datos")
+def get_presupuesto_copia(numero: str, _u=Depends(get_current_user)):
+    """Devuelve cabecera + items de un presupuesto para pre-cargar en nuevo NV."""
+    try:
+        c = conn(db=DATABASE)
+        cur = c.cursor()
+        cur.execute(
+            'SELECT CODIGOCLIENTE, RAZONSOCIAL, CODIGOMULTIPLAZO, CODIGOTRANSPORTE, '
+            'DIRECCION, CODIGOUSUARIO '
+            'FROM "CABEZAPRESUPUESTOS" WHERE NUMEROCOMPROBANTE = ?',
+            (numero,)
+        )
+        cab = cur.fetchone()
+        if not cab:
+            c.close()
+            raise HTTPException(404, f"Presupuesto {numero} no encontrado")
+        codigocliente, razonsocial, codigomultiplazo, codigotransporte, direccion, codigousuario = cab
+        codigodeposito = '001'  # CABEZAPRESUPUESTOS y CUERPOPRESUPUESTOS no tienen CODIGODEPOSITO
+        cur.execute(
+            'SELECT COALESCE(NULLIF(TRIM(cp.CODIGOPARTICULAR),\'\'), NULLIF(TRIM(a.CODIGOPARTICULAR),\'\'), TRIM(cp.CODIGOARTICULO)), '
+            'cp.DESCRIPCION, cp.CANTIDAD, cp.PRECIOUNITARIO, cp.BONIFICACION, cp.PORCENTAJEIVA '
+            'FROM "CUERPOPRESUPUESTOS" cp '
+            'LEFT JOIN "ARTICULOS" a ON a.CODIGOARTICULO = cp.CODIGOARTICULO '
+            'WHERE cp.NUMEROCOMPROBANTE = ? ORDER BY cp.LINEA',
+            (numero,)
+        )
+        items = [{"codigo": r[0], "descripcion": r[1], "cantidad": float(r[2] or 1),
+                  "precio_unitario": float(r[3] or 0), "descuento": float(r[4] or 0),
+                  "iva": float(r[5] or 21)} for r in cur.fetchall()]
+        c.close()
+        return {
+            "codigocliente": str(codigocliente or '').strip(),
+            "razonsocial": str(razonsocial or '').strip(),
+            "codigomultiplazo": str(codigomultiplazo or '').strip(),
+            "codigotransporte": str(codigotransporte or '0').strip(),
+            "domicilio_entrega": str(direccion or '').strip(),
+            "codigodeposito": str(codigodeposito or '001').strip() or '001',
+            "codigousuario": str(codigousuario or '').strip(),
+            "items": items
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Error interno al obtener presupuesto {numero}: {type(e).__name__}: {e}")
+
 # ─── PDF Nota de Pedido ────────────────────────────────────────────────────────
 @app.get("/pedidos/{numero}/pdf")
 def pedido_pdf(numero: str, db: str = Query("oficial"),
@@ -6441,6 +7993,8 @@ def crear_pedido(body: NuevoPedido, db: str = Query("oficial")):
             except Exception:
                 pass  # No rollback del pedido por fallo en presupuesto
 
+        # Invalidar caché del depósito afectado para que otros vendedores vean stock actualizado
+        threading.Thread(target=_fma_cache_invalidate, args=([body.codigodeposito],), daemon=True).start()
         return {"ok": True, "numero": nuevo_num, "total": round(total + iva1, 2), "_db_usado": db, "_db_path": db_path}
     except Exception as e:
         c.rollback()
@@ -6792,6 +8346,8 @@ def crear_presupuesto(body: NuevoPresupuesto, db: str = Query("oficial")):
         )
         c.commit()
         c.close()
+        # Invalidar caché (presupuesto no tiene deposito en modelo, invalidar todos)
+        threading.Thread(target=_fma_cache_invalidate, daemon=True).start()
         return {"ok": True, "numero": nuevo_num, "total": round(total + iva1, 2)}
 
     except Exception as e:
@@ -10729,113 +12285,7 @@ def debug_gap2_akrafft():
         result["error_sin_cta"] = str(e)
 
     # 3. Suma SIN filtro de ANULADA (solo CUENTACORRIENTE='1', debe>0)
-    try:
-        rows = _fresh(
-            f'SELECT COUNT(*), SUM(TOTAL+IVA1+IVA2-PAGADO) FROM "CABEZACOMPROBANTES" '
-            f"WHERE CODIGOCLIENTE IN ({ph}) AND CUENTACORRIENTE='1' "
-            f"AND TIPOCOMPROBANTE NOT IN ('RE','RI','INA') "
-            f"AND (TOTAL+IVA1+IVA2-PAGADO) > 0",
-            tuple(codigos)
-        )
-        result["sin_filtro_anulada_count"] = rows[0][0]
-        result["sin_filtro_anulada_suma"] = float(rows[0][1] or 0)
-    except Exception as e:
-        result["error_sin_anulada"] = str(e)
-
-    # 4. SIN ningún filtro (solo debe>0, no RE/RI/INA)
-    try:
-        rows = _fresh(
-            f'SELECT COUNT(*), SUM(TOTAL+IVA1+IVA2-PAGADO) FROM "CABEZACOMPROBANTES" '
-            f"WHERE CODIGOCLIENTE IN ({ph}) "
-            f"AND TIPOCOMPROBANTE NOT IN ('RE','RI','INA') "
-            f"AND (TOTAL+IVA1+IVA2-PAGADO) > 0",
-            tuple(codigos)
-        )
-        result["sin_ningun_filtro_count"] = rows[0][0]
-        result["sin_ningun_filtro_suma"] = float(rows[0][1] or 0)
-    except Exception as e:
-        result["error_sin_filtros"] = str(e)
-
-    # 5. Valores de MONEDAS (CODIGOMONEDA + CAMBIO)
-    try:
-        rows = _fresh('SELECT CODIGOMONEDA, CAMBIO FROM "MONEDAS"')
-        result["monedas"] = [{"cod": str(r[0]).strip(), "cambio": float(r[1] or 1)} for r in rows]
-    except Exception as e:
-        result["error_monedas"] = str(e)
-
-    # 6. Distribución de TIPOCOMPROBANTE para AKRAFFT con debe>0
-    try:
-        rows = _fresh(
-            f'SELECT TIPOCOMPROBANTE, COUNT(*), SUM(TOTAL+IVA1+IVA2-PAGADO) '
-            f'FROM "CABEZACOMPROBANTES" WHERE CODIGOCLIENTE IN ({ph}) '
-            f"AND CUENTACORRIENTE='1' AND ANULADA='0' AND (TOTAL+IVA1+IVA2-PAGADO)>0 "
-            f'GROUP BY TIPOCOMPROBANTE ORDER BY 3 DESC',
-            tuple(codigos)
-        )
-        result["dist_tipo_con_debe"] = [
-            {"tipo": str(r[0]).strip(), "count": r[1], "suma": float(r[2] or 0)}
-            for r in rows
-        ]
-    except Exception as e:
-        result["error_dist_tipo"] = str(e)
-
-    return result
-
-@app.get("/debug/gap_akrafft")
-def debug_gap_akrafft():
-    """
-    Investiga el gap entre nuestra app ($37.7M) y Flexxus ($56.4M) para AKRAFFT.
-    Hipótesis: clientes inactivos con deuda, o diferencia de método de cálculo.
-    """
-    DB_PROD = 'c:/flexxus/DB/DB-Microbell.gdb'
-
-    def _fresh(sql, params=None):
-        c2 = firebirdsql.connect(host=HOST, port=PORT, database=DB_PROD,
-                                  user=DB_USER, password=DB_PASS, charset='WIN1252')
-        cur2 = c2.cursor()
-        if params:
-            cur2.execute(sql, params)
-        else:
-            cur2.execute(sql)
-        rows = cur2.fetchall()
-        c2.close()
-        return rows
-
-    result = {}
-
-    # 1. Clientes activos AKRAFFT (lo que ya hace resumen_deudas)
-    try:
-        rows = _fresh('SELECT COUNT(*) FROM "CLIENTES" WHERE ACTIVO=? AND UPPER(CODIGOVENDEDOR)=?',
-                      ('1', 'AKRAFFT'))
-        result["clientes_activos"] = rows[0][0]
-    except Exception as e:
-        result["error_activos"] = str(e)
-
-    # 2. Clientes INACTIVOS de AKRAFFT con deuda en DB_PROD
-    try:
-        rows = _fresh('SELECT CODIGOCLIENTE FROM "CLIENTES" WHERE ACTIVO<>? AND UPPER(CODIGOVENDEDOR)=?',
-                      ('1', 'AKRAFFT'))
-        codigos_inactivos = [str(r[0]).strip() for r in rows if (r[0] or '').strip()]
-        result["clientes_inactivos"] = len(codigos_inactivos)
-    except Exception as e:
-        codigos_inactivos = []
-        result["error_inactivos"] = str(e)
-
-    if codigos_inactivos:
-        ph = ', '.join(['?'] * len(codigos_inactivos))
-        try:
-            rows = _fresh(
-                f'SELECT COUNT(*), SUM(TOTAL+IVA1+IVA2-PAGADO) FROM "CABEZACOMPROBANTES" '
-                f"WHERE CODIGOCLIENTE IN ({ph}) AND CUENTACORRIENTE='1' AND ANULADA='0' "
-                f"AND TIPOCOMPROBANTE NOT IN ('RE','RI','INA') AND (TOTAL+IVA1+IVA2-PAGADO)>0",
-                tuple(codigos_inactivos)
-            )
-            result["inactivos_count_con_debe"] = rows[0][0]
-            result["inactivos_suma_debe_bruta"] = float(rows[0][1] or 0)
-        except Exception as e:
-            result["error_inactivos_debe"] = str(e)
-
-    # 3. Suma bruta DB_PROD de clientes activos AKRAFFT (sin conversión de moneda)
+    # 3. Suma bruta de clientes activos AKRAFFT (sin conversión de moneda)
     try:
         rows = _fresh('SELECT CODIGOCLIENTE FROM "CLIENTES" WHERE ACTIVO=? AND UPPER(CODIGOVENDEDOR)=?',
                       ('1', 'AKRAFFT'))
@@ -10852,118 +12302,4 @@ def debug_gap_akrafft():
     except Exception as e:
         result["error_activos_debe"] = str(e)
 
-    # 4. Suma bruta INCLUYENDO inactivos (lo que Flexxus podría mostrar)
-    try:
-        todos = codigos_activos + codigos_inactivos
-        ph = ', '.join(['?'] * len(todos))
-        rows = _fresh(
-            f'SELECT COUNT(*), SUM(TOTAL+IVA1+IVA2-PAGADO) FROM "CABEZACOMPROBANTES" '
-            f"WHERE CODIGOCLIENTE IN ({ph}) AND CUENTACORRIENTE='1' AND ANULADA='0' "
-            f"AND TIPOCOMPROBANTE NOT IN ('RE','RI','INA') AND (TOTAL+IVA1+IVA2-PAGADO)>0",
-            tuple(todos)
-        )
-        result["todos_count_con_debe"] = rows[0][0]
-        result["todos_suma_debe_bruta"] = float(rows[0][1] or 0)
-    except Exception as e:
-        result["error_todos"] = str(e)
-
-    # 5. Distribución de monedas en los registros con debe (activos)
-    try:
-        ph = ', '.join(['?'] * len(codigos_activos))
-        rows = _fresh(
-            f'SELECT CODIGOMONEDA, COUNT(*), SUM(TOTAL+IVA1+IVA2-PAGADO) FROM "CABEZACOMPROBANTES" '
-            f"WHERE CODIGOCLIENTE IN ({ph}) AND CUENTACORRIENTE='1' AND ANULADA='0' "
-            f"AND TIPOCOMPROBANTE NOT IN ('RE','RI','INA') AND (TOTAL+IVA1+IVA2-PAGADO)>0 "
-            f"GROUP BY CODIGOMONEDA",
-            tuple(codigos_activos)
-        )
-        result["dist_moneda_activos"] = [
-            {"moneda": str(r[0]).strip(), "count": r[1], "suma_bruta": float(r[2] or 0)}
-            for r in rows
-        ]
-    except Exception as e:
-        result["error_dist_moneda"] = str(e)
-
-    # 6. Cambios de moneda en DB_PROD
-    try:
-        rows = _fresh('SELECT CODIGOMONEDA, CAMBIO, COTIZACION FROM "MONEDAS"')
-        result["monedas"] = [{"cod": str(r[0]).strip(), "cambio": float(r[1] or 1), "cotizacion": float(r[2] or 1)} for r in rows]
-    except Exception as e:
-        result["error_monedas"] = str(e)
-
     return result
-
-@app.get("/debug/akrafft_en_mlt")
-def debug_akrafft_en_mlt():
-    """
-    Busca directamente en DB_MLT los códigos de clientes del vendedor AKRAFFT (de DB_PROD).
-    Muestra cuántos registros y cuánta deuda existe en DB_MLT para esos códigos.
-    """
-    DB_PROD     = 'c:/flexxus/DB/DB-Microbell.gdb'
-    DB_MLT_PROD = 'c:/flexxus/DB/DB-MLT-Microbell.gdb'
-
-    # 1. Obtener códigos AKRAFFT de DB_PROD
-    try:
-        c = conn('WIN1252', db=DB_PROD)
-        cur = c.cursor()
-        cur.execute(
-            'SELECT CODIGOCLIENTE FROM "CLIENTES" WHERE ACTIVO=? AND UPPER(CODIGOVENDEDOR)=?',
-            ('1', 'AKRAFFT')
-        )
-        codigos = [str(r[0]).strip() for r in cur.fetchall() if (r[0] or '').strip()]
-        c.close()
-    except Exception as e:
-        return {"error_prod": str(e)}
-
-    if not codigos:
-        return {"error": "Sin clientes AKRAFFT en DB_PROD"}
-
-    # 2. Contar en DB_MLT cuántos de esos códigos tienen registros
-    def _fresh_mlt(sql, params=None):
-        c2 = firebirdsql.connect(host=HOST, port=PORT, database=DB_MLT_PROD,
-                                  user=DB_USER, password=DB_PASS, charset='WIN1252')
-        cur2 = c2.cursor()
-        if params:
-            cur2.execute(sql, params)
-        else:
-            cur2.execute(sql)
-        rows = cur2.fetchall()
-        c2.close()
-        return rows
-
-    ph = ','.join(['?'] * len(codigos))
-
-    # 3. Registros totales en DB_MLT para esos códigos
-    try:
-        rows_count = _fresh_mlt(
-            f'SELECT COUNT(*), SUM(TOTAL+IVA1+IVA2-PAGADO) FROM "CABEZACOMPROBANTES" '
-            f"WHERE CODIGOCLIENTE IN ({ph}) AND ANULADA='0' "
-            f"AND TIPOCOMPROBANTE NOT IN ('RE','RI','INA')",
-            tuple(codigos)
-        )
-        total_registros = int(rows_count[0][0] or 0) if rows_count else 0
-        deuda_bruta     = float(rows_count[0][1] or 0) if rows_count else 0
-    except Exception as e:
-        return {"error_mlt_count": str(e), "codigos": codigos}
-
-    # 4. Registros con CUENTACORRIENTE='1' en DB_MLT
-    try:
-        rows_cta = _fresh_mlt(
-            f'SELECT COUNT(*), SUM(TOTAL+IVA1+IVA2-PAGADO) FROM "CABEZACOMPROBANTES" '
-            f"WHERE CODIGOCLIENTE IN ({ph}) AND CUENTACORRIENTE='1' AND ANULADA='0' "
-            f"AND TIPOCOMPROBANTE NOT IN ('RE','RI','INA')",
-            tuple(codigos)
-        )
-        total_cta = int(rows_cta[0][0] or 0) if rows_cta else 0
-        deuda_cta = float(rows_cta[0][1] or 0) if rows_cta else 0
-    except Exception as e:
-        return {"error_mlt_cta": str(e)}
-
-    return {
-        "codigos_akrafft": codigos,
-        "total_clientes": len(codigos),
-        "DB_MLT_registros_totales": total_registros,
-        "DB_MLT_deuda_bruta": deuda_bruta,
-        "DB_MLT_registros_cuentacorriente": total_cta,
-        "DB_MLT_deuda_cuentacorriente": deuda_cta,
-    }

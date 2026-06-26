@@ -33,3 +33,21 @@ Thumbs.db
 
 # Archivos de sesión/debug locales
 *.msg
+
+# APKs y keystores (binarios)
+*.apk
+*.keystore
+
+# SQLite journals
+*.db-journal
+
+# Backups
+*.bak_*
+*.bak
+
+# Notas y archivos de trabajo locales
+RETOMAR_MANANA.md
+RESUMEN_PROYECTO.md
+resumen_*.md
+resumen_*.pdf
+preview_icon_new.png

@@ -1,5 +1,5 @@
 // Service Worker — Vendedores Microbell
-const CACHE = 'microbell-v1';
+const CACHE = 'microbell-v2';
 const OFFLINE = ['/'];
 
 self.addEventListener('install', e => {

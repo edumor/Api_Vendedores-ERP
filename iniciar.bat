@@ -8,5 +8,5 @@ echo (en la red local: http://193.168.160.5:8000)
 echo.
 echo Presionar Ctrl+C para detener.
 echo.
-python main.py
+uvicorn main:app --host 0.0.0.0 --port 8000
 pause

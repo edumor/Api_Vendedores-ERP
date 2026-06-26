@@ -116,21 +116,26 @@ input:checked + .slider:before{transform:translateX(20px)}
     background:#fff;border-bottom:2px solid #e5e7eb;
     box-shadow:0 4px 12px rgba(0,0,0,.1)
   }
-  #topnav.nav-open{max-height:400px;padding:6px 0}
-  #topnav.nav-open::-webkit-scrollbar{display:none}
+  #topnav.nav-open{max-height:calc(100vh - 50px);padding:6px 0;overflow-y:auto;-webkit-overflow-scrolling:touch}
+  #topnav.nav-open::-webkit-scrollbar{width:4px}
+  #topnav.nav-open::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:2px}
   .nav-item{padding:10px 16px;font-size:.85rem;border-bottom:1px solid #f3f4f6;border-left:3px solid transparent;width:100%}
   .nav-item.active{border-left-color:#1a56db;border-bottom-color:transparent;background:#eff6ff}
   .nav-item:hover{background:#f9fafb}
-  /* Main content */
-  #main{margin-top:50px;padding:10px 8px;height:auto;overflow-y:auto;min-height:calc(100vh - 50px)}
+  /* Main content: scroll container real dentro del app overflow:hidden */
+  #main{margin-top:50px;padding:10px 8px;height:calc(100vh - 50px);overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch}
   /* Cards */
   .card{padding:12px 10px;border-radius:8px;margin-bottom:12px}
-  .card-title{font-size:.92rem}
+  .card-title{font-size:.92rem;flex-wrap:wrap;gap:6px}
   /* Grid */
   .grid2{grid-template-columns:1fr}
-  /* Forms */
-  .form-row{flex-direction:column;gap:8px}
-  .form-group{min-width:unset}
+  /* Forms: columna vertical, ocupa ancho completo */
+  .form-row{flex-direction:column!important;gap:8px;align-items:stretch!important}
+  .form-group{min-width:0!important;max-width:100%!important;width:100%;flex:none!important}
+  .form-group input,.form-group select{width:100%!important;box-sizing:border-box}
+  /* Botones dentro de form-row también full width */
+  .form-row > div{width:100%}
+  .form-row > div > .btn{width:100%;justify-content:center}
   /* Tables: scroll horizontal */
   .table-wrap, table{overflow-x:auto;display:block;white-space:nowrap}
   th,td{padding:6px 8px;font-size:.75rem}
@@ -141,9 +146,41 @@ input:checked + .slider:before{transform:translateX(20px)}
   .btn{padding:9px 16px;font-size:.83rem}
   .btn-sm{padding:6px 12px;font-size:.78rem}
   /* Stock section */
-  #sk-deps-chips{display:none}
-  /* Ajuste sección stock para móvil */
-  .form-row[style*="align-items:flex-end"]{flex-direction:column}
+  /* ── Stock: layout 2 columnas ── */
+  .sk-layout{display:flex;gap:12px;align-items:flex-start}
+  .sk-dep-panel{width:200px;flex-shrink:0;background:#f8fafc;border:1.5px solid #e2e8f0;border-radius:8px;overflow:hidden}
+  .sk-dep-panel-hdr{display:flex;align-items:center;justify-content:space-between;padding:7px 10px;background:#1a56db;color:#fff}
+  .sk-dep-panel-hdr span{font-size:.75rem;font-weight:700;letter-spacing:.02em}
+  .sk-dep-panel-hdr-btns{display:flex;gap:3px}
+  .sk-dep-panel-hdr-btns button{font-size:.68rem;padding:1px 6px;border:1px solid rgba(255,255,255,.5);border-radius:3px;background:rgba(255,255,255,.15);color:#fff;cursor:pointer}
+  .sk-dep-panel-hdr-btns button:hover{background:rgba(255,255,255,.3)}
+  #sk-dep-list{max-height:320px;overflow-y:auto}
+  .sk-dep-item{display:flex;align-items:center;gap:8px;padding:6px 10px;cursor:pointer;border-bottom:1px solid #f1f5f9;user-select:none}
+  .sk-dep-item:hover{background:#eff6ff}
+  .sk-dep-item:last-child{border-bottom:none}
+  .sk-dep-item input[type=checkbox]{accent-color:#1a56db;width:14px;height:14px;cursor:pointer;flex-shrink:0}
+  .sk-dep-item-cod{font-size:.73rem;font-weight:700;color:#1a56db;min-width:26px}
+  .sk-dep-item-nombre{font-size:.72rem;color:#4b5563;line-height:1.3}
+  .sk-content{flex:1;min-width:0}
+  /* Modales en móvil: barra de título limpia */
+  .modal-drag-bar{cursor:default;background:#f8fafc;padding:10px 12px;border-radius:0}
+  .modal-drag-bar .drag-dots{display:none}
+  /* Modal body: ocupa resto del modal y scrollea suave */
+  .modal-body{overflow-y:auto;-webkit-overflow-scrolling:touch;padding:14px;flex:1;min-height:0}
+  /* Scroll containers internos adaptados al viewport */
+  .modal-scroll-inner{max-height:42vh!important;-webkit-overflow-scrolling:touch}
+  #mdc-body{max-height:42vh!important;-webkit-overflow-scrolling:touch}
+  /* Modal-footer: al final del contenido, visible al scrollear */
+  .modal-footer{position:static;background:#fff;padding-top:10px;border-top:1px solid #f3f4f6;margin-top:10px}
+  /* Stock: apilar panel depósitos arriba de la tabla, ancho completo */
+  .sk-layout{flex-direction:column!important;align-items:stretch!important}
+  .sk-dep-panel{width:100%!important}
+  .sk-content{width:100%;min-width:0}
+  #sk-dep-list{max-height:140px;display:flex;flex-wrap:wrap;gap:0}
+  .sk-dep-item{width:50%;border-bottom:1px solid #f1f5f9}
+  /* Stock: tabla scroll horizontal garantizado */
+  #tbl-stock-admin{font-size:.7rem}
+  #tbl-stock-admin th,#tbl-stock-admin td{padding:4px 6px;white-space:nowrap}
 }
 @media (max-width: 480px) {
   header img{height:22px}
@@ -192,6 +229,7 @@ input:checked + .slider:before{transform:translateX(20px)}
     <div class="nav-item" data-sec="multiplazos" onclick="nav(this)"><span class="icon">💳</span>Multiplazos</div>
     <div class="nav-item" data-sec="catalogos" onclick="nav(this)"><span class="icon">📚</span>Catálogos</div>
     <div class="nav-item" data-sec="ofertas" onclick="nav(this)"><span class="icon">🎁</span>Ofertas</div>
+    <div class="nav-item" data-sec="rotacion" onclick="nav(this)"><span class="icon">📈</span>Rotación</div>
     <div class="nav-item" data-sec="pedido" onclick="nav(this)"><span class="icon">📝</span>Pedido/Ppto</div>
     <div class="nav-item gerentes-only" id="nav-ajuste-stock" data-sec="ajuste-stock" onclick="nav(this)" style="display:none"><span class="icon">📊</span>Ajuste Stock</div>
     <div class="nav-item gerentes-only" id="nav-auditoria" data-sec="auditoria" onclick="nav(this)" style="display:none"><span class="icon">🔍</span>Auditoría</div>
@@ -239,55 +277,76 @@ input:checked + .slider:before{transform:translateX(20px)}
     <div class="section" id="sec-stock">
       <div class="card">
         <div class="card-title">📦 Stock por Depósito</div>
-        <!-- Fila 1: buscar -->
-        <div class="form-row" style="align-items:flex-end;gap:10px;flex-wrap:wrap">
-          <div class="form-group" style="flex:3;min-width:240px;position:relative">
-            <label>Buscar artículo</label>
-            <input id="sk-buscar" placeholder="Código o descripción…" autocomplete="off"
-              oninput="skAutoInput()" onkeydown="skAutoKey(event)" onblur="setTimeout(()=>document.getElementById('sk-auto-list').style.display='none',200)">
-            <div id="sk-auto-list" style="display:none;position:absolute;top:100%;left:0;right:0;background:#fff;border:1.5px solid #1a56db;border-radius:0 0 8px 8px;max-height:220px;overflow-y:auto;z-index:50;box-shadow:0 4px 12px rgba(0,0,0,.1)"></div>
+        <div class="sk-layout">
+
+          <!-- Panel izquierdo: lista de depósitos -->
+          <div class="sk-dep-panel">
+            <div class="sk-dep-panel-hdr">
+              <span>Depósitos</span>
+              <div class="sk-dep-panel-hdr-btns">
+                <button onclick="skDepSelectAll()">Todos</button>
+                <button onclick="skDepSelectNone()">Ninguno</button>
+              </div>
+            </div>
+            <div id="sk-dep-list">
+              <div class="sk-dep-item"><span class="sk-dep-item-nombre" style="color:#9ca3af">Cargando…</span></div>
+            </div>
           </div>
-          <div>
-            <button class="btn btn-primary" onclick="loadAdminStock()">🔍 Buscar</button>
+
+          <!-- Contenido derecho: búsqueda + filtros + tabla -->
+          <div class="sk-content">
+            <!-- Fila 1: buscar -->
+            <div class="form-row" style="align-items:flex-end;gap:10px;flex-wrap:wrap;margin-bottom:6px">
+              <div class="form-group" style="flex:3;min-width:200px;position:relative">
+                <label>Buscar artículo</label>
+                <input id="sk-buscar" placeholder="Código o descripción…" autocomplete="off"
+                  oninput="skAutoInput()" onkeydown="skAutoKey(event)" onblur="setTimeout(()=>document.getElementById('sk-auto-list').style.display='none',200)">
+                <div id="sk-auto-list" style="display:none;position:absolute;top:100%;left:0;right:0;background:#fff;border:1.5px solid #1a56db;border-radius:0 0 8px 8px;max-height:220px;overflow-y:auto;z-index:50;box-shadow:0 4px 12px rgba(0,0,0,.1)"></div>
+              </div>
+              <div>
+                <button class="btn btn-primary" onclick="loadAdminStock()">🔍 Buscar</button>
+              </div>
+            </div>
+            <!-- Fila 2: filtros cascada -->
+            <div class="form-row" style="align-items:flex-end;gap:10px;flex-wrap:wrap;margin-bottom:6px">
+              <div class="form-group" style="flex:1;min-width:140px">
+                <label>Grupo Super Rubro</label>
+                <select id="sk-gsr" onchange="skChangeGSR()"><option value="">— Todos —</option></select>
+              </div>
+              <div class="form-group" style="flex:1;min-width:140px">
+                <label>Super Rubro</label>
+                <select id="sk-sr" onchange="skChangeSR()"><option value="">— Todos —</option></select>
+              </div>
+              <div class="form-group" style="flex:1;min-width:140px">
+                <label>Rubro</label>
+                <select id="sk-rubro" onchange="loadAdminStock()"><option value="">— Todos —</option></select>
+              </div>
+              <div class="form-group" style="flex:1;min-width:120px">
+                <label>Marca</label>
+                <select id="sk-marca" onchange="loadAdminStock()"><option value="">— Todas —</option></select>
+              </div>
+              <div>
+                <button class="btn btn-ghost btn-sm" onclick="skLimpiarFiltros()">✕ Limpiar</button>
+              </div>
+            </div>
+            <!-- Exportar + Reservas -->
+            <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center;flex-wrap:wrap">
+              <button class="btn btn-success btn-sm" onclick="exportarStock('excel')">📥 Excel</button>
+              <button class="btn btn-ghost btn-sm" onclick="exportarStock('pdf')">📄 PDF</button>
+              <button class="btn btn-warning btn-sm" onclick="openReservasPanel()" style="background:#fff7ed;color:#c2410c;border:1px solid #fed7aa">📌 Reservas de Stock</button>
+              <span id="sk-export-msg" style="font-size:.78rem;color:#6b7280"></span>
+            </div>
+            <!-- Tabla -->
+            <div style="overflow-x:auto;-webkit-overflow-scrolling:touch">
+              <table id="tbl-stock-admin" style="min-width:600px">
+                <thead id="sk-thead"><tr><th>Rub.</th><th>Cód.</th><th>Descripción</th><th style="text-align:right">R.Total</th><th style="text-align:right">P.Unit.</th><th style="text-align:right">IVA%</th></tr></thead>
+                <tbody id="sk-tbody"><tr><td colspan="10" class="empty">Seleccioná depósitos y buscá un artículo</td></tr></tbody>
+              </table>
+            </div>
+            <div id="sk-pag" style="margin-top:12px;display:flex;gap:6px;align-items:center;justify-content:center;flex-wrap:wrap"></div>
           </div>
-          <div id="sk-deps-chips" style="display:flex;flex-wrap:wrap;gap:4px;align-items:center;flex:2"></div>
-        </div>
-        <!-- Fila 2: cascading filters -->
-        <div class="form-row" style="align-items:flex-end;gap:10px;flex-wrap:wrap;margin-top:4px">
-          <div class="form-group" style="flex:1;min-width:160px">
-            <label>Grupo Super Rubro</label>
-            <select id="sk-gsr" onchange="skChangeGSR()"><option value="">— Todos —</option></select>
-          </div>
-          <div class="form-group" style="flex:1;min-width:160px">
-            <label>Super Rubro</label>
-            <select id="sk-sr" onchange="skChangeSR()"><option value="">— Todos —</option></select>
-          </div>
-          <div class="form-group" style="flex:1;min-width:160px">
-            <label>Rubro</label>
-            <select id="sk-rubro" onchange="loadAdminStock()"><option value="">— Todos —</option></select>
-          </div>
-          <div class="form-group" style="flex:1;min-width:140px">
-            <label>Marca</label>
-            <select id="sk-marca" onchange="loadAdminStock()"><option value="">— Todas —</option></select>
-          </div>
-          <div>
-            <button class="btn btn-ghost btn-sm" onclick="skLimpiarFiltros()">✕ Limpiar</button>
-          </div>
-        </div>
-        <!-- Exportar + Reservas -->
-        <div style="display:flex;gap:8px;margin-top:6px;align-items:center;flex-wrap:wrap">
-          <button class="btn btn-success btn-sm" onclick="exportarStock('excel')">📥 Excel</button>
-          <button class="btn btn-ghost btn-sm" onclick="exportarStock('pdf')">📄 PDF</button>
-          <button class="btn btn-warning btn-sm" onclick="openReservasPanel()" style="background:#fff7ed;color:#c2410c;border:1px solid #fed7aa">📌 Reservas de Stock</button>
-          <span id="sk-export-msg" style="font-size:.78rem;color:#6b7280"></span>
-        </div>
-        <div style="overflow-x:auto;margin-top:8px">
-          <table id="tbl-stock-admin" style="min-width:800px">
-            <thead id="sk-thead"><tr><th>Código</th><th>Descripción</th><th style="text-align:right">R.VAC-LOG</th><th style="text-align:right">R.MARKET PL.</th><th style="text-align:right">R.PACHECO</th><th style="text-align:right">R.OUTLET</th><th style="text-align:right">R.EXPO</th><th style="text-align:right">R.Total</th><th style="text-align:right">P.Unit.</th><th style="text-align:right">IVA%</th></tr></thead>
-            <tbody id="sk-tbody"><tr><td colspan="10" class="empty">Seleccioná un filtro o buscá un artículo</td></tr></tbody>
-          </table>
-        </div>
-        <div id="sk-pag" style="margin-top:12px;display:flex;gap:6px;align-items:center;justify-content:center;flex-wrap:wrap"></div>
+
+        </div><!-- /sk-layout -->
       </div>
     </div>
 
@@ -333,6 +392,17 @@ input:checked + .slider:before{transform:translateX(20px)}
                 </div>
               </td>
               <td><button class="btn btn-ghost btn-sm" onclick="openFlagPedidos()">👤 Por vendedor</button></td>
+            </tr>
+            <tr>
+              <td>
+                <strong>📦 Depósito Remanente</strong><br>
+                <small style="color:#6b7280">Depósitos activos de Flexxus que puede consultar el vendedor</small>
+              </td>
+              <td style="text-align:center">
+                <div id="dep-global-resumen" style="font-size:.75rem;color:#6b7280;margin-bottom:6px">Cargando…</div>
+                <button class="btn btn-ghost btn-sm" onclick="openDepositoConfig('global')">⚙️ Configurar global</button>
+              </td>
+              <td><button class="btn btn-ghost btn-sm" onclick="openDepositoConfig('vendor')">👤 Por vendedor</button></td>
             </tr>
           </tbody>
         </table>
@@ -421,7 +491,7 @@ input:checked + .slider:before{transform:translateX(20px)}
           <div class="card-title">📚 Catálogos publicados
             <button class="btn btn-primary btn-sm" style="margin-left:auto" onclick="openModalCatalogo()">+ Subir catálogo</button>
           </div>
-          <p style="color:#6b7280;font-size:.82rem;margin-bottom:12px">30 registros por página — los vendedores asociados reciben email y WhatsApp al subir.</p>
+          <p style="color:#6b7280;font-size:.82rem;margin-bottom:12px">30 registros por página — los vendedores asociados reciben email y Push al subir.</p>
           <div id="cat-lista">Cargando...</div>
         </div>
       </div>
@@ -578,8 +648,171 @@ input:checked + .slider:before{transform:translateX(20px)}
     </div>
   </div>
 
+  <!-- ANÁLISIS DE ROTACIÓN -->
+  <div class="section" id="sec-rotacion">
+    <div class="card">
+      <h2>📈 Análisis de Rotación de Stock</h2>
+      <p style="color:#6b7280;font-size:.87rem">Artículos con stock remanente sin movimiento en pedidos/presupuestos. Detectá oportunidades de oferta, verificá margen y comparé precios con MercadoLibre.</p>
+      <!-- Depósitos a considerar para el stock remanente -->
+      <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:14px 16px;margin-top:14px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <span style="font-size:.8rem;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:.05em">Depósitos (remanente a considerar)</span>
+          <div style="display:flex;gap:6px">
+            <button class="btn btn-ghost btn-sm" onclick="rotDepSelectAll()">Todos</button>
+            <button class="btn btn-ghost btn-sm" onclick="rotDepSelectNone()">Ninguno</button>
+          </div>
+        </div>
+        <div id="rot-dep-list" style="display:flex;flex-wrap:wrap;gap:4px 16px;font-size:.83rem">
+          <span style="color:#9ca3af">Cargando…</span>
+        </div>
+      </div>
+      <!-- Filtros de búsqueda -->
+      <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:14px 16px;margin-top:14px">
+        <div style="font-size:.8rem;font-weight:600;color:#64748b;margin-bottom:10px;text-transform:uppercase;letter-spacing:.05em">Filtros (todos opcionales)</div>
+        <div class="form-row" style="gap:10px;flex-wrap:wrap;align-items:flex-end">
+          <div class="form-group" style="min-width:150px;flex:1">
+            <label style="font-size:.8rem">Grupo Super Rubro</label>
+            <select id="rot-f-grupo" onchange="rotFiltroGrupo()">
+              <option value="">Todos</option>
+            </select>
+          </div>
+          <div class="form-group" style="min-width:150px;flex:1">
+            <label style="font-size:.8rem">Super Rubro</label>
+            <select id="rot-f-superrubro" onchange="rotFiltroSuperRubro()">
+              <option value="">Todos</option>
+            </select>
+          </div>
+          <div class="form-group" style="min-width:150px;flex:1">
+            <label style="font-size:.8rem">Rubro</label>
+            <select id="rot-f-rubro">
+              <option value="">Todos</option>
+            </select>
+          </div>
+          <div class="form-group" style="min-width:130px;flex:1">
+            <label style="font-size:.8rem">Marca</label>
+            <select id="rot-f-marca">
+              <option value="">Todas</option>
+            </select>
+          </div>
+          <div class="form-group" style="min-width:200px;flex:2;position:relative">
+            <label style="font-size:.8rem">Artículo (código o descripción)</label>
+            <input type="text" id="rot-f-articulo" placeholder="Escribí para buscar…" autocomplete="off"
+              style="width:100%;padding:6px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:.85rem;box-sizing:border-box"
+              oninput="rotAcInput(this)" onkeydown="rotAcKey(event)" onblur="setTimeout(()=>rotAcHide(),200)">
+            <div id="rot-ac-drop" style="
+              display:none;position:absolute;top:100%;left:0;right:0;z-index:500;
+              background:#fff;border:1px solid #d1d5db;border-top:none;border-radius:0 0 8px 8px;
+              box-shadow:0 6px 20px rgba(0,0,0,.12);max-height:220px;overflow-y:auto;font-size:.83rem">
+            </div>
+          </div>
+          <button class="btn btn-ghost btn-sm" onclick="rotLimpiarFiltros()" style="white-space:nowrap">✕ Limpiar</button>
+        </div>
+      </div>
+      <div class="form-row" style="gap:12px;align-items:center;flex-wrap:wrap;margin-top:12px">
+        <div class="form-group" style="min-width:170px">
+          <label>Período analizado (meses)</label>
+          <select id="rot-meses">
+            <option value="6">6 meses</option>
+            <option value="12" selected>12 meses</option>
+            <option value="24">24 meses</option>
+            <option value="36">36 meses</option>
+          </select>
+        </div>
+        <div class="form-group" style="min-width:130px">
+          <label title="Solo entran artículos cuyas ventas (NV) en el período sean ≤ este % de su stock actual">% Ventas máx. (rotación)</label>
+          <input type="number" id="rot-pct-venta-max" value="20" min="0" max="100" step="1"
+            style="width:100%;padding:6px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:.85rem;box-sizing:border-box">
+        </div>
+        <div class="form-group" style="min-width:130px">
+          <label title="Sobre el Costo de Flexxus: Costo × (1 + Gasto Operativo%)">Gasto Operativo %</label>
+          <input type="number" id="rot-pct-operativo" value="30" min="0" max="200" step="1"
+            style="width:100%;padding:6px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:.85rem;box-sizing:border-box">
+        </div>
+        <div class="form-group" style="min-width:130px">
+          <label title="Sobre el resultado anterior (Costo + Gasto Operativo)">Utilidad %</label>
+          <input type="number" id="rot-pct-utilidad" value="25" min="0" max="200" step="1"
+            style="width:100%;padding:6px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:.85rem;box-sizing:border-box">
+        </div>
+        <div class="form-group" style="min-width:130px">
+          <label title="Sobre el Precio Mayorista resultante">% para Meli</label>
+          <input type="number" id="rot-pct-meli" value="80" min="0" max="300" step="1"
+            style="width:100%;padding:6px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:.85rem;box-sizing:border-box">
+        </div>
+        <button class="btn btn-primary" onclick="loadRotacion()" id="rot-btn" style="white-space:nowrap">🔍 Analizar ambas bases</button>
+        <span style="font-size:.78rem;color:#9ca3af">Consulta Línea 1 y SW · Puede demorar varios minutos</span>
+      </div>
+      <div style="font-size:.74rem;color:#9ca3af;margin-top:4px">
+        Baja rotación = ventas (NV) en el período ÷ stock actual ≤ % Ventas máx. &nbsp;|&nbsp;
+        Cálculo en cascada: Costo × (1+Operativo%) → × (1+Utilidad%) = Precio Mayorista &nbsp;|&nbsp; Mayorista × (1+%Meli) = Precio para publicar en ML
+      </div>
+      <div id="rot-resumen" style="display:none;margin-top:12px;padding:10px 14px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;font-size:.87rem"></div>
+      <div id="rot-export-btns" style="display:none;margin-top:8px;gap:8px;align-items:center">
+        <button class="btn btn-ghost btn-sm" onclick="rotExportarRotacion('excel')" title="Exportar análisis a Excel">📊 Excel</button>
+        <button class="btn btn-ghost btn-sm" onclick="rotExportarRotacion('pdf')"   title="Exportar análisis a PDF">📄 PDF</button>
+        <span id="rot-export-msg" style="font-size:.8rem;color:#6b7280"></span>
+      </div>
+      <div style="overflow-x:auto;margin-top:16px">
+        <table id="tbl-rotacion" style="min-width:900px;display:none">
+          <thead>
+            <tr>
+              <th style="white-space:nowrap">Código</th>
+              <th>Descripción</th>
+              <th style="text-align:right">Stock</th>
+              <th style="text-align:right" title="Lista 1 en ARS (convertido al tipo de cambio)">Lista1 ARS</th>
+              <th style="text-align:right;color:#15803d" title="Precio oferta para canal mayorista — menor al ML, mínimo 30% sobre costo">Mayorista</th>
+              <th style="text-align:right;color:#1d4ed8" title="Precio sugerido de publicación en MercadoLibre = Lista1 ARS × 1.80">Pub. ML</th>
+              <th style="text-align:right" title="Margen sobre costo al precio mayorista">Margen May.</th>
+              <th style="text-align:center" title="Cantidad sugerida de venta por bulto para artículos de bajo valor">Bulto</th>
+              <th style="text-align:right;color:#7c3aed" title="Precio total del pack (bulto × precio mayorista)">Pack May.</th>
+              <th style="text-align:right" title="Cantidad vendida (NV) en el período ÷ stock actual. Clic para ver el detalle de comprobantes">Ventas (período)</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="rot-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL DETALLE DE VENTAS (Rotación) -->
+  <div class="modal-backdrop" id="modal-rot-ventas">
+    <div class="modal" style="width:960px;max-width:95vw;max-height:80vh;overflow-y:auto">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:14px 18px;border-bottom:1px solid #e5e7eb">
+        <h3 style="margin:0;font-size:1rem" id="rot-ventas-titulo">Detalle de ventas</h3>
+        <button class="btn btn-ghost btn-sm" onclick="closeModal('modal-rot-ventas')">✕</button>
+      </div>
+      <div style="padding:14px 18px" id="rot-ventas-body">Cargando…</div>
+    </div>
+  </div>
+
   </main>
 </div>
+
+<!-- OVERLAY PROCESANDO -->
+<div id="overlay-procesando" style="display:none;position:fixed;inset:0;z-index:9999;background:rgba(15,23,42,.60);align-items:center;justify-content:center">
+  <div style="background:#fff;border-radius:20px;padding:36px 48px;text-align:center;box-shadow:0 16px 60px rgba(0,0,0,.4);min-width:320px;max-width:460px">
+    <svg width="52" height="52" viewBox="0 0 52 52" style="margin-bottom:14px">
+      <circle cx="26" cy="26" r="20" fill="none" stroke="#e2e8f0" stroke-width="5"/>
+      <circle cx="26" cy="26" r="20" fill="none" stroke="#1d4ed8" stroke-width="5"
+        stroke-dasharray="72 56" stroke-linecap="round"
+        style="transform-origin:50% 50%;animation:rotSpin 1.1s linear infinite"/>
+    </svg>
+    <div id="overlay-proc-msg" style="font-size:1.06rem;font-weight:700;color:#1e3a8a;margin-bottom:6px">Procesando solicitud…</div>
+    <div id="overlay-proc-sub" style="font-size:.84rem;color:#475569;line-height:1.6;min-height:40px">Consultando Firebird, por favor esperá</div>
+    <div style="margin-top:18px;height:5px;background:#e2e8f0;border-radius:9px;overflow:hidden">
+      <div style="height:100%;width:30%;background:linear-gradient(90deg,#1d4ed8,#60a5fa);border-radius:9px;animation:rotBar 1.6s ease-in-out infinite"></div>
+    </div>
+    <div id="overlay-proc-pasos" style="font-size:.76rem;color:#64748b;margin-top:10px;min-height:18px;font-variant-numeric:tabular-nums"></div>
+    <!-- Advertencia de no interrumpir -->
+    <div style="margin-top:18px;padding:9px 14px;background:#fef9c3;border:1px solid #fde047;border-radius:8px;font-size:.78rem;color:#713f12;text-align:left;line-height:1.5">
+      ⚠️ <strong>No cierres esta ventana ni navegues a otra sección</strong> mientras se procesa el análisis. Las consultas a Firebird pueden demorar varios minutos.
+    </div>
+  </div>
+</div>
+<style>
+@keyframes rotSpin{to{transform:rotate(360deg)}}
+@keyframes rotBar{0%{transform:translateX(-100%)}50%{transform:translateX(230%)}100%{transform:translateX(-100%)}}
+</style>
 
 <!-- MODAL PERFIL -->
 <div class="modal-backdrop" id="modal-perfil">
@@ -697,12 +930,12 @@ input:checked + .slider:before{transform:translateX(20px)}
         <input id="mco-mail" type="email" placeholder="juan@empresa.com">
       </div>
       <div class="form-group" style="flex:1">
-        <label>Celular (WA) <span style="color:#6b7280;font-weight:400;font-size:.78rem">(sin + ni 9 — formato: 54 + área + 15 + número)</span></label>
-        <input id="mco-celular" placeholder="54111568560011" title="Sin + ni 9. Ej: 54111568560011">
+        <label>Celular <span style="color:#6b7280;font-weight:400;font-size:.78rem">(opcional)</span></label>
+        <input id="mco-celular" placeholder="54111568560011" title="Número de celular">
       </div>
     </div>
     <p style="font-size:.78rem;color:#6b7280;margin:4px 0 12px">
-      📱 WhatsApp via <strong>Meta Cloud API</strong> — formato Argentina sin + ni 9: código país + área + 15 + número. Ej: <code>54111568560011</code>
+      🔔 Las notificaciones de catálogos se envían via <strong>Push Notification</strong> (OneSignal) al navegador del vendedor.
     </p>
     <div class="modal-footer">
       <button class="btn btn-ghost" onclick="closeModal('modal-contacto')">Cancelar</button>
@@ -874,13 +1107,40 @@ input:checked + .slider:before{transform:translateX(20px)}
 </div>
 
 <!-- MODAL FLAG POR VENDEDOR -->
+<!-- ── Modal Depósito Remanente ── -->
+<div class="modal-backdrop" id="modal-dep-config">
+  <div class="modal" style="max-width:98vw;width:98vw">
+    <h3 id="mdc-title">Depósito Remanente</h3>
+    <!-- Tabs -->
+    <div style="display:flex;gap:0;border-bottom:2px solid #e5e7eb;margin-bottom:14px">
+      <button id="mdc-tab-global" onclick="mdcSwitchTab('global')"
+        style="padding:7px 18px;border:none;background:none;cursor:pointer;font-size:.82rem;font-weight:700;border-bottom:3px solid #1a56db;color:#1a56db;margin-bottom:-2px">
+        🌐 Global
+      </button>
+      <button id="mdc-tab-vendor" onclick="mdcSwitchTab('vendor')"
+        style="padding:7px 18px;border:none;background:none;cursor:pointer;font-size:.82rem;font-weight:600;color:#6b7280;border-bottom:3px solid transparent;margin-bottom:-2px">
+        👤 Por vendedor
+      </button>
+      <button id="mdc-tab-perfil" onclick="mdcSwitchTab('perfil')"
+        style="padding:7px 18px;border:none;background:none;cursor:pointer;font-size:.82rem;font-weight:600;color:#6b7280;border-bottom:3px solid transparent;margin-bottom:-2px">
+        🏷️ Por perfil
+      </button>
+    </div>
+    <!-- Cuerpo -->
+    <div id="mdc-body" style="max-height:500px;overflow-y:auto;overflow-x:auto"></div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('modal-dep-config')">Cerrar</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-backdrop" id="modal-flag-vend">
   <div class="modal" style="max-width:640px">
     <h3 id="mfv-title">Configurar función por vendedor</h3>
     <input type="hidden" id="mfv-feature">
     <input type="hidden" id="mfv-perfil-sel">
     <!-- sin acciones masivas — se controla desde la fila TODOS los vendedores -->
-    <div style="max-height:400px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:6px">
+    <div class="modal-scroll-inner" style="max-height:400px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:6px">
 <table id="tbl-flag-vend" style="width:100%;border-collapse:collapse;font-size:.82rem">
   <thead style="position:sticky;top:0;z-index:1;background:#f3f4f6">
     <tr><th style="padding:6px 8px;text-align:left">Vendedor</th><th style="padding:6px 8px;text-align:center">Habilitado</th></tr>
@@ -1023,10 +1283,33 @@ input:checked + .slider:before{transform:translateX(20px)}
 
     <!-- Depósito -->
     <div class="form-group" id="mrf-dep-wrap" style="margin-bottom:10px">
-      <label>Depósito <span style="color:#dc2626">*</span> <small style="color:#6b7280;font-weight:400">(debe tener remanente suficiente)</small></label>
+      <label>Depósito <span style="color:#dc2626">*</span> <small id="mrf-dep-label" style="color:#6b7280;font-weight:400">(debe tener remanente suficiente)</small></label>
       <select id="mrf-deposito" style="width:100%">
         <option value="">— Seleccionar depósito —</option>
       </select>
+    </div>
+
+    <!-- Es Preventa -->
+    <div style="margin-bottom:12px;padding:10px 12px;background:#fefce8;border:1.5px solid #fde68a;border-radius:8px">
+      <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;user-select:none">
+        <input type="checkbox" id="mrf-es-preventa" onchange="mrfTogglePreventa()" style="margin-top:3px;flex-shrink:0;width:16px;height:16px">
+        <div>
+          <span style="font-weight:600;font-size:.87rem;color:#92400e">⚡ Es Preventa</span>
+          <div style="font-size:.78rem;color:#78716c;margin-top:2px">
+            Mercadería aún no ingresada. <b>No requiere remanente</b>. Mientras no haya stock en el depósito seleccionado, la <b>Condición de Venta</b> quedará bloqueada a la seleccionada abajo.
+          </div>
+        </div>
+      </label>
+      <!-- Selector de multiplazo PREVENTA — solo visible cuando es_preventa=true -->
+      <div id="mrf-multiplazo-preventa-wrap" style="display:none;margin-top:10px;padding-top:8px;border-top:1px solid #fde68a">
+        <label style="font-size:.8rem;font-weight:600;color:#92400e;display:block;margin-bottom:4px">
+          🔒 Condición de Venta a bloquear (Multiplazo) <span style="color:#dc2626">*</span>
+        </label>
+        <select id="mrf-codigo-multiplazo" style="width:100%;border:1px solid #fde68a;border-radius:6px;padding:6px 8px;font-size:.83rem;background:#fff">
+          <option value="">— Seleccioná la condición PREVENTA —</option>
+        </select>
+        <div style="font-size:.73rem;color:#78716c;margin-top:3px">El vendedor no podrá cambiar esta condición hasta que haya stock real en el depósito.</div>
+      </div>
     </div>
 
     <!-- Cantidad para tipo=grupo (para artículo está inline en el panel) -->
@@ -1085,13 +1368,24 @@ function makeDraggable(backdropId){
   const modal = backdrop.querySelector('.modal');
   if(!modal || modal._dragInited) return;
   modal._dragInited = true;
-  // Inyectar barra de arrastre si no existe
+  const isMobile = window.innerWidth <= 768;
+  // Inyectar barra si no existe
   if(!modal.querySelector('.modal-drag-bar')){
     const bar = document.createElement('div');
     bar.className = 'modal-drag-bar';
-    bar.innerHTML = '<div class="drag-dots"><span></span><span></span><span></span></div>'
-                  + '<span class="drag-title">Mover ventana</span>'
-                  + `<button onclick="closeModal('${backdropId}')" style="margin-left:auto;background:none;border:none;font-size:1.2rem;cursor:pointer;color:#64748b;line-height:1;padding:2px 4px;border-radius:4px" title="Cerrar">✕</button>`;
+    if(isMobile){
+      // Móvil: barra de título simple con X grande y accesible
+      const h3 = modal.querySelector('h3');
+      const titleText = h3 ? h3.textContent.trim() : '';
+      if(h3) h3.style.display = 'none';
+      bar.innerHTML = `<span class="drag-title" style="font-size:.88rem;font-weight:700;color:#1a1a2e;flex:1;line-height:1.3">${titleText}</span>`
+                    + `<button onclick="closeModal('${backdropId}')" style="margin-left:8px;background:#f3f4f6;border:1.5px solid #d1d5db;font-size:1.1rem;cursor:pointer;color:#374151;line-height:1;padding:6px 10px;border-radius:6px;flex-shrink:0" title="Cerrar">✕</button>`;
+    } else {
+      // Desktop: barra con arrastre
+      bar.innerHTML = '<div class="drag-dots"><span></span><span></span><span></span></div>'
+                    + '<span class="drag-title">Mover ventana</span>'
+                    + `<button onclick="closeModal('${backdropId}')" style="margin-left:auto;background:none;border:none;font-size:1.2rem;cursor:pointer;color:#64748b;line-height:1;padding:2px 4px;border-radius:4px" title="Cerrar">✕</button>`;
+    }
     // Envolver contenido existente en .modal-body
     const body = document.createElement('div');
     body.className = 'modal-body';
@@ -1099,32 +1393,35 @@ function makeDraggable(backdropId){
     modal.appendChild(bar);
     modal.appendChild(body);
   }
-  const handle = modal.querySelector('.modal-drag-bar');
-  let startX, startY, startLeft, startTop, dragging=false;
-  handle.addEventListener('mousedown', e=>{
-    if(e.button!==0) return;
-    dragging = true;
-    const rect = modal.getBoundingClientRect();
-    if(!modal.classList.contains('modal-dragged')){
-      modal.classList.add('modal-dragged');
-      modal.style.left = rect.left + 'px';
-      modal.style.top  = rect.top  + 'px';
-    }
-    startX    = e.clientX;
-    startY    = e.clientY;
-    startLeft = parseInt(modal.style.left) || rect.left;
-    startTop  = parseInt(modal.style.top)  || rect.top;
-    e.preventDefault();
-  });
-  document.addEventListener('mousemove', e=>{
-    if(!dragging) return;
-    const vw = window.innerWidth, vh = window.innerHeight;
-    let nl = Math.max(0, Math.min(vw - modal.offsetWidth,  startLeft + e.clientX - startX));
-    let nt = Math.max(0, Math.min(vh - 40,                 startTop  + e.clientY - startY));
-    modal.style.left = nl + 'px';
-    modal.style.top  = nt + 'px';
-  });
-  document.addEventListener('mouseup', ()=>{ dragging=false; });
+  // Drag solo en desktop
+  if(!isMobile){
+    const handle = modal.querySelector('.modal-drag-bar');
+    let startX, startY, startLeft, startTop, dragging=false;
+    handle.addEventListener('mousedown', e=>{
+      if(e.button!==0) return;
+      dragging = true;
+      const rect = modal.getBoundingClientRect();
+      if(!modal.classList.contains('modal-dragged')){
+        modal.classList.add('modal-dragged');
+        modal.style.left = rect.left + 'px';
+        modal.style.top  = rect.top  + 'px';
+      }
+      startX    = e.clientX;
+      startY    = e.clientY;
+      startLeft = parseInt(modal.style.left) || rect.left;
+      startTop  = parseInt(modal.style.top)  || rect.top;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', e=>{
+      if(!dragging) return;
+      const vw = window.innerWidth, vh = window.innerHeight;
+      let nl = Math.max(0, Math.min(vw - modal.offsetWidth,  startLeft + e.clientX - startX));
+      let nt = Math.max(0, Math.min(vh - 40,                 startTop  + e.clientY - startY));
+      modal.style.left = nl + 'px';
+      modal.style.top  = nt + 'px';
+    });
+    document.addEventListener('mouseup', ()=>{ dragging=false; });
+  }
 }
 
 // Resetear posición cuando se cierra un modal
@@ -1192,6 +1489,15 @@ async function api(method, url, body){
     return data;
   }catch(e){ console.error('api error',method,url,e); return null; }
 }
+async function apiStrict(method, url, body){
+  const r = await fetch(BASE+url,{method,headers:{'Content-Type':'application/json','Authorization':'Bearer '+TOKEN},body:body?JSON.stringify(body):undefined});
+  if(r.status===401){logout();throw new Error('Sesión expirada');}
+  const ct = r.headers.get('content-type')||'';
+  if(!ct.includes('application/json')) throw new Error(`Respuesta inesperada ${r.status} en ${url}`);
+  const data = await r.json();
+  if(!r.ok) throw new Error(data?.detail || `Error ${r.status}`);
+  return data;
+}
 
 // ─── NAV ───────────────────────────────────────────────────────────────────
 function nav(el){
@@ -1222,11 +1528,11 @@ function nav(el){
   else if(sec==='dashboard') loadDashboard();
   else if(sec==='ajuste-stock') ajInit();
   else if(sec==='auditoria') auditLoad();
+  else if(sec==='rotacion') { rotCargarFiltros(); }
 }
 
 async function initApp(){
-  // Depósitos fijos solicitados (hardcoded — no depende de DEPOSITOS table)
-  _sk_selected_deps = ['001','002','003','005','013','016'];
+  // _sk_selected_deps se inicializa en initStock() desde Firebird
 
   const [vends, perfs, mults, gsr, allSR, allRubros, marcas] = await Promise.all([
     api('GET','/admin/vendedores').catch(()=>[]),
@@ -1356,14 +1662,14 @@ async function removeAsign(cod, pid){
 }
 
 // ─── STOCK ADMIN ───────────────────────────────────────────────────────────
-let _DEPOSITOS = [], _sk_offset = 0, _sk_limit = 50, _sk_total = 0, _sk_selected_deps = ['001','002','003','005','013','016'];
+let _DEPOSITOS = [], _sk_offset = 0, _sk_limit = 50, _sk_total = 0, _sk_selected_deps = [];
 let _SK_GSR = [], _SK_SR = [], _SK_RUBROS = [], _SK_MARCAS = [];
 let _skAutoTimer = null, _skAutoIdx = -1;
-let _skReqId = 0; // cancela respuestas de búsquedas anteriores
-let _skSearchVal = ''; // código real a buscar cuando se selecciona del autocomplete
+let _skReqId = 0;
+let _skSearchVal = '';
 
-// Depósitos fijos con nombre corto para columnas
-const FIXED_DEPS = [
+// Fallback si Firebird no responde
+const _DEP_FALLBACK = [
   {cod:'001', label:'VAC-LOG'},
   {cod:'002', label:'MARKET PL.'},
   {cod:'003', label:'PACHECO'},
@@ -1372,7 +1678,61 @@ const FIXED_DEPS = [
   {cod:'016', label:'EXPO'}
 ];
 
+function _depLabel(d){
+  // nombre corto: toma la última palabra o sigla tras "DEPOSITO "
+  return d.nombre.replace(/^DEPOSITO\s*/i,'').trim() || d.codigo;
+}
+
+function _skDepRenderList(){
+  const list = document.getElementById('sk-dep-list');
+  if(!list) return;
+  if(!_DEPOSITOS.length){
+    list.innerHTML = '<div class="sk-dep-item"><span class="sk-dep-item-nombre" style="color:#9ca3af">Sin depósitos activos</span></div>';
+    return;
+  }
+  list.innerHTML = _DEPOSITOS.map(d=>`
+    <label class="sk-dep-item">
+      <input type="checkbox" value="${d.cod}" ${_sk_selected_deps.includes(d.cod)?'checked':''}
+        onchange="skDepToggle('${d.cod}', this.checked)">
+      <span class="sk-dep-item-cod">${d.cod}</span>
+      <span class="sk-dep-item-nombre">${d.label}</span>
+    </label>`).join('');
+}
+
+function skDepToggle(cod, checked){
+  if(checked){ if(!_sk_selected_deps.includes(cod)) _sk_selected_deps.push(cod); }
+  else _sk_selected_deps = _sk_selected_deps.filter(x=>x!==cod);
+  loadAdminStock(0);
+}
+
+function skDepSelectAll(){
+  _sk_selected_deps = _DEPOSITOS.map(d=>d.cod);
+  _skDepRenderList();
+  loadAdminStock(0);
+}
+
+function skDepSelectNone(){
+  _sk_selected_deps = [];
+  _skDepRenderList();
+  const tbody = document.getElementById('sk-tbody');
+  if(tbody) tbody.innerHTML = '<tr><td colspan="10" class="empty" style="color:#9ca3af">Seleccioná al menos un depósito.</td></tr>';
+}
+
+async function _skLoadDepositos(){
+  try{
+    const data = await api('GET', '/admin/depositos');
+    if(Array.isArray(data) && data.length){
+      _DEPOSITOS = data.map(d=>({cod:d.codigo, label:_depLabel(d), nombre:d.nombre}));
+    }
+  } catch(_){}
+  if(!_DEPOSITOS.length) _DEPOSITOS = _DEP_FALLBACK.map(d=>({...d, nombre:d.label}));
+  _sk_selected_deps = _DEPOSITOS.map(d=>d.cod);
+  _skDepRenderList();
+}
+
 async function initStock(){
+  await _skLoadDepositos(); // cargar depósitos activos desde Firebird
+
   async function loadList(adminUrl, publicUrl){
     const ra = await api('GET', adminUrl);
     if(Array.isArray(ra) && ra.length) return ra;
@@ -1453,6 +1813,10 @@ async function skChangeSR(){
   loadAdminStock();
 }
 
+function _isAndroidWebView(){
+  const ua = navigator.userAgent;
+  return /Android/.test(ua) && (/wv\)/.test(ua) || !/Chrome\/[0-9]/.test(ua));
+}
 async function exportarStock(formato){
   const buscar = document.getElementById('sk-buscar').value.trim();
   const gsr    = document.getElementById('sk-gsr')?.value   || '';
@@ -1470,21 +1834,32 @@ async function exportarStock(formato){
   msg.textContent = 'Generando…';
   try{
     const ext = formato === 'excel' ? 'excel' : 'pdf';
-    const resp = await fetch(`${BASE}/admin/stock/exportar-${ext}?${qs}`,
-      {headers:{'Authorization':'Bearer '+TOKEN}});
-    if(!resp.ok){ msg.textContent='Error '+resp.status; return; }
-    const blob = await resp.blob();
-    const url  = URL.createObjectURL(blob);
-    if(formato === 'pdf'){
-      window.open(url, '_blank');
-      msg.textContent = '✓ Abierto';
+    const endpoint = `${BASE}/admin/stock/exportar-${ext}?${qs}`;
+    if(window.AndroidBridge){
+      // AndroidBridge nativo (C.Panel): descarga via fetch() interno + guarda + abre
+      const urlConToken = endpoint + `&access_token=${encodeURIComponent(TOKEN)}`;
+      const fname = formato === 'excel' ? 'stock_admin.xlsx' : 'stock_admin.pdf';
+      if(formato === 'excel') window.AndroidBridge.download(urlConToken, TOKEN, fname);
+      else window.AndroidBridge.openPdf(urlConToken, TOKEN, fname);
+      msg.textContent = '✓ Descargando…';
+    } else if(_isAndroidWebView()){
+      // Fallback WebView sin bridge
+      window.location.href = endpoint + `&access_token=${encodeURIComponent(TOKEN)}`;
+      msg.textContent = '✓ Descargando…';
     } else {
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'stock_admin.xlsx';
-      a.click();
-      URL.revokeObjectURL(url);
-      msg.textContent = '✓ Descargado';
+      const resp = await fetch(endpoint, {headers:{'Authorization':'Bearer '+TOKEN}});
+      if(!resp.ok){ msg.textContent='Error '+resp.status; return; }
+      const blob = await resp.blob();
+      const url  = URL.createObjectURL(blob);
+      if(formato === 'pdf'){
+        window.open(url, '_blank');
+        msg.textContent = '✓ Abierto';
+      } else {
+        const a = document.createElement('a');
+        a.href = url; a.download = 'stock_admin.xlsx'; a.click();
+        URL.revokeObjectURL(url);
+        msg.textContent = '✓ Descargado';
+      }
     }
   }catch(e){ msg.textContent='Error: '+e.message; }
   setTimeout(()=>{ msg.textContent=''; }, 4000);
@@ -1593,7 +1968,8 @@ async function loadAdminStock(offset=0){
   if(!Array.isArray(data)||!data){ tbody.innerHTML='<tr><td colspan="20" class="empty">Error al cargar datos</td></tr>'; return; }
 
   // Columnas fijas de depósitos
-  const DEP_COLS = FIXED_DEPS;
+  // Columnas dinámicas según selección del usuario
+  const DEP_COLS = _DEPOSITOS.filter(d => _sk_selected_deps.includes(d.cod));
   const totalCols = DEP_COLS.length + 5; // rub+cod+desc + deps + res+rtotal+punit+iva
 
   const thead = document.getElementById('sk-thead');
@@ -1621,7 +1997,7 @@ async function loadAdminStock(offset=0){
     const punit   = a.precio1||0;
     const ivaVal  = a.iva||0;
     const resxDep = a.reservado_por_deposito || {};
-    const depSum  = DEP_COLS.reduce((s,c)=>s+Math.max(0,(a[`rem_${c.cod}`]||0)-(resxDep[c.cod]||0)), 0);
+    const depSum  = DEP_COLS.reduce((s,c)=>s+((a[`rem_${c.cod}`]||0)-(resxDep[c.cod]||0)), 0);
     const reservado = a.reservado||0;
     const disponible = depSum; // ya descontado por depósito
     const truncGSR = (a.gruposuperrubro||'').length>10?(a.gruposuperrubro||'').substring(0,10)+'…':(a.gruposuperrubro||'');
@@ -1673,7 +2049,6 @@ async function loadFlags(){
     const enabled = g ? !!g.enabled : true;
     if(el){ el.checked = enabled; }
     if(lbl){
-      // etiqueta compacta para los checks de pedidos (tienen poco espacio)
       if(f==='pedidos'||f==='pedidos_sw'){
         lbl.textContent = enabled ? '✅' : '🚫';
       } else {
@@ -1682,7 +2057,346 @@ async function loadFlags(){
       lbl.style.color = enabled ? '#059669' : '#dc2626';
     }
   });
+  // Actualizar resumen depósitos globales
+  const globalDeps = flags
+    .filter(x=>x.feature.startsWith('deposito_exclusivo_') && !!x.enabled && (x.codigousuario===null||x.codigousuario===''))
+    .map(x=>x.feature.replace('deposito_exclusivo_',''));
+  const resumen = document.getElementById('dep-global-resumen');
+  if(resumen){
+    if(!globalDeps.length){
+      resumen.innerHTML = '<span style="color:#9ca3af">Sin restricción (vendedor elige)</span>';
+    } else {
+      const chips = globalDeps.map(cod=>{
+        const d = _DEPOSITOS.find(x=>x.cod===cod);
+        return `<span style="display:inline-flex;align-items:center;background:#eff6ff;color:#1a56db;border:1px solid #bfdbfe;border-radius:10px;padding:1px 7px;font-size:.72rem;font-weight:700;margin:1px">${cod}${d?' · '+d.label:''}</span>`;
+      }).join('');
+      resumen.innerHTML = chips;
+    }
+  }
 }
+
+// ─── Depósito Remanente: config global y por vendedor ──────────────────────
+let _mdc_tab = 'global';
+let _mdc_flags = [];
+
+let _mdc_perfiles = [];
+let _mdc_asignaciones = {}; // { codigousuario: [codPerfil, ...] }
+
+async function openDepositoConfig(modo){
+  _mdc_tab = modo || 'global';
+  if(!_DEPOSITOS.length) await _skLoadDepositos();
+  const [flags, perfiles, asignaciones] = await Promise.all([
+    api('GET','/admin/flags'),
+    api('GET','/admin/perfiles'),
+    api('GET','/admin/asignaciones')
+  ]);
+  _mdc_flags = flags || [];
+  _mdc_perfiles = (perfiles||[]).filter(p=>p.activo);
+  _mdc_asignaciones = {};
+  for(const a of (asignaciones||[])){
+    if(!_mdc_asignaciones[a.codigousuario]) _mdc_asignaciones[a.codigousuario]=[];
+    _mdc_asignaciones[a.codigousuario].push(a.codigo);
+  }
+  mdcSwitchTab(_mdc_tab, true);
+  document.getElementById('modal-dep-config').classList.add('open');
+  makeDraggable('modal-dep-config');
+}
+
+function mdcSwitchTab(tab, force){
+  if(_mdc_tab === tab && !force) return;
+  _mdc_tab = tab;
+  ['global','vendor','perfil'].forEach(t=>{
+    const btn = document.getElementById('mdc-tab-'+t);
+    if(!btn) return;
+    const active = t === tab;
+    btn.style.color             = active ? '#1a56db' : '#6b7280';
+    btn.style.fontWeight        = active ? '700' : '600';
+    btn.style.borderBottomColor = active ? '#1a56db' : 'transparent';
+  });
+  if(tab === 'global')       _renderDepGlobal();
+  else if(tab === 'vendor')  _renderDepVendedor();
+  else                       _renderDepPerfil();
+}
+
+function _depGlobalActivos(){
+  return _mdc_flags
+    .filter(x=>x.feature.startsWith('deposito_exclusivo_') && !!x.enabled && (x.codigousuario===null||x.codigousuario===''))
+    .map(x=>x.feature.replace('deposito_exclusivo_',''));
+}
+
+function _depVendedorActivos(cod){
+  // 1. Individual override
+  const personales = _mdc_flags.filter(x=>x.feature.startsWith('deposito_exclusivo_') && x.codigousuario===cod);
+  if(personales.length){
+    return {deps: personales.filter(x=>!!x.enabled).map(x=>x.feature.replace('deposito_exclusivo_','')), origen:'individual'};
+  }
+  // 2. Perfil del vendedor
+  const perfilesCod = _mdc_asignaciones[cod] || [];
+  for(const pc of perfilesCod){
+    const key = _depPerfilKey(pc);
+    const perfilFlags = _mdc_flags.filter(x=>x.feature.startsWith('deposito_exclusivo_') && x.codigousuario===key);
+    if(perfilFlags.length){
+      return {deps: perfilFlags.filter(x=>!!x.enabled).map(x=>x.feature.replace('deposito_exclusivo_','')), origen:'perfil', perfil:pc};
+    }
+  }
+  // 3. Global
+  return {deps: _depGlobalActivos(), origen:'global'};
+}
+
+function _renderDepGlobal(){
+  const activos = _depGlobalActivos();
+  const body = document.getElementById('mdc-body');
+  body.innerHTML = `
+    <p style="font-size:.82rem;color:#6b7280;margin-bottom:12px">
+      Seleccioná los depósitos que verán <strong>todos los vendedores</strong> por defecto.<br>
+      Si no se selecciona ninguno, cada vendedor puede elegir el depósito desde el frontend.
+    </p>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:6px;margin-bottom:16px">
+      ${_DEPOSITOS.map(d=>{
+        const checked = activos.includes(d.cod);
+        return `<label style="display:flex;align-items:center;gap:8px;padding:8px 10px;border:1.5px solid ${checked?'#bfdbfe':'#e5e7eb'};border-radius:7px;cursor:pointer;background:${checked?'#eff6ff':'#fff'};transition:all .15s" id="mdc-g-lbl-${d.cod}">
+          <input type="checkbox" value="${d.cod}" ${checked?'checked':''}
+            accent-color="#1a56db"
+            onchange="mdcToggleGlobal('${d.cod}',this.checked)"
+            style="width:15px;height:15px;accent-color:#1a56db;cursor:pointer;flex-shrink:0">
+          <span>
+            <span style="font-weight:700;color:#1a56db;font-size:.8rem">${d.cod}</span>
+            <span style="color:#374151;font-size:.78rem;margin-left:4px">${d.label}</span>
+          </span>
+        </label>`;
+      }).join('')}
+    </div>
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+      <div style="font-size:.74rem;color:#9ca3af">
+        💡 Los vendedores con configuración individual o de perfil propia no se ven afectados.
+      </div>
+      <button onclick="mdcResetTodosOverrides()" style="font-size:.75rem;padding:5px 12px;border:1px solid #dc2626;border-radius:6px;background:#fff;color:#dc2626;cursor:pointer;white-space:nowrap">
+        🔄 Aplicar global a todos (quitar overrides individuales)
+      </button>
+    </div>`;
+}
+
+async function mdcResetTodosOverrides(){
+  if(!confirm('¿Confirmar? Esto eliminará TODOS los overrides individuales y de perfil de depósitos.\nTodos los vendedores heredarán la configuración global.')) return;
+  await api('DELETE','/admin/flags/depositos-todos-individuales');
+  _mdc_flags = _mdc_flags.filter(x=>!(x.feature.startsWith('deposito_exclusivo_') && x.codigousuario!==null && x.codigousuario!==''));
+  auditLog('Reset masivo de depósitos', 'Todos los overrides individuales y de perfil eliminados → todos heredan global');
+  toast('Overrides eliminados. Todos los vendedores heredan la configuración global.');
+  _renderDepGlobal();
+}
+
+async function mdcToggleGlobal(cod, enabled){
+  const feature = 'deposito_exclusivo_'+cod;
+  await api('POST','/admin/flags',{codigousuario:null, feature, enabled:enabled?1:0});
+  // actualizar estado local
+  const idx = _mdc_flags.findIndex(x=>x.feature===feature && (x.codigousuario===null||x.codigousuario===''));
+  if(idx>=0) _mdc_flags[idx].enabled = enabled?1:0;
+  else _mdc_flags.push({feature, codigousuario:null, enabled:enabled?1:0});
+  // actualizar visual del label
+  const lbl = document.getElementById('mdc-g-lbl-'+cod);
+  if(lbl){
+    lbl.style.borderColor = enabled ? '#bfdbfe' : '#e5e7eb';
+    lbl.style.background  = enabled ? '#eff6ff' : '#fff';
+  }
+  auditLog(`Depósito global ${enabled?'habilitado':'deshabilitado'}`, `Depósito ${cod}`);
+  await loadFlags(); // actualizar resumen en Funciones
+}
+
+function _renderDepVendedor(){
+  const body = document.getElementById('mdc-body');
+  if(!VENDEDORES||!VENDEDORES.length){
+    body.innerHTML = '<p style="color:#9ca3af;font-size:.82rem">Sin vendedores cargados.</p>';
+    return;
+  }
+  const thDep = _DEPOSITOS.map(d=>
+    `<th style="padding:3px 4px;text-align:center;font-size:.65rem;white-space:nowrap;background:#f3f4f6;min-width:52px;max-width:64px">
+      <div style="font-weight:700;color:#1a56db">${d.cod}</div>
+      <div style="color:#6b7280;font-size:.6rem;overflow:hidden;text-overflow:ellipsis;max-width:60px" title="${d.label}">${d.label.length>8?d.label.substring(0,8)+'…':d.label}</div>
+    </th>`).join('');
+
+  const rows = VENDEDORES.map(v=>{
+    const {deps, origen, perfil} = _depVendedorActivos(v.codigo);
+    const celdas = _DEPOSITOS.map(d=>{
+      const checked = deps.includes(d.cod);
+      return `<td style="text-align:center;padding:2px 3px;min-width:52px">
+        <input type="checkbox" value="${d.cod}" ${checked?'checked':''}
+          ${origen!=='individual'?'data-heredado="1"':''}
+          style="width:15px;height:15px;accent-color:#1a56db;cursor:pointer"
+          onchange="mdcToggleVendedor('${v.codigo}','${d.cod}',this.checked)">
+      </td>`;
+    }).join('');
+    const badge = origen==='individual'
+      ? `<span style="font-size:.62rem;background:#eff6ff;color:#1a56db;border:1px solid #bfdbfe;border-radius:8px;padding:1px 5px;margin-left:4px;white-space:nowrap">individual</span>`
+      : origen==='perfil'
+        ? `<span style="font-size:.62rem;background:#f5f3ff;color:#7c3aed;border:1px solid #ddd6fe;border-radius:8px;padding:1px 5px;margin-left:4px;white-space:nowrap">hereda perfil ${perfil}</span>`
+        : `<span style="font-size:.62rem;background:#fef9c3;color:#92400e;border:1px solid #fde68a;border-radius:8px;padding:1px 5px;margin-left:4px;white-space:nowrap">hereda global</span>`;
+    return `<tr style="border-bottom:1px solid #f3f4f6">
+      <td style="padding:4px 8px;font-size:.76rem;white-space:nowrap;position:sticky;left:0;background:#fff;z-index:1;border-right:1px solid #e5e7eb">
+        <strong>${v.nombre}</strong> <small style="color:#9ca3af">(${v.codigo})</small>${badge}
+      </td>
+      ${celdas}
+      <td style="padding:2px 4px;position:sticky;right:0;background:#fff;border-left:1px solid #e5e7eb">
+        <button title="Quitar configuración individual" style="font-size:.7rem;padding:2px 5px;border:1px solid #e5e7eb;border-radius:4px;background:#fff;cursor:pointer;color:#dc2626"
+          onclick="mdcResetVendedor('${v.codigo}')">✕</button>
+      </td>
+    </tr>`;
+  }).join('');
+
+  body.innerHTML = `
+    <p style="font-size:.82rem;color:#6b7280;margin-bottom:10px">
+      Marcá los depósitos por vendedor. <em>Hereda global</em> = sin configuración propia.
+      El botón <strong>✕</strong> elimina la configuración individual y vuelve al global.
+    </p>
+    <div style="overflow-x:auto">
+      <table style="width:100%;border-collapse:collapse;font-size:.8rem">
+        <thead style="position:sticky;top:0;z-index:3">
+          <tr>
+            <th style="padding:5px 8px;text-align:left;background:#f3f4f6;position:sticky;left:0;z-index:4;border-right:1px solid #e5e7eb">Vendedor</th>
+            ${thDep}
+            <th style="background:#f3f4f6;padding:5px 6px;position:sticky;right:0;z-index:4;border-left:1px solid #e5e7eb"></th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    <p style="font-size:.72rem;color:#9ca3af;margin-top:8px">
+      💡 Los cambios se guardan inmediatamente al marcar/desmarcar.
+    </p>`;
+}
+
+async function mdcToggleVendedor(codVendedor, codDep, enabled){
+  const feature = 'deposito_exclusivo_'+codDep;
+  const {origen, deps} = _depVendedorActivos(codVendedor);
+  if(origen !== 'individual'){
+    // Materializar herencia (perfil o global): crear flags individuales para TODOS los deps
+    for(const dep of _DEPOSITOS.map(d=>d.cod)){
+      const val = deps.includes(dep) ? 1 : 0;
+      await api('POST','/admin/flags',{codigousuario:codVendedor, feature:'deposito_exclusivo_'+dep, enabled:val});
+      const idx = _mdc_flags.findIndex(x=>x.feature==='deposito_exclusivo_'+dep && x.codigousuario===codVendedor);
+      if(idx>=0) _mdc_flags[idx] = {..._mdc_flags[idx], enabled:val};
+      else _mdc_flags.push({feature:'deposito_exclusivo_'+dep, codigousuario:codVendedor, enabled:val});
+    }
+  }
+  // Ahora aplicar el cambio específico
+  await api('POST','/admin/flags',{codigousuario:codVendedor, feature, enabled:enabled?1:0});
+  const idx = _mdc_flags.findIndex(x=>x.feature===feature && x.codigousuario===codVendedor);
+  if(idx>=0) _mdc_flags[idx].enabled = enabled?1:0;
+  else _mdc_flags.push({feature, codigousuario:codVendedor, enabled:enabled?1:0});
+  auditLog(`Depósito vendedor ${enabled?'habilitado':'deshabilitado'}`, `Vendedor ${codVendedor} - Depósito ${codDep}`);
+  // Re-render para actualizar badge hereda/individual
+  _renderDepVendedor();
+}
+
+async function mdcResetVendedor(codVendedor){
+  // BORRAR (no setear 0) para que el vendedor herede correctamente de perfil/global
+  await api('DELETE',`/admin/flags/depositos-vendedor/${encodeURIComponent(codVendedor)}`);
+  _mdc_flags = _mdc_flags.filter(x=>!(x.feature.startsWith('deposito_exclusivo_') && x.codigousuario===codVendedor));
+  auditLog('Configuración individual de depósito eliminada', `Vendedor ${codVendedor} → hereda perfil/global`);
+  _renderDepVendedor();
+}
+// ─── Depósito por Perfil ─────────────────────────────────────────────────────
+function _depPerfilKey(codPerfil){ return 'PERFIL:'+codPerfil.toUpperCase(); }
+
+function _depPerfilActivos(codPerfil){
+  const key = _depPerfilKey(codPerfil);
+  const propios = _mdc_flags.filter(x=>x.feature.startsWith('deposito_exclusivo_') && x.codigousuario===key);
+  if(!propios.length){
+    return {deps: _depGlobalActivos(), heredado: true};
+  }
+  return {deps: propios.filter(x=>!!x.enabled).map(x=>x.feature.replace('deposito_exclusivo_','')), heredado: false};
+}
+
+function _renderDepPerfil(){
+  const body = document.getElementById('mdc-body');
+  if(!_mdc_perfiles.length){
+    body.innerHTML = '<p style="color:#9ca3af;font-size:.82rem">Sin perfiles de vendedor definidos. Creá uno desde el menú Perfiles.</p>';
+    return;
+  }
+  const thDep = _DEPOSITOS.map(d=>
+    `<th style="padding:3px 4px;text-align:center;font-size:.65rem;white-space:nowrap;background:#f3f4f6;min-width:52px;max-width:64px">
+      <div style="font-weight:700;color:#1a56db">${d.cod}</div>
+      <div style="color:#6b7280;font-size:.6rem;overflow:hidden;text-overflow:ellipsis;max-width:60px" title="${d.label}">${d.label.length>8?d.label.substring(0,8)+'…':d.label}</div>
+    </th>`).join('');
+
+  const rows = _mdc_perfiles.map(p=>{
+    const {deps, heredado} = _depPerfilActivos(p.codigo);
+    const celdas = _DEPOSITOS.map(d=>{
+      const checked = deps.includes(d.cod);
+      return `<td style="text-align:center;padding:2px 3px;min-width:52px">
+        <input type="checkbox" value="${d.cod}" ${checked?'checked':''}
+          ${heredado?'data-heredado="1"':''}
+          style="width:15px;height:15px;accent-color:#7c3aed;cursor:pointer"
+          onchange="mdcTogglePerfil('${p.codigo}','${d.cod}',this.checked)">
+      </td>`;
+    }).join('');
+    const badge = heredado
+      ? `<span style="font-size:.62rem;background:#fef9c3;color:#92400e;border:1px solid #fde68a;border-radius:8px;padding:1px 5px;margin-left:4px;white-space:nowrap">hereda global</span>`
+      : `<span style="font-size:.62rem;background:#f5f3ff;color:#7c3aed;border:1px solid #ddd6fe;border-radius:8px;padding:1px 5px;margin-left:4px;white-space:nowrap">perfil propio</span>`;
+    return `<tr style="border-bottom:1px solid #f3f4f6">
+      <td style="padding:4px 8px;font-size:.76rem;white-space:nowrap;position:sticky;left:0;background:#fff;z-index:1;border-right:1px solid #e5e7eb">
+        <strong>${p.nombre}</strong> <small style="color:#9ca3af">(${p.codigo})</small>${badge}
+      </td>
+      ${celdas}
+      <td style="padding:2px 4px;position:sticky;right:0;background:#fff;border-left:1px solid #e5e7eb">
+        <button title="Quitar configuración de perfil (vuelve a global)" style="font-size:.7rem;padding:2px 5px;border:1px solid #e5e7eb;border-radius:4px;background:#fff;cursor:pointer;color:#dc2626"
+          onclick="mdcResetPerfil('${p.codigo}')">✕</button>
+      </td>
+    </tr>`;
+  }).join('');
+
+  body.innerHTML = `
+    <p style="font-size:.82rem;color:#6b7280;margin-bottom:10px">
+      Marcá los depósitos por perfil. Los vendedores con ese perfil y <em>sin configuración individual</em> heredan estos depósitos.<br>
+      Precedencia: <strong>Individual &gt; Perfil &gt; Global</strong>. El botón <strong>✕</strong> elimina la config del perfil y vuelve al global.
+    </p>
+    <div style="overflow-x:auto">
+      <table style="width:100%;border-collapse:collapse;font-size:.8rem">
+        <thead style="position:sticky;top:0;z-index:3">
+          <tr>
+            <th style="padding:5px 8px;text-align:left;background:#f3f4f6;position:sticky;left:0;z-index:4;border-right:1px solid #e5e7eb">Perfil</th>
+            ${thDep}
+            <th style="background:#f3f4f6;padding:5px 6px;position:sticky;right:0;z-index:4;border-left:1px solid #e5e7eb"></th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    <p style="font-size:.72rem;color:#9ca3af;margin-top:8px">
+      💡 Los cambios se guardan inmediatamente al marcar/desmarcar.
+    </p>`;
+}
+
+async function mdcTogglePerfil(codPerfil, codDep, enabled){
+  const key = _depPerfilKey(codPerfil);
+  const feature = 'deposito_exclusivo_'+codDep;
+  const {heredado} = _depPerfilActivos(codPerfil);
+  if(heredado){
+    // Materializar herencia: crear flags de perfil para todos los deps
+    const global = _depGlobalActivos();
+    for(const d of _DEPOSITOS){
+      const val = global.includes(d.cod) ? 1 : 0;
+      await api('POST','/admin/flags',{codigousuario:key, feature:'deposito_exclusivo_'+d.cod, enabled:val});
+      const idx = _mdc_flags.findIndex(x=>x.feature==='deposito_exclusivo_'+d.cod && x.codigousuario===key);
+      if(idx>=0) _mdc_flags[idx].enabled = val;
+      else _mdc_flags.push({feature:'deposito_exclusivo_'+d.cod, codigousuario:key, enabled:val});
+    }
+  }
+  await api('POST','/admin/flags',{codigousuario:key, feature, enabled:enabled?1:0});
+  const idx = _mdc_flags.findIndex(x=>x.feature===feature && x.codigousuario===key);
+  if(idx>=0) _mdc_flags[idx].enabled = enabled?1:0;
+  else _mdc_flags.push({feature, codigousuario:key, enabled:enabled?1:0});
+  auditLog(`Depósito perfil ${enabled?'habilitado':'deshabilitado'}`, `Perfil ${codPerfil} - Depósito ${codDep}`);
+  _renderDepPerfil();
+}
+
+async function mdcResetPerfil(codPerfil){
+  const key = _depPerfilKey(codPerfil);
+  await api('DELETE',`/admin/flags/depositos-vendedor/${encodeURIComponent(key)}`);
+  _mdc_flags = _mdc_flags.filter(x=>!(x.feature.startsWith('deposito_exclusivo_') && x.codigousuario===key));
+  auditLog('Configuración de depósito de perfil eliminada', `Perfil ${codPerfil} → hereda global`);
+  _renderDepPerfil();
+}
+
 async function setFlag(cod, feature, enabled){
   await api('POST','/admin/flags',{codigousuario:cod||null, feature, enabled:enabled?1:0});
   const lbl = document.getElementById('flag-'+feature+'-label');
@@ -1731,9 +2445,11 @@ function renderReservasList(){
 
   wrap.innerHTML = _rvGroups.map((g, idx)=>{
     const tieneActiva = g.items.some(r => r.activo && (!r.fecha_hasta || r.fecha_hasta >= today));
+    const tienePreventa = g.items.some(r => r.es_preventa);
     const estadoBadge = tieneActiva
       ? '<span style="background:#dcfce7;color:#15803d;padding:1px 7px;border-radius:10px;font-size:.72rem;font-weight:600">Activa</span>'
       : '<span style="background:#f3f4f6;color:#9ca3af;padding:1px 7px;border-radius:10px;font-size:.72rem">Vencida</span>';
+    const preventaBadge = tienePreventa ? '<span style="background:#fef9c3;color:#92400e;border:1px solid #fde68a;padding:1px 6px;border-radius:8px;font-size:.7rem;font-weight:700">⚡ PREVENTA</span>' : '';
     const n = g.items.length;
     return `<div style="border-bottom:1px solid #e5e7eb">
       <div onclick="showReservaDetalle(${idx})" style="display:flex;align-items:center;gap:10px;padding:11px 14px;cursor:pointer;user-select:none;transition:background .15s" onmouseover="this.style.background='#f9fafb'" onmouseout="this.style.background=''">
@@ -1741,6 +2457,7 @@ function renderReservasList(){
         <div style="flex:1;font-weight:600;font-size:.88rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#1f2937">${g.motivo}</div>
         <div style="flex-shrink:0;display:flex;align-items:center;gap:8px;font-size:.78rem">
           <span style="color:#6b7280">${n} art.</span>
+          ${preventaBadge}
           ${estadoBadge}
         </div>
       </div>
@@ -1778,6 +2495,9 @@ function _renderDetalle(g){
       <button onclick="rvToggleGrupo()" style="background:${todosActivos?'#fef2f2':'#f0fdf4'};border:1px solid ${todosActivos?'#fecaca':'#bbf7d0'};color:${todosActivos?'#dc2626':'#16a34a'};border-radius:5px;cursor:pointer;font-size:.75rem;padding:3px 9px;flex-shrink:0">
         ${todosActivos?'⏸ Desactivar todo':'▶ Activar todo'}
       </button>
+      <button onclick="rvEliminarGrupo()" title="Eliminar todos los artículos de esta reserva (irrecuperable)" style="background:#fef2f2;border:1px solid #fecaca;color:#dc2626;border-radius:5px;cursor:pointer;font-size:.75rem;padding:3px 9px;flex-shrink:0">
+        🗑️ Eliminar grupo
+      </button>
     </div>
     ${reservaVencida ? `
     <div style="display:flex;align-items:center;gap:8px;background:#fff7ed;border:1px solid #fed7aa;border-radius:6px;padding:6px 10px;font-size:.8rem">
@@ -1803,14 +2523,38 @@ function _renderDetalle(g){
     </div>`}
   </div>`;
 
+  // ── Bloque Condición PREVENTA (solo si hay artículos preventa en el grupo) ──
+  const itemsPreventa = g.items.filter(r => r.es_preventa);
+  if(itemsPreventa.length > 0){
+    const mpActual = itemsPreventa[0].codigo_multiplazo || '';
+    const alertaColor = mpActual ? '#f0fdf4' : '#fef9c3';
+    const alertaBorder = mpActual ? '#bbf7d0' : '#fde68a';
+    const alertaTexto = mpActual
+      ? `✅ Condición bloqueada: <b id="rv-mp-label">${mpActual}</b>`
+      : `⚠️ <strong>Falta configurar</strong> la Condición de Venta a bloquear para esta reserva PREVENTA.`;
+    html += `
+  <div id="rv-preventa-mp-row" style="padding:8px 14px;background:${alertaColor};border-bottom:2px solid ${alertaBorder}">
+    <div style="font-size:.78rem;color:#92400e;margin-bottom:5px">⚡ PREVENTA — ${alertaTexto}</div>
+    <div style="display:flex;align-items:center;gap:8px">
+      <select id="rv-mp-sel" style="flex:1;border:1px solid #fde68a;border-radius:5px;padding:4px 8px;font-size:.8rem;background:#fff">
+        <option value="">— Cargando multiplazos… —</option>
+      </select>
+      <button onclick="rvSaveMultiplazoPreventa()" style="background:#d97706;color:#fff;border:none;border-radius:5px;cursor:pointer;font-size:.8rem;padding:4px 12px;font-weight:600;flex-shrink:0">
+        🔒 Guardar
+      </button>
+    </div>
+  </div>`;
+  }
+
   html += g.items.map(r => {
     const activo = r.activo;
     const utiliz = parseFloat(r.cantidad_utilizada||0);
     const cant = parseFloat(r.cantidad||0);
     const saldoRes = Math.max(0, cant - utiliz);
+    const preventaBadge = r.es_preventa ? `<span style="background:#fef9c3;color:#92400e;border:1px solid #fde68a;padding:0 5px;border-radius:4px;font-size:.7rem;font-weight:700;margin-left:4px">⚡ PREVENTA</span>` : '';
     const alcance = r.tipo==='articulo'
-      ? `<strong>${r.codigo_particular||r.codigo_articulo}</strong> <span style="color:#6b7280;font-size:.78rem">${(r.descripcion_articulo||'').substring(0,40)}</span>`
-      : `<span style="background:#eff6ff;color:#1d4ed8;padding:0 4px;border-radius:3px;font-size:.72rem">${r.tipo_grupo?.toUpperCase()||''}</span> ${r.nombre_grupo||r.valor_grupo}`;
+      ? `<strong>${r.codigo_particular||r.codigo_articulo}</strong>${preventaBadge} <span style="color:#6b7280;font-size:.78rem">${(r.descripcion_articulo||'').substring(0,40)}</span>`
+      : `<span style="background:#eff6ff;color:#1d4ed8;padding:0 4px;border-radius:3px;font-size:.72rem">${r.tipo_grupo?.toUpperCase()||''}</span> ${r.nombre_grupo||r.valor_grupo}${preventaBadge}`;
 
     return `<div style="border-bottom:1px solid #e5e7eb;${!activo?'opacity:.55':''}">
       <div style="display:flex;align-items:center;gap:8px;padding:8px 12px">
@@ -1830,7 +2574,7 @@ function _renderDetalle(g){
         </div>
       </div>
       <div style="padding:0 12px 6px;font-size:.74rem;color:#6b7280">
-        Dep: <strong>${(FIXED_DEPS.find(d=>d.cod===r.deposito)?.label)||r.deposito||'—'}</strong> · Reservado: <strong style="color:#c2410c">${Math.round(cant)} u.</strong> · Utilizado: <strong>${Math.round(utiliz)} u.</strong> · Vence: <strong>${r.fecha_hasta||'Sin venc.'}</strong>
+        Dep: <strong>${(_DEPOSITOS.find(d=>d.cod===r.deposito)?.label)||r.deposito||'—'}</strong> · Reservado: <strong style="color:#c2410c">${Math.round(cant)} u.</strong> · Utilizado: <strong>${Math.round(utiliz)} u.</strong> · Vence: <strong>${r.fecha_hasta||'Sin venc.'}</strong>
       </div>
     </div>`;
   }).join('');
@@ -1861,9 +2605,39 @@ function _renderDetalle(g){
   </div>`;
 
   wrap.innerHTML = html;
+
+  // Poblar select de multiplazo preventa si corresponde
+  if(itemsPreventa.length > 0){
+    const mpSel = document.getElementById('rv-mp-sel');
+    const mpActual = itemsPreventa[0].codigo_multiplazo || '';
+    api('GET', '/multiplazos').then(lista => {
+      if(!lista || !mpSel) return;
+      mpSel.innerHTML = '<option value="">— Seleccioná la condición PREVENTA —</option>'
+        + lista.map(m => `<option value="${m.codigo}" ${m.codigo===mpActual?'selected':''}>${m.codigo} — ${m.descripcion}</option>`).join('');
+    });
+  }
 }
 
 // ── Helpers CRUD de reserva en detalle ───────────────────────────────────────
+async function rvSaveMultiplazoPreventa(){
+  const g = _rvGroups[_rvDetIdx];
+  if(!g) return;
+  const sel = document.getElementById('rv-mp-sel');
+  const cod = sel?.value;
+  if(!cod){ toast('Seleccioná una condición de venta.', true); return; }
+  const itemsPrev = g.items.filter(r => r.es_preventa);
+  if(!itemsPrev.length) return;
+  await Promise.all(itemsPrev.map(r => api('PATCH', `/admin/reservas-stock/${r.id}`, {codigo_multiplazo: cod})));
+  // Actualizar cache local
+  itemsPrev.forEach(r => { r.codigo_multiplazo = cod; });
+  const lbl = document.getElementById('rv-mp-label');
+  const row = document.getElementById('rv-preventa-mp-row');
+  if(lbl) lbl.textContent = cod;
+  if(row) { row.style.background='#f0fdf4'; row.style.borderBottomColor='#bbf7d0'; }
+  toast(`✅ Condición PREVENTA configurada: ${cod}`);
+  auditLog('Configuró multiplazo preventa', `motivo=${g.motivo} codigo_multiplazo=${cod}`);
+}
+
 async function rvSaveCant(id){
   const inp = document.getElementById(`rvcant-${id}`);
   const cant = parseFloat(inp?.value);
@@ -1889,6 +2663,18 @@ async function rvToggleItemActivo(id, nuevoActivo){
   const item = g?.items.find(r => r.id === id);
   if(item) item.activo = nuevoActivo;
   _renderDetalle(g);
+}
+
+async function rvEliminarGrupo(){
+  const g = _rvGroups[_rvDetIdx];
+  if(!g) return;
+  if(!confirm(`¿Eliminar TODOS los artículos de la reserva "${g.motivo}"?\nEsta acción es irrecuperable.`)) return;
+  await Promise.all(g.items.map(r => api('DELETE', `/admin/reservas-stock/${r.id}`)));
+  toast(`Reserva "${g.motivo}" eliminada`);
+  auditLog('Eliminó grupo de reserva', `motivo=${g.motivo} items=${g.items.length}`);
+  _rvGroups.splice(_rvDetIdx, 1);
+  _rvDetIdx = -1;
+  renderReservasList();
 }
 
 async function rvToggleGrupo(){
@@ -2040,8 +2826,21 @@ function openModalReservaForm(reserva=null){
   // Poblar depósitos
   const depSel = document.getElementById('mrf-deposito');
   depSel.innerHTML = '<option value="">— Seleccionar depósito —</option>'
-    + FIXED_DEPS.map(d=>`<option value="${d.cod}">${d.cod} — ${d.label}</option>`).join('');
+    + _DEPOSITOS.map(d=>`<option value="${d.cod}">${d.cod} — ${d.label}</option>`).join('');
   depSel.value = reserva ? (reserva.deposito||'') : '';
+  const prevChk = document.getElementById('mrf-es-preventa');
+  if(prevChk){
+    prevChk.checked = reserva ? !!reserva.es_preventa : false;
+    mrfTogglePreventa();
+    // Restaurar multiplazo seleccionado si es edición
+    if(reserva && reserva.codigo_multiplazo){
+      // Esperar a que se pueblen las opciones y luego seleccionar
+      setTimeout(() => {
+        const mpSel = document.getElementById('mrf-codigo-multiplazo');
+        if(mpSel) mpSel.value = reserva.codigo_multiplazo;
+      }, 400);
+    }
+  }
 
   const tipo = reserva ? reserva.tipo : 'articulo';
   document.querySelector(`input[name="mrf-tipo"][value="${tipo}"]`).checked = true;
@@ -2075,6 +2874,30 @@ function openModalReservaForm(reserva=null){
 
   document.getElementById('modal-reserva-form').classList.add('open');
   makeDraggable('modal-reserva-form');
+}
+
+function mrfTogglePreventa(){
+  const chk = document.getElementById('mrf-es-preventa').checked;
+  const lbl = document.getElementById('mrf-dep-label');
+  if(lbl) lbl.textContent = chk ? '(depósito de destino — no requiere stock actual)' : '(debe tener remanente suficiente)';
+  const wrap = document.getElementById('mrf-multiplazo-preventa-wrap');
+  if(!wrap) return;
+  wrap.style.display = chk ? '' : 'none';
+  // Poblar el selector de multiplazos si todavía está vacío
+  if(chk){
+    const sel = document.getElementById('mrf-codigo-multiplazo');
+    if(sel && sel.options.length <= 1){
+      api('GET', '/multiplazos').then(lista => {
+        if(!lista) return;
+        lista.forEach(m => {
+          const o = document.createElement('option');
+          o.value = m.codigo;
+          o.textContent = `${m.codigo} — ${m.descripcion}`;
+          sel.appendChild(o);
+        });
+      });
+    }
+  }
 }
 
 function mrfTipoChange(reserva=null){
@@ -2234,11 +3057,15 @@ async function saveReserva(){
       const btn = document.getElementById('mrf-btn-save');
       btn.disabled=true; btn.textContent='Guardando…';
       let errores=[];
+      const esPreventa = document.getElementById('mrf-es-preventa').checked;
+      const codMultiplazo = esPreventa ? (document.getElementById('mrf-codigo-multiplazo')?.value || null) : null;
+      if(esPreventa && !codMultiplazo){ errEl.textContent='Seleccioná la Condición de Venta PREVENTA a bloquear.'; return; }
       for(const it of _mrfCart){
         const body={tipo:'articulo', tipo_cantidad:it.tipo_cantidad, cantidad:it.cantidad,
           deposito, motivo, fecha_hasta:fechaHasta, activo:1,
           codigo_articulo:it.codigo_articulo, codigo_particular:it.codigo_particular,
-          descripcion_articulo:it.descripcion_articulo};
+          descripcion_articulo:it.descripcion_articulo, es_preventa:esPreventa,
+          codigo_multiplazo:codMultiplazo};
         const resp = await fetch(`${BASE}/admin/reservas-stock`,{
           method:'POST', headers:{'Authorization':'Bearer '+TOKEN,'Content-Type':'application/json'},
           body:JSON.stringify(body)});
@@ -2272,7 +3099,10 @@ async function saveReserva(){
   }
   if(isNaN(cantidad)||cantidad<=0){ errEl.textContent='La cantidad debe ser mayor a 0.'; return; }
 
-  let body = { tipo, tipo_cantidad: tipoCant, cantidad, deposito, motivo, fecha_hasta: fechaHasta, activo: 1 };
+  const esPreventa = document.getElementById('mrf-es-preventa').checked;
+  const codMultiplazoPreventa = esPreventa ? (document.getElementById('mrf-codigo-multiplazo')?.value || null) : null;
+  if(esPreventa && !codMultiplazoPreventa){ errEl.textContent='Seleccioná la Condición de Venta PREVENTA a bloquear.'; return; }
+  let body = { tipo, tipo_cantidad: tipoCant, cantidad, deposito, motivo, fecha_hasta: fechaHasta, activo: 1, es_preventa: esPreventa, codigo_multiplazo: codMultiplazoPreventa };
 
   if(tipo==='articulo'){
     let cod = document.getElementById('mrf-codigo-articulo').value;
@@ -2335,8 +3165,15 @@ async function openFlagVendor(feature){
 async function _flagBtn(btn, cod, feature, newEnabled){
   btn.disabled = true;
   btn.textContent = '...';
-  await setFlag(cod||null, feature, newEnabled);
-  // Re-render para reflejar estado real
+  if(!cod){
+    // TODOS: actualizar global + sobreescribir overrides individuales
+    await api('POST','/admin/flags',{codigousuario:null, feature, enabled:newEnabled?1:0});
+    const cods = (VENDEDORES||[]).map(v=>v.codigo);
+    if(cods.length) await api('POST','/admin/flags/bulk',{feature, enabled:newEnabled?1:0, codigousuarios:cods});
+    await loadFlags();
+  } else {
+    await setFlag(cod, feature, newEnabled);
+  }
   await _renderFlagVendorTable(feature);
 }
 async function _renderFlagVendorTable(feature){
@@ -2344,13 +3181,26 @@ async function _renderFlagVendorTable(feature){
   const tbody = document.querySelector('#tbl-flag-vend tbody');
   const global_f = flags.find(x=>x.feature===feature && (x.codigousuario===null||x.codigousuario===''));
   const global_enabled = global_f ? !!global_f.enabled : true;
+  // Estado efectivo real = todos los vendedores habilitados individualmente
+  const todosHabilitados = VENDEDORES.every(v => {
+    const f = flags.find(x=>x.feature===feature && x.codigousuario===v.codigo);
+    return f ? !!f.enabled : global_enabled;
+  });
+  // Botón individual: muestra estado actual (verde=Sí, rojo=No)
   const btnStyle = (on) => on
     ? 'background:#dcfce7;color:#15803d;border:1px solid #86efac;border-radius:6px;padding:4px 12px;cursor:pointer;font-size:.8rem;font-weight:600'
     : 'background:#fee2e2;color:#dc2626;border:1px solid #fca5a5;border-radius:6px;padding:4px 12px;cursor:pointer;font-size:.8rem;font-weight:600';
-  tbody.innerHTML = `<tr style="background:#f8fafc">
-    <td style="padding:6px 8px"><strong>🌐 TODOS los vendedores</strong><br><small style="color:#6b7280">Valor por defecto si no hay configuración individual</small></td>
-    <td style="text-align:center;padding:6px 8px">
-      <button style="${btnStyle(global_enabled)}" onclick="_flagBtn(this,null,'${feature}',${!global_enabled})">${global_enabled?'✅ Habilitado':'🚫 Deshabilitado'}</button>
+  // Botón TODOS: muestra la ACCIÓN a realizar (inverso del estado actual)
+  // Si todos habilitados → rojo "Deshabilitar todos" | Si alguno deshabilitado → verde "Habilitar todos"
+  const btnTodosStyle = todosHabilitados
+    ? 'background:#dc2626;color:#fff;border:none;border-radius:6px;padding:6px 18px;cursor:pointer;font-size:.85rem;font-weight:700;min-width:160px'
+    : 'background:#16a34a;color:#fff;border:none;border-radius:6px;padding:6px 18px;cursor:pointer;font-size:.85rem;font-weight:700;min-width:160px';
+  const btnTodosLabel = todosHabilitados ? '🚫 Deshabilitar todos' : '✅ Habilitar todos';
+  const nextEnabled = !todosHabilitados; // acción: si no todos habilitados → habilitar; si todos → deshabilitar
+  tbody.innerHTML = `<tr style="background:#f0f9ff;border-bottom:2px solid #bfdbfe">
+    <td style="padding:8px 8px"><strong>🌐 TODOS los vendedores</strong><br><small style="color:#6b7280">Aplica a todos los vendedores de la lista</small></td>
+    <td style="text-align:center;padding:8px 8px">
+      <button style="${btnTodosStyle}" onclick="_flagBtn(this,null,'${feature}',${nextEnabled})">${btnTodosLabel}</button>
     </td>
   </tr>` +
   VENDEDORES.map(v=>{
@@ -2633,7 +3483,7 @@ async function loadCatalogos(offset){
         <th style="padding:8px 10px">Perfiles / Vendedores</th>
         <th style="padding:8px 10px;white-space:nowrap">Fecha subida</th>
         <th style="padding:8px 10px;text-align:center">📧 Email</th>
-        <th style="padding:8px 10px;text-align:center">📱 WhatsApp</th>
+        <th style="padding:8px 10px;text-align:center">🔔 Push</th>
         <th style="padding:8px 10px">Link</th>
         <th style="padding:8px 10px"></th>
       </tr></thead>
@@ -2653,16 +3503,16 @@ async function loadCatalogos(offset){
         const emailBadge = c.email_enviado
           ? `<span style="background:#dcfce7;color:#15803d;padding:2px 8px;border-radius:999px;font-size:.76rem;font-weight:600">✓ ${c.email_count||''}</span>`
           : (c.email_count===0&&c.wa_count===0&&!c.email_enviado?'<span style="color:#9ca3af;font-size:.76rem">—</span>':'<span style="background:#fee2e2;color:#b91c1c;padding:2px 8px;border-radius:999px;font-size:.76rem">✗</span>');
-        const waBadge = c.wa_enviado
-          ? `<span style="background:#dcfce7;color:#15803d;padding:2px 8px;border-radius:999px;font-size:.76rem;font-weight:600">✓ ${c.wa_count||''}</span>`
-          : (c.email_count===0&&c.wa_count===0&&!c.wa_enviado?'<span style="color:#9ca3af;font-size:.76rem">—</span>':'<span style="background:#fee2e2;color:#b91c1c;padding:2px 8px;border-radius:999px;font-size:.76rem">✗</span>');
+        const pushBadge = c.push_enviado
+          ? `<span style="background:#dcfce7;color:#15803d;padding:2px 8px;border-radius:999px;font-size:.76rem;font-weight:600">✓ ${c.push_count||''}</span>`
+          : '<span style="color:#9ca3af;font-size:.76rem">—</span>';
         return `<tr style="border-bottom:1px solid #f3f4f6">
           <td style="padding:8px 10px"><strong>${c.nombre}</strong><br><span style="color:#9ca3af;font-size:.74rem">${icon} ${ext.toUpperCase()} · por ${c.subido_por}</span></td>
           <td style="padding:8px 10px;color:#6b7280;font-size:.8rem">${c.descripcion||'—'}</td>
           <td style="padding:8px 10px">${alcance}</td>
           <td style="padding:8px 10px;color:#6b7280;font-size:.79rem;white-space:nowrap">${fecha}</td>
           <td style="padding:8px 10px;text-align:center">${emailBadge}</td>
-          <td style="padding:8px 10px;text-align:center">${waBadge}</td>
+          <td style="padding:8px 10px;text-align:center">${pushBadge}</td>
           <td style="padding:8px 10px;white-space:nowrap">
             <a href="${url}" target="_blank" style="color:#1a56db;font-size:.82rem">🔗 Abrir</a>
             <button onclick="navigator.clipboard.writeText('${url}').then(()=>toast('URL copiada'))" style="background:none;border:none;cursor:pointer;font-size:.78rem;color:#6b7280" title="Copiar URL">📋</button>
@@ -3665,7 +4515,7 @@ async function auditLoad(offset){
     let qs = `?offset=${_auditOffset}&limit=${_AUDIT_LIMIT}`;
     if(desde) qs += '&desde=' + desde;
     if(hasta)  qs += '&hasta='  + hasta;
-    const res = await api('GET', '/admin/audit-log' + qs);
+    const res = await apiStrict('GET', '/admin/audit-log' + qs);
     const rows  = res.rows  || [];
     const total = res.total || 0;
     const totalPags = Math.ceil(total / _AUDIT_LIMIT);
@@ -3815,11 +4665,11 @@ async function ajCargarPreview(){
         <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${a.descripcion}">${a.descripcion||''}</td>
         <td style="text-align:right">${a.stock_anterior}</td>
         <td style="text-align:right"><b>${a.stock_nuevo}</b></td>
-        <td style="text-align:right;color:${diff>=0?'#16a34a':'#dc2626'}">${diff>=0?'+':''}${diff.toFixed(2)}</td>
-        <td style="text-align:right">${(+a.remanente_anterior).toFixed(2)}</td>
-        <td style="text-align:right;color:${remNvo>=0?'#16a34a':'#dc2626'}"><b>${(+remNvo).toFixed(2)}</b></td>
-        <td style="text-align:right">${typeof stTotal==='number'?stTotal.toFixed(2):stTotal}</td>
-        <td style="text-align:right">${typeof remTotal==='number'?remTotal.toFixed(2):remTotal}</td>
+        <td style="text-align:right;color:${diff>=0?'#16a34a':'#dc2626'}">${diff>=0?'+':''}${Math.round(diff)}</td>
+        <td style="text-align:right">${Math.round(+a.remanente_anterior)}</td>
+        <td style="text-align:right;color:${remNvo>=0?'#16a34a':'#dc2626'}"><b>${Math.round(+remNvo)}</b></td>
+        <td style="text-align:right">${typeof stTotal==='number'?Math.round(stTotal):stTotal}</td>
+        <td style="text-align:right">${typeof remTotal==='number'?Math.round(remTotal):remTotal}</td>
         <td style="text-align:right">${a.pedidos_pendientes}</td>
         <td>${alerta}</td>
       </tr>`;
@@ -4009,6 +4859,574 @@ async function ajLoadHistorial(){
       _applyHandle(th, id, ths);
     });
   };
+})();
+
+// ─── Timeout de inactividad: 5 minutos ────────────────────────────────────────
+(function(){
+  const INACTIVITY_MS = 15 * 60 * 1000; // 15 minutos
+  const WARNING_MS    = 14 * 60 * 1000; // aviso al minuto 14
+  let timerWarning, timerLogout, countdownInterval;
+
+  const modal = document.createElement('div');
+  modal.id = 'inactivity-modal-admin';
+  modal.style.cssText = 'display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.55);align-items:center;justify-content:center;';
+  modal.innerHTML = `
+    <div style="background:#fff;border-radius:10px;padding:32px 28px;max-width:340px;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,.25)">
+      <div style="font-size:2rem;margin-bottom:8px">⏰</div>
+      <h3 style="margin:0 0 10px;color:#1a3a5c">Sesión por expirar</h3>
+      <p style="margin:0 0 20px;color:#555;font-size:.95rem">
+        Llevás 14 minutos sin actividad.<br>
+        La sesión se cerrará en <strong id="admin-inactivity-countdown">60</strong> segundos.
+      </p>
+      <button id="admin-inactivity-stay"
+        style="background:#1a3a5c;color:#fff;border:none;border-radius:6px;padding:10px 28px;font-size:1rem;cursor:pointer">
+        Seguir usando el panel
+      </button>
+    </div>
+  `;
+  document.body.appendChild(modal);
+
+  function showWarning(){
+    modal.style.display = 'flex';
+    let secs = 60;
+    document.getElementById('admin-inactivity-countdown').textContent = secs;
+    countdownInterval = setInterval(()=>{
+      secs--;
+      const el = document.getElementById('admin-inactivity-countdown');
+      if(el) el.textContent = secs;
+      if(secs <= 0){ clearInterval(countdownInterval); doLogout(); }
+    }, 1000);
+  }
+
+  function doLogout(){
+    modal.style.display = 'none';
+    clearInterval(countdownInterval);
+    if(typeof logout === 'function') logout();
+  }
+
+  function resetTimers(){
+    if(!localStorage.getItem('admin_token')) return;
+    clearTimeout(timerWarning);
+    clearTimeout(timerLogout);
+    clearInterval(countdownInterval);
+    modal.style.display = 'none';
+    timerWarning = setTimeout(showWarning, WARNING_MS);
+    timerLogout  = setTimeout(doLogout,   INACTIVITY_MS);
+  }
+
+  ['mousemove','mousedown','keydown','touchstart','scroll','click'].forEach(ev=>{
+    document.addEventListener(ev, resetTimers, { passive: true });
+  });
+
+  // ── ANÁLISIS DE ROTACIÓN ─────────────────────────────────────────────────
+  let _rotTimers = [];
+
+  function _rotOverlayClose(){
+    _rotTimers.forEach(t => clearInterval(t));
+    _rotTimers = [];
+    document.getElementById('overlay-procesando').style.display = 'none';
+    document.getElementById('overlay-proc-pasos').textContent = '';
+  }
+
+  function _rotOverlayOpen(msg, sub){
+    const el   = document.getElementById('overlay-procesando');
+    const msgEl = document.getElementById('overlay-proc-msg');
+    const subEl = document.getElementById('overlay-proc-sub');
+    const pasEl = document.getElementById('overlay-proc-pasos');
+    _rotTimers.forEach(t => clearInterval(t));
+    _rotTimers = [];
+    msgEl.textContent = msg || 'Procesando solicitud…';
+    subEl.textContent = sub || '';
+    pasEl.textContent = '';
+    el.style.display = 'flex';
+    // Timer de segundos transcurridos
+    let seg = 0;
+    _rotTimers.push(setInterval(() => {
+      seg++;
+      const m = Math.floor(seg/60), s = seg%60;
+      pasEl.textContent = `Tiempo transcurrido: ${m>0?m+'m ':''} ${s}s`;
+    }, 1000));
+  }
+
+  function _rotOverlayMsg(msg, sub){
+    const msgEl = document.getElementById('overlay-proc-msg');
+    const subEl = document.getElementById('overlay-proc-sub');
+    if(msg) msgEl.textContent = msg;
+    if(sub !== undefined) subEl.textContent = sub;
+  }
+
+  let _rotRowsCache = [];  // últimas filas renderizadas, para abrir el modal sin pasar texto por onclick (evita romper el HTML con comillas/caracteres especiales en la descripción)
+
+  function _rotRenderRows(rows){
+    _rotRowsCache = rows;
+    return rows.map((r, idx) => {
+      // margen_mayorista_pct es margen de utilidad real, ya cubierto el
+      // gasto operativo: pct_utilidad (variable ingresada) = cumple objetivo,
+      // 0% = breakeven, negativo = pérdida real (ni el operativo se cubre).
+      const objetivoUtilidad = r.pct_utilidad ?? 25;
+      const mc = r.margen_mayorista_pct === null  ? '#6b7280'
+               : r.margen_mayorista_pct < 0        ? '#dc2626'
+               : r.margen_mayorista_pct < objetivoUtilidad ? '#d97706'
+               : '#15803d';
+      const safeId  = (r.codigoparticular || r.codigo).replace(/[^a-z0-9]/gi, '_');
+      const mlUrl   = `https://listado.mercadolibre.com.ar/${encodeURIComponent(_mlQueryAproximada(r.descripcion||''))}`;
+      const noPuedeML = r.puede_pub_meli === false
+        ? '<span title="Precio ML no cubre ni el punto de equilibrio (costo + gasto operativo)" style="color:#dc2626;font-size:.7rem"> ⚠</span>' : '';
+      const bultoLabel = r.bulto_sugerido ? `×${r.bulto_sugerido}` : '—';
+      const packMay    = r.precio_bulto_mayorista
+        ? `$${Math.round(r.precio_bulto_mayorista).toLocaleString('es-AR')}`
+        : '—';
+      return `<tr>
+        <td style="font-family:monospace;font-size:.82rem;white-space:nowrap">${r.codigoparticular}</td>
+        <td style="max-width:200px;white-space:normal;font-size:.83rem">${r.descripcion}</td>
+        <td style="text-align:right">${r.stock.toLocaleString('es-AR')}</td>
+        <td style="text-align:right;white-space:nowrap">$${Math.round(r.precio1_ars).toLocaleString('es-AR')}</td>
+        <td style="text-align:right;font-weight:700;color:#15803d;white-space:nowrap">$${Math.round(r.precio_mayorista||0).toLocaleString('es-AR')}</td>
+        <td style="text-align:right;font-weight:600;color:#1d4ed8;white-space:nowrap">$${Math.round(r.precio_meli_pub||r.precio_meli||0).toLocaleString('es-AR')}${noPuedeML}</td>
+        <td style="text-align:right;font-weight:600;color:${mc}">${r.margen_mayorista_pct !== null && r.margen_mayorista_pct !== undefined ? r.margen_mayorista_pct+'%' : '—'}</td>
+        <td style="text-align:center;font-weight:700;color:#7c3aed">${bultoLabel}</td>
+        <td style="text-align:right;font-weight:600;color:#7c3aed;white-space:nowrap">${packMay}</td>
+        <td style="text-align:right;white-space:nowrap">
+          <a href="#" onclick="rotVerVentas(${idx});return false"
+            style="color:#1a56db;font-size:.82rem;text-decoration:underline" title="Ver detalle de comprobantes de venta">
+            ${(r.cantidad_vendida_periodo||0).toLocaleString('es-AR')} u. (${r.pct_venta ?? 0}%)
+          </a>
+        </td>
+        <td><a class="btn btn-ghost btn-sm" style="white-space:nowrap;text-decoration:none"
+          href="${mlUrl}" target="_blank" rel="noopener">🛒 Ver en ML</a></td>
+      </tr>`;
+    }).join('');
+  }
+
+  async function rotVerVentas(idx){
+    const r = _rotRowsCache[idx];
+    if(!r) return;
+    const meses = rotMesesActual;
+    document.getElementById('rot-ventas-titulo').textContent = `Ventas de ${r.codigoparticular} — ${r.descripcion || ''}`;
+    const body = document.getElementById('rot-ventas-body');
+    body.innerHTML = 'Cargando…';
+    document.getElementById('modal-rot-ventas').classList.add('open');
+    try {
+      const items = await api('GET', `/admin/rotacion-detalle-ventas?art_id=${encodeURIComponent(r.art_id)}&meses=${meses}`);
+      if(!items || !items.length){
+        body.innerHTML = '<p style="color:#6b7280;font-size:.85rem">Sin comprobantes de venta en este período.</p>';
+        return;
+      }
+      const totalCant = items.reduce((s,i)=>s+(i.cantidad||0), 0);
+      const totalImp  = items.reduce((s,i)=>s+(i.importe||0), 0);
+      const totalIva  = items.reduce((s,i)=>s+(i.iva_monto||0), 0);
+      const totalCI   = items.reduce((s,i)=>s+(i.importe_con_iva||0), 0);
+      body.innerHTML = `
+        <table style="width:100%;font-size:.8rem;border-collapse:collapse">
+          <thead>
+            <tr style="border-bottom:2px solid #e5e7eb;text-align:left">
+              <th style="padding:6px 6px">Fecha</th>
+              <th style="padding:6px 6px">Tipo</th>
+              <th style="padding:6px 6px">N° Comp.</th>
+              <th style="padding:6px 6px">Razón Social</th>
+              <th style="padding:6px 6px;text-align:right">Cant.</th>
+              <th style="padding:6px 6px;text-align:right">Importe</th>
+              <th style="padding:6px 6px;text-align:right">IVA</th>
+              <th style="padding:6px 6px;text-align:right">Imp. c/IVA</th>
+              <th style="padding:6px 6px;text-align:center">Factura</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${items.map(i => {
+              const pdfUrl = `${BASE}/comprobantes/${encodeURIComponent(i.tipo)}/${encodeURIComponent(i.numero)}/pdf`;
+              return `<tr style="border-bottom:1px solid #f1f5f9">
+              <td style="padding:5px 6px;white-space:nowrap">${i.fecha} <span style="color:#9ca3af;font-size:.72rem">(${i.origen})</span></td>
+              <td style="padding:5px 6px">${i.tipo}</td>
+              <td style="padding:5px 6px">${i.numero}</td>
+              <td style="padding:5px 6px">${i.razonsocial || ''}</td>
+              <td style="padding:5px 6px;text-align:right">${i.cantidad.toLocaleString('es-AR')}</td>
+              <td style="padding:5px 6px;text-align:right">$${Math.round(i.importe).toLocaleString('es-AR')}</td>
+              <td style="padding:5px 6px;text-align:right">$${Math.round(i.iva_monto).toLocaleString('es-AR')}</td>
+              <td style="padding:5px 6px;text-align:right">$${Math.round(i.importe_con_iva).toLocaleString('es-AR')}</td>
+              <td style="padding:5px 6px;text-align:center">
+                <a href="${pdfUrl}" target="_blank" title="Ver factura" style="text-decoration:none">🧾</a>
+              </td>
+            </tr>`;
+            }).join('')}
+          </tbody>
+          <tfoot>
+            <tr style="border-top:2px solid #e5e7eb;font-weight:700">
+              <td colspan="4" style="padding:6px 6px">Total</td>
+              <td style="padding:6px 6px;text-align:right">${totalCant.toLocaleString('es-AR')}</td>
+              <td style="padding:6px 6px;text-align:right">$${Math.round(totalImp).toLocaleString('es-AR')}</td>
+              <td style="padding:6px 6px;text-align:right">$${Math.round(totalIva).toLocaleString('es-AR')}</td>
+              <td style="padding:6px 6px;text-align:right">$${Math.round(totalCI).toLocaleString('es-AR')}</td>
+              <td></td>
+            </tr>
+          </tfoot>
+        </table>`;
+    } catch(e){
+      body.innerHTML = `<p style="color:#dc2626;font-size:.85rem">Error: ${e.message}</p>`;
+    }
+  }
+
+  // La API de búsqueda de MercadoLibre está bloqueada para apps no certificadas
+  // (incluso con token de usuario válido), y un navegador headless (Playwright)
+  // es detectado como bot por ML y no llega a cargar resultados. La única
+  // forma confiable y sin riesgo de bloqueo de IP es abrir el link en el
+  // propio navegador del admin — exactamente como si lo tipeara él mismo.
+  function _mlQueryAproximada(desc){
+    let s = (desc||'').toUpperCase();
+    s = s.replace(/\bART\.?\s*\d+\b/g, ' ');
+    s = s.replace(/[-_/]/g, ' ');
+    s = s.replace(/[^A-Z0-9ÁÉÍÓÚÑ\s]/g, ' ');
+    s = s.replace(/\s+/g, ' ').trim();
+    return s.split(' ').slice(0, 6).join(' ');
+  }
+
+  function _rotResumenHTML(rows){
+    const cambio      = rows.find(r=>r.cambio_usd)?.cambio_usd || 1;
+    const pctOp       = rows.find(r=>r.pct_operativo != null)?.pct_operativo ?? 30;
+    const pctUt       = rows.find(r=>r.pct_utilidad  != null)?.pct_utilidad  ?? 25;
+    const pctMl       = rows.find(r=>r.pct_meli      != null)?.pct_meli      ?? 80;
+    const pctVtaMax   = rows.find(r=>r.pct_venta_max != null)?.pct_venta_max ?? 20;
+    // Capital inmovilizado a precio de costo (no a precio de venta/Lista1).
+    const sinCosto    = rows.filter(r => r.costo === null || r.costo === undefined).length;
+    const totalCosto  = rows.reduce((s,r) => s + r.stock * (r.costo || 0), 0);
+    const conPerdida  = rows.filter(r => r.margen_mayorista_pct !== null && r.margen_mayorista_pct !== undefined && r.margen_mayorista_pct < 0).length;
+    const conBulto    = rows.filter(r => r.bulto_sugerido).length;
+    const sinVentas   = rows.filter(r => !(r.cantidad_vendida_periodo > 0)).length;
+    return `<strong>${rows.length}</strong> artículos de baja rotación (ventas ≤ ${pctVtaMax}% del stock) `
+      + ` · <span style="color:#6b7280;font-size:.82rem">${sinVentas} sin ninguna venta en el período</span>`
+      + ` · Capital inmovilizado (costo): <strong>$${Math.round(totalCosto).toLocaleString('es-AR')} ARS</strong>`
+      + (sinCosto ? ` <span style="color:#d97706;font-size:.78rem">(${sinCosto} sin costo cargado, no incluidos)</span>` : '')
+      + ` · Cambio USD: $${cambio.toLocaleString('es-AR')}`
+      + (conBulto    ? ` · <span style="color:#7c3aed;font-weight:600">${conBulto} con venta por bulto sugerida</span>` : '')
+      + (conPerdida  ? ` · <span style="color:#dc2626;font-weight:600">${conPerdida} no cubren ni el punto de equilibrio</span>` : '')
+      + `<br><span style="font-size:.78rem;color:#6b7280">Baja rotación = ventas NV en el período ÷ stock actual ≤ ${pctVtaMax}% &nbsp;|&nbsp; Punto de equilibrio = Costo × (1+${pctOp}%) &nbsp;|&nbsp; Mayorista = equilibrio × (1+${pctUt}%), sin superar Lista1 &nbsp;|&nbsp; Pub. ML = Mayorista × (1+${pctMl}%) &nbsp;|&nbsp; Bulto = al punto de equilibrio (más agresivo) &nbsp;|&nbsp; Margen May. = utilidad real ya cubierto el operativo</span>`;
+  }
+
+  // ── Filtros de Rotación ───────────────────────────────────────────────────
+  let _rotFiltrosData = null;
+
+  async function rotCargarFiltros(){
+    if(!_rotDepositos.length) await _rotLoadDepositos();
+    if(_rotFiltrosData) return;
+    try {
+      _rotFiltrosData = await api('GET', '/admin/rotacion-filtros');
+    } catch(e){ console.error('[rotFiltros]', e); }
+    if(!_rotFiltrosData) _rotFiltrosData = {grupos:[],superrubros:[],rubros:[],marcas:[]};
+    const { grupos=[], superrubros=[], rubros=[], marcas=[] } = _rotFiltrosData;
+
+    const selG = document.getElementById('rot-f-grupo');
+    grupos.forEach(g => {
+      const o = document.createElement('option'); o.value = g.codigo; o.textContent = g.descripcion; selG.appendChild(o);
+    });
+    const selM = document.getElementById('rot-f-marca');
+    marcas.forEach(m => {
+      const o = document.createElement('option'); o.value = m.codigo; o.textContent = m.descripcion; selM.appendChild(o);
+    });
+    // Poblar todos los superrubros y rubros (ocultos hasta que se elija Grupo/SuperRubro)
+    rotFiltroGrupo();
+  }
+
+  // ── Depósitos a considerar para el stock remanente ────────────────────────
+  let _rotDepositos = [], _rotSelectedDeps = [];
+
+  async function _rotLoadDepositos(){
+    try {
+      const data = await api('GET', '/admin/depositos');
+      if(Array.isArray(data) && data.length){
+        _rotDepositos = data.map(d => ({cod: d.codigo, label: _depLabel(d)}));
+      }
+    } catch(_e){}
+    if(!_rotDepositos.length) _rotDepositos = _DEP_FALLBACK.map(d => ({...d}));
+    _rotSelectedDeps = _rotDepositos.map(d => d.cod);
+    _rotDepRenderList();
+  }
+
+  function _rotDepRenderList(){
+    const list = document.getElementById('rot-dep-list');
+    if(!list) return;
+    if(!_rotDepositos.length){
+      list.innerHTML = '<span style="color:#9ca3af">Sin depósitos activos</span>';
+      return;
+    }
+    list.innerHTML = _rotDepositos.map(d => `
+      <label style="display:flex;align-items:center;gap:5px;cursor:pointer;user-select:none">
+        <input type="checkbox" value="${d.cod}" ${_rotSelectedDeps.includes(d.cod)?'checked':''}
+          onchange="rotDepToggle('${d.cod}', this.checked)" style="accent-color:#1a56db;cursor:pointer">
+        <span style="font-weight:700;color:#1a56db">${d.cod}</span>
+        <span style="color:#4b5563">${d.label}</span>
+      </label>`).join('');
+  }
+
+  function rotDepToggle(cod, checked){
+    if(checked){ if(!_rotSelectedDeps.includes(cod)) _rotSelectedDeps.push(cod); }
+    else _rotSelectedDeps = _rotSelectedDeps.filter(x => x !== cod);
+  }
+
+  function rotDepSelectAll(){
+    _rotSelectedDeps = _rotDepositos.map(d => d.cod);
+    _rotDepRenderList();
+  }
+
+  function rotDepSelectNone(){
+    _rotSelectedDeps = [];
+    _rotDepRenderList();
+  }
+
+  function rotFiltroGrupo(){
+    if(!_rotFiltrosData) return;
+    const grupo = document.getElementById('rot-f-grupo').value;
+    const { superrubros=[] } = _rotFiltrosData;
+    const filtrados = grupo ? superrubros.filter(s => s.grupo === grupo) : superrubros;
+    const selSR = document.getElementById('rot-f-superrubro');
+    selSR.innerHTML = '<option value="">Todos</option>';
+    filtrados.forEach(s => {
+      const o = document.createElement('option'); o.value = s.codigo; o.textContent = s.descripcion; selSR.appendChild(o);
+    });
+    rotFiltroSuperRubro();
+  }
+
+  function rotFiltroSuperRubro(){
+    if(!_rotFiltrosData) return;
+    const superrubro = document.getElementById('rot-f-superrubro').value;
+    const grupo      = document.getElementById('rot-f-grupo').value;
+    const { rubros=[], superrubros=[] } = _rotFiltrosData;
+    let filtrados;
+    if(superrubro){
+      filtrados = rubros.filter(r => r.superrubro === superrubro);
+    } else if(grupo){
+      const srCods = superrubros.filter(s => s.grupo === grupo).map(s => s.codigo);
+      filtrados = rubros.filter(r => srCods.includes(r.superrubro));
+    } else {
+      filtrados = rubros;
+    }
+    const selR = document.getElementById('rot-f-rubro');
+    selR.innerHTML = '<option value="">Todos</option>';
+    filtrados.forEach(r => {
+      const o = document.createElement('option'); o.value = r.codigo; o.textContent = r.descripcion; selR.appendChild(o);
+    });
+  }
+
+  function rotLimpiarFiltros(){
+    ['rot-f-grupo','rot-f-superrubro','rot-f-rubro','rot-f-marca'].forEach(id => document.getElementById(id).value = '');
+    document.getElementById('rot-f-articulo').value = '';
+    _rotAcSelCod = null;
+    rotAcHide();
+    rotFiltroGrupo();
+    document.getElementById('rot-resumen').style.display = 'none';
+    document.getElementById('rot-export-btns').style.display = 'none';
+    document.getElementById('rot-tbody').innerHTML = '';
+    document.getElementById('tbl-rotacion').style.display = 'none';
+  }
+
+  // ── Autocomplete de artículo ─────────────────────────────────────────────
+  let _rotAcTimer = null;
+  let _rotAcIdx   = -1;
+  let _rotAcItems = [];
+  let _rotAcSelCod = null;   // código interno seleccionado (para filtro)
+
+  function rotAcInput(inp){
+    _rotAcSelCod = null;  // resetear selección cuando el usuario escribe
+    clearTimeout(_rotAcTimer);
+    const q = inp.value.trim();
+    if(q.length < 2){ rotAcHide(); return; }
+    _rotAcTimer = setTimeout(() => rotAcBuscar(q), 350);
+  }
+
+  async function rotAcBuscar(q){
+    const drop = document.getElementById('rot-ac-drop');
+    drop.innerHTML = '<div style="padding:8px 12px;color:#6b7280">Buscando…</div>';
+    drop.style.display = 'block';
+    try {
+      const res = await api('GET', `/admin/articulos-buscar?q=${encodeURIComponent(q)}`);
+      if(!res){ drop.innerHTML = '<div style="padding:8px 12px;color:#9ca3af;font-style:italic">Sin resultados</div>'; return; }
+      const arts = Array.isArray(res) ? res : [];
+      _rotAcItems = arts.slice(0, 12);
+      _rotAcIdx   = -1;
+      if(!_rotAcItems.length){
+        drop.innerHTML = '<div style="padding:8px 12px;color:#9ca3af;font-style:italic">Sin resultados</div>';
+        return;
+      }
+      drop.innerHTML = _rotAcItems.map((a, i) => {
+        const cod   = a.codigoparticular || a.codigo || '';
+        const desc  = a.descripcion || '';
+        return `<div class="rot-ac-item" data-i="${i}"
+          style="padding:7px 12px;cursor:pointer;border-bottom:1px solid #f3f4f6;display:flex;gap:10px;align-items:baseline"
+          onmousedown="rotAcSelect(${i})"
+          onmouseover="rotAcHover(${i})">
+          <span style="font-family:monospace;font-size:.78rem;color:#6b7280;white-space:nowrap">${cod}</span>
+          <span style="flex:1;white-space:normal;color:#111827">${desc}</span>
+        </div>`;
+      }).join('');
+    } catch(e){
+      drop.innerHTML = `<div style="padding:8px 12px;color:#dc2626;font-size:.8rem">Error: ${e.message}</div>`;
+    }
+  }
+
+  function rotAcSelect(i){
+    const a = _rotAcItems[i];
+    if(!a) return;
+    const cod  = a.codigoparticular || a.codigo || '';
+    const desc = a.descripcion || '';
+    document.getElementById('rot-f-articulo').value = cod ? `${cod} — ${desc}` : desc;
+    _rotAcSelCod = cod;   // el filtro usará este código
+    rotAcHide();
+  }
+
+  function rotAcHover(i){
+    _rotAcIdx = i;
+    document.querySelectorAll('.rot-ac-item').forEach((el, idx) => {
+      el.style.background = idx === i ? '#eff6ff' : '';
+    });
+  }
+
+  function rotAcKey(e){
+    const drop = document.getElementById('rot-ac-drop');
+    if(drop.style.display === 'none') return;
+    if(e.key === 'ArrowDown'){ e.preventDefault(); rotAcHover(Math.min(_rotAcIdx+1, _rotAcItems.length-1)); }
+    else if(e.key === 'ArrowUp'){ e.preventDefault(); rotAcHover(Math.max(_rotAcIdx-1, 0)); }
+    else if(e.key === 'Enter' && _rotAcIdx >= 0){ e.preventDefault(); rotAcSelect(_rotAcIdx); }
+    else if(e.key === 'Escape'){ rotAcHide(); }
+  }
+
+  function rotAcHide(){
+    document.getElementById('rot-ac-drop').style.display = 'none';
+    _rotAcIdx = -1;
+  }
+
+  function _rotBuildParams(meses){
+    const p = new URLSearchParams({ meses });
+    const grupo     = document.getElementById('rot-f-grupo').value;
+    const superrubro = document.getElementById('rot-f-superrubro').value;
+    const rubro     = document.getElementById('rot-f-rubro').value;
+    const marca     = document.getElementById('rot-f-marca').value;
+    // Si hubo selección del autocomplete usar código exacto, sino el texto escrito
+    const articulo = _rotAcSelCod || document.getElementById('rot-f-articulo').value.trim().split(' — ')[0].trim();
+    if(rubro)      p.set('rubro', rubro);
+    else if(superrubro) p.set('superrubro', superrubro);
+    else if(grupo) p.set('grupo', grupo);
+    if(marca)      p.set('marca', marca);
+    if(articulo)   p.set('articulo', articulo);
+    if(_rotSelectedDeps.length && _rotSelectedDeps.length < _rotDepositos.length){
+      p.set('depositos', _rotSelectedDeps.join(','));
+    }
+    p.set('pct_operativo', document.getElementById('rot-pct-operativo').value || '30');
+    p.set('pct_utilidad',  document.getElementById('rot-pct-utilidad').value  || '25');
+    p.set('pct_meli',      document.getElementById('rot-pct-meli').value     || '80');
+    p.set('pct_venta_max', document.getElementById('rot-pct-venta-max').value || '20');
+    return p.toString();
+  }
+
+  let rotMesesActual = 12; // último período usado en el análisis, para el modal de detalle
+
+  async function loadRotacion(){
+    if(_rotDepositos.length && !_rotSelectedDeps.length){
+      toast('Seleccioná al menos un depósito.', 'info');
+      return;
+    }
+    const meses = document.getElementById('rot-meses').value;
+    rotMesesActual = meses;
+    const btn   = document.getElementById('rot-btn');
+    btn.disabled = true; btn.textContent = '⏳ Analizando…';
+    document.getElementById('rot-resumen').style.display = 'none';
+    document.getElementById('rot-export-btns').style.display = 'none';
+    document.getElementById('rot-tbody').innerHTML = '';
+    document.getElementById('tbl-rotacion').style.display = 'none';
+
+    _rotOverlayOpen(
+      'Consultando Firebird (Línea 1 + SW)',
+      `Buscando artículos sin movimiento en los últimos ${meses} meses…`
+    );
+    try {
+      await rotCargarFiltros();
+      const qs = _rotBuildParams(meses);
+
+      const rowsRaw = await api('GET', `/admin/analisis-rotacion?${qs}`);
+      const rows = (rowsRaw || []).sort((a,b)=>(b.stock*b.precio1_ars)-(a.stock*a.precio1_ars));
+
+      _rotOverlayMsg('Calculando estrategia de precios…', `Calculando precios ML, mayorista y sugerencia de bultos para ${rows.length} artículos…`);
+      await new Promise(r => setTimeout(r, 80)); // yield para que el DOM actualice el overlay
+
+      if(!rows.length){ toast('No se encontraron artículos de baja rotación con esos filtros'); return; }
+
+      document.getElementById('rot-resumen').innerHTML = _rotResumenHTML(rows);
+      document.getElementById('rot-resumen').style.display = 'block';
+      document.getElementById('rot-export-btns').style.display = 'flex';
+      document.getElementById('rot-export-msg').textContent = '';
+      document.getElementById('rot-tbody').innerHTML = _rotRenderRows(rows);
+      document.getElementById('tbl-rotacion').style.display = '';
+      requestAnimationFrame(() => { if(window.initResizableCols) initResizableCols('tbl-rotacion'); });
+
+    } catch(e) {
+      toast('Error al analizar: ' + (e.message || e), 'error');
+      console.error('[loadRotacion]', e);
+    } finally {
+      _rotOverlayClose();
+      btn.disabled = false; btn.textContent = '🔍 Analizar ambas bases';
+    }
+  }
+
+  async function rotExportarRotacion(formato) {
+    const msg = document.getElementById('rot-export-msg');
+    msg.textContent = 'Generando…';
+    try {
+      const meses = rotMesesActual;
+      const qs    = _rotBuildParams(meses);
+      const ext   = formato === 'excel' ? 'excel' : 'pdf';
+      const endpoint = `${BASE}/admin/rotacion/exportar-${ext}?${qs}`;
+      if(window.AndroidBridge){
+        const urlConToken = endpoint + `&access_token=${encodeURIComponent(TOKEN)}`;
+        const fname = formato === 'excel'
+          ? `rotacion_${meses}m_${new Date().toISOString().slice(0,10)}.xlsx`
+          : `rotacion_${meses}m_${new Date().toISOString().slice(0,10)}.pdf`;
+        if(formato === 'excel') window.AndroidBridge.download(urlConToken, TOKEN, fname);
+        else window.AndroidBridge.openPdf(urlConToken, TOKEN, fname);
+        msg.textContent = '✓ Descargando…';
+      } else if(_isAndroidWebView()){
+        window.location.href = endpoint + `&access_token=${encodeURIComponent(TOKEN)}`;
+        msg.textContent = '✓ Descargando…';
+      } else {
+        const resp = await fetch(endpoint, { headers: { 'Authorization': 'Bearer ' + TOKEN } });
+        if (!resp.ok) { msg.textContent = 'Error ' + resp.status; return; }
+        const blob = await resp.blob();
+        const url  = URL.createObjectURL(blob);
+        if (formato === 'pdf') {
+          window.open(url, '_blank');
+          msg.textContent = '✓ Abierto';
+        } else {
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `rotacion_${meses}m_${new Date().toISOString().slice(0,10)}.xlsx`;
+          a.click();
+          URL.revokeObjectURL(url);
+          msg.textContent = '✓ Descargado';
+        }
+      }
+    } catch(e) { msg.textContent = 'Error: ' + (e.message || e); }
+    setTimeout(() => { msg.textContent = ''; }, 5000);
+  }
+
+  // Exponer funciones de Rotación al scope global: son llamadas desde
+  // atributos inline (onclick/oninput/onkeydown/onblur/onchange) que se
+  // evalúan en window, no dentro de este IIFE.
+  window.rotCargarFiltros    = rotCargarFiltros;
+  window.rotFiltroGrupo      = rotFiltroGrupo;
+  window.rotFiltroSuperRubro = rotFiltroSuperRubro;
+  window.rotLimpiarFiltros   = rotLimpiarFiltros;
+  window.rotAcInput          = rotAcInput;
+  window.rotAcSelect         = rotAcSelect;
+  window.rotAcHover          = rotAcHover;
+  window.rotAcKey            = rotAcKey;
+  window.rotAcHide           = rotAcHide;
+  window.loadRotacion        = loadRotacion;
+  window.rotVerVentas        = rotVerVentas;
+  window.rotDepToggle        = rotDepToggle;
+  window.rotDepSelectAll     = rotDepSelectAll;
+  window.rotDepSelectNone    = rotDepSelectNone;
+  window.rotExportarRotacion = rotExportarRotacion;
+
+  document.getElementById('admin-inactivity-stay').addEventListener('click', resetTimers);
+
+  // Iniciar timers cuando hay sesión activa
+  document.addEventListener('DOMContentLoaded', resetTimers);
 })();
 </script>
 </body>
