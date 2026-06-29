@@ -44,7 +44,11 @@ header button:hover{background:#e5e7eb;border-color:#9ca3af}
 .card-title{font-size:1.05rem;font-weight:700;color:#1a1a2e;margin-bottom:16px;display:flex;align-items:center;gap:8px}
 /* ─── TABLES ─────────────────────────────────────── */
 table{width:100%;border-collapse:collapse;font-size:.85rem}
-th{background:#f8fafc;padding:8px 12px;text-align:left;font-weight:600;color:#374151;border-bottom:2px solid #e5e7eb}
+th{background:#f8fafc;padding:8px 12px;text-align:left;font-weight:600;color:#374151;border-bottom:2px solid #e5e7eb;position:relative;overflow:hidden}
+/* ─── Sticky headers + resize de columnas ─── */
+.col-rz{position:absolute;right:-1px;top:0;bottom:0;width:6px;cursor:col-resize;z-index:1;touch-action:none;user-select:none}
+.col-rz:hover,.col-rz.on{background:rgba(37,99,235,.28)}
+thead th{position:sticky!important;top:0;z-index:2;box-shadow:inset 0 -2px 0 #e5e7eb}
 td{padding:8px 12px;border-bottom:1px solid #f3f4f6;vertical-align:middle}
 tr:hover td{background:#f9fafb}
 /* ─── FORMS ──────────────────────────────────────── */
@@ -230,6 +234,7 @@ input:checked + .slider:before{transform:translateX(20px)}
     <div class="nav-item" data-sec="catalogos" onclick="nav(this)"><span class="icon">📚</span>Catálogos</div>
     <div class="nav-item" data-sec="ofertas" onclick="nav(this)"><span class="icon">🎁</span>Ofertas</div>
     <div class="nav-item" data-sec="rotacion" onclick="nav(this)"><span class="icon">📈</span>Rotación</div>
+    <div class="nav-item gerentes-only" id="nav-ventas" data-sec="ventas" onclick="nav(this)" style="display:none"><span class="icon">📊</span>Ventas</div>
     <div class="nav-item" data-sec="pedido" onclick="nav(this)"><span class="icon">📝</span>Pedido/Ppto</div>
     <div class="nav-item gerentes-only" id="nav-ajuste-stock" data-sec="ajuste-stock" onclick="nav(this)" style="display:none"><span class="icon">📊</span>Ajuste Stock</div>
     <div class="nav-item gerentes-only" id="nav-auditoria" data-sec="auditoria" onclick="nav(this)" style="display:none"><span class="icon">🔍</span>Auditoría</div>
@@ -337,7 +342,7 @@ input:checked + .slider:before{transform:translateX(20px)}
               <span id="sk-export-msg" style="font-size:.78rem;color:#6b7280"></span>
             </div>
             <!-- Tabla -->
-            <div style="overflow-x:auto;-webkit-overflow-scrolling:touch">
+            <div style="overflow-x:auto;overflow-y:auto;max-height:calc(100vh - 320px);-webkit-overflow-scrolling:touch">
               <table id="tbl-stock-admin" style="min-width:600px">
                 <thead id="sk-thead"><tr><th>Rub.</th><th>Cód.</th><th>Descripción</th><th style="text-align:right">R.Total</th><th style="text-align:right">P.Unit.</th><th style="text-align:right">IVA%</th></tr></thead>
                 <tbody id="sk-tbody"><tr><td colspan="10" class="empty">Seleccioná depósitos y buscá un artículo</td></tr></tbody>
@@ -521,6 +526,130 @@ input:checked + .slider:before{transform:translateX(20px)}
       </div>
     </div>
 
+    <!-- ANÁLISIS DE VENTAS -->
+    <div class="section" id="sec-ventas">
+      <div class="card">
+        <h2>📊 Análisis de Ventas</h2>
+        <p style="color:#6b7280;font-size:.87rem">Consultá ventas por vendedor y/o cliente con detalle de comprobantes, exportación y dashboard interactivo.</p>
+
+        <!-- FILTROS -->
+        <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin-bottom:14px">
+          <div style="display:flex;flex-direction:column;gap:4px;min-width:180px">
+            <label style="font-size:.8rem;font-weight:600;color:#374151">Vendedor</label>
+            <select id="vta-vend-sel" style="border:1px solid #d1d5db;border-radius:6px;padding:6px 10px;font-size:.88rem"
+              onchange="vtaOnVendedorChange()">
+              <option value="">— Todos —</option>
+            </select>
+            <span id="vta-vend-msg" style="font-size:.75rem;color:#dc2626"></span>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:4px;min-width:260px;position:relative">
+            <label style="font-size:.8rem;font-weight:600;color:#374151">Cliente</label>
+            <input id="vta-cli-inp" type="text" placeholder="Buscar cliente..." autocomplete="off"
+              style="border:1px solid #d1d5db;border-radius:6px;padding:6px 10px;font-size:.88rem"
+              oninput="vtaBuscarCliente(this.value)">
+            <div id="vta-cli-drop" style="display:none;position:absolute;top:100%;left:0;right:0;background:#fff;
+              border:1px solid #d1d5db;border-radius:6px;z-index:50;max-height:220px;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,.1)"></div>
+            <input type="hidden" id="vta-cli-cod" value="">
+          </div>
+          <div style="display:flex;flex-direction:column;gap:4px">
+            <label style="font-size:.8rem;font-weight:600;color:#374151">Desde</label>
+            <input id="vta-desde" type="date" style="border:1px solid #d1d5db;border-radius:6px;padding:6px 10px;font-size:.88rem">
+          </div>
+          <div style="display:flex;flex-direction:column;gap:4px">
+            <label style="font-size:.8rem;font-weight:600;color:#374151">Hasta</label>
+            <input id="vta-hasta" type="date" style="border:1px solid #d1d5db;border-radius:6px;padding:6px 10px;font-size:.88rem">
+          </div>
+          <button onclick="vtaBuscar()" style="background:#1e429f;color:#fff;border:none;border-radius:6px;
+            padding:8px 22px;font-size:.9rem;font-weight:600;cursor:pointer">🔍 Buscar</button>
+          <button onclick="vtaLimpiar()" style="background:#6b7280;color:#fff;border:none;border-radius:6px;
+            padding:8px 14px;font-size:.9rem;cursor:pointer">✕ Limpiar</button>
+        </div>
+
+        <!-- RESUMEN + BOTONES EXPORT -->
+        <div id="vta-resumen" style="display:none;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+          <span id="vta-resumen-txt" style="font-size:.88rem;color:#374151;font-weight:500"></span>
+          <div style="display:flex;gap:8px">
+            <button id="vta-btn-pdf" onclick="vtaExportar('pdf')"
+              style="background:#dc2626;color:#fff;border:none;border-radius:6px;padding:6px 16px;font-size:.85rem;font-weight:600;cursor:pointer">📄 PDF</button>
+            <button id="vta-btn-excel" onclick="vtaExportar('excel')"
+              style="background:#059669;color:#fff;border:none;border-radius:6px;padding:6px 16px;font-size:.85rem;font-weight:600;cursor:pointer">📊 Excel</button>
+          </div>
+        </div>
+
+        <!-- TABLA DE RESULTADOS -->
+        <div id="vta-tabla-wrap" style="display:none;overflow-x:auto;overflow-y:auto;max-height:calc(100vh - 380px);margin-bottom:18px">
+          <table style="width:100%;border-collapse:collapse;font-size:.83rem">
+            <thead>
+              <tr style="background:#1e429f;color:#fff">
+                <th style="padding:7px 8px;text-align:left">Cód.Art.</th>
+                <th style="padding:7px 8px;text-align:left">Descripción</th>
+                <th style="padding:7px 8px;text-align:left">Cliente</th>
+                <th style="padding:7px 8px;text-align:left">Vend.</th>
+                <th style="padding:7px 8px;text-align:center">Fecha</th>
+                <th style="padding:7px 8px;text-align:center">Tipo</th>
+                <th style="padding:7px 8px;text-align:center">Nro. Comp.</th>
+                <th style="padding:7px 8px;text-align:right">Cant.</th>
+                <th style="padding:7px 8px;text-align:right">P.Unit.</th>
+                <th style="padding:7px 8px;text-align:right">Importe</th>
+                <th style="padding:7px 8px;text-align:right">IVA%</th>
+                <th style="padding:7px 8px;text-align:right">Total</th>
+              </tr>
+            </thead>
+            <tbody id="vta-body"></tbody>
+            <tfoot id="vta-foot"></tfoot>
+          </table>
+          <div id="vta-pager" style="margin-top:8px;display:flex;gap:6px;align-items:center;flex-wrap:wrap"></div>
+        </div>
+
+        <!-- DASHBOARD -->
+        <div id="vta-dash" style="display:none">
+          <h3 style="font-size:1rem;font-weight:700;color:#1e429f;margin-bottom:14px">📈 Dashboard</h3>
+
+          <!-- BOTONES DE PERÍODO (meses) -->
+          <div id="vta-periodos" style="display:none;margin-bottom:6px;flex-wrap:wrap;gap:6px;align-items:center"></div>
+
+          <!-- BOTONES DE TRIMESTRE -->
+          <div id="vta-trimestres" style="display:none;margin-bottom:14px;flex-wrap:wrap;gap:6px;align-items:center"></div>
+
+          <!-- KPIs TOTALES -->
+          <div id="vta-totales" style="display:none;margin-bottom:18px">
+            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px">
+              <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:12px 16px">
+                <div style="font-size:.7rem;font-weight:700;color:#3b82f6;letter-spacing:.04em;margin-bottom:4px">FACTURACIÓN NETA (sin IVA)</div>
+                <div id="vta-kpi-neto" style="font-size:1.15rem;font-weight:700;color:#1e3a8a">$0</div>
+              </div>
+              <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:12px 16px">
+                <div style="font-size:.7rem;font-weight:700;color:#16a34a;letter-spacing:.04em;margin-bottom:4px">COSTO MERCADERÍA</div>
+                <div id="vta-kpi-costo" style="font-size:1.15rem;font-weight:700;color:#14532d">$0</div>
+              </div>
+              <div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:12px 16px">
+                <div style="font-size:.7rem;font-weight:700;color:#ea580c;letter-spacing:.04em;margin-bottom:4px">COMISIONES LIQUIDADAS</div>
+                <div id="vta-kpi-comision" style="font-size:1.15rem;font-weight:700;color:#7c2d12">$0</div>
+              </div>
+            </div>
+          </div>
+
+          <p style="font-size:.8rem;color:#6b7280;margin-bottom:12px">Hacé click en una barra para filtrar el otro gráfico.</p>
+
+          <div id="vta-dash-clientes" style="display:none;margin-bottom:28px">
+            <h4 style="font-size:.9rem;font-weight:600;color:#374151;margin-bottom:10px">Top 15 clientes (cantidad + facturación)</h4>
+            <div style="position:relative;height:320px"><canvas id="chartVtaClientes"></canvas></div>
+          </div>
+
+          <div id="vta-dash-articulos" style="margin-bottom:28px">
+            <h4 id="vta-dash-art-titulo" style="font-size:.9rem;font-weight:600;color:#374151;margin-bottom:10px">Top 15 artículos más vendidos</h4>
+            <div style="position:relative;height:420px"><canvas id="chartVtaArticulos"></canvas></div>
+          </div>
+
+          <div id="vta-dash-linea" style="display:none;margin-bottom:28px">
+            <h4 style="font-size:.9rem;font-weight:600;color:#374151;margin-bottom:10px">Evolución mensual de artículos vendidos</h4>
+            <div style="position:relative;height:320px"><canvas id="chartVtaLinea"></canvas></div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
     <!-- PEDIDO/PPTO DESDE ADMIN -->
     <div class="section" id="sec-pedido">
       <div class="card">
@@ -619,7 +748,7 @@ input:checked + .slider:before{transform:translateX(20px)}
       <div id="aj-paso3" style="margin-top:20px;display:none">
         <h3 style="margin-bottom:8px">Paso 3 — Confirmar ajuste</h3>
         <div id="aj-resumen" style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:12px;margin-bottom:12px;font-size:.85rem"></div>
-        <div style="overflow-x:auto">
+        <div style="overflow-x:auto;overflow-y:auto;max-height:50vh">
           <table id="aj-tbl" style="font-size:.82rem">
             <thead><tr>
               <th>Código</th><th>Descripción</th>
@@ -642,7 +771,10 @@ input:checked + .slider:before{transform:translateX(20px)}
     <div class="card" style="margin-top:20px">
       <div style="display:flex;justify-content:space-between;align-items:center">
         <h3>🕐 Historial de ajustes</h3>
-        <button class="btn btn-ghost btn-sm" onclick="ajLoadHistorial()">Actualizar</button>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-ghost btn-sm" onclick="ajLoadHistorial()">Actualizar</button>
+          <button class="btn btn-ghost btn-sm" style="color:#dc2626;border-color:#fca5a5" onclick="ajLimpiarHistorial()">🗑 Limpiar todo</button>
+        </div>
       </div>
       <div id="aj-historial" style="margin-top:12px;font-size:.84rem">Cargando...</div>
     </div>
@@ -723,6 +855,11 @@ input:checked + .slider:before{transform:translateX(20px)}
           <input type="number" id="rot-pct-venta-max" value="20" min="0" max="100" step="1"
             style="width:100%;padding:6px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:.85rem;box-sizing:border-box">
         </div>
+        <div class="form-group" style="min-width:155px">
+          <label title="Incluye artículos cuya última compra sea ANTERIOR a esta fecha. Los artículos sin remito de entrada siempre se incluyen.">Compras anteriores a</label>
+          <input type="date" id="rot-compra-hasta"
+            style="width:100%;padding:6px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:.85rem;box-sizing:border-box">
+        </div>
         <div class="form-group" style="min-width:130px">
           <label title="Sobre el Costo de Flexxus: Costo × (1 + Gasto Operativo%)">Gasto Operativo %</label>
           <input type="number" id="rot-pct-operativo" value="30" min="0" max="200" step="1"
@@ -751,21 +888,23 @@ input:checked + .slider:before{transform:translateX(20px)}
         <button class="btn btn-ghost btn-sm" onclick="rotExportarRotacion('pdf')"   title="Exportar análisis a PDF">📄 PDF</button>
         <span id="rot-export-msg" style="font-size:.8rem;color:#6b7280"></span>
       </div>
-      <div style="overflow-x:auto;margin-top:16px">
-        <table id="tbl-rotacion" style="min-width:900px;display:none">
-          <thead>
+      <div style="overflow-x:auto;margin-top:16px;max-height:70vh;overflow-y:auto;border:1px solid #e5e7eb;border-radius:6px">
+        <table id="tbl-rotacion" style="width:100%;display:none;font-size:.75rem;border-collapse:collapse">
+          <thead style="position:sticky;top:0;z-index:2;background:#f9fafb">
             <tr>
-              <th style="white-space:nowrap">Código</th>
-              <th>Descripción</th>
-              <th style="text-align:right">Stock</th>
-              <th style="text-align:right" title="Lista 1 en ARS (convertido al tipo de cambio)">Lista1 ARS</th>
-              <th style="text-align:right;color:#15803d" title="Precio oferta para canal mayorista — menor al ML, mínimo 30% sobre costo">Mayorista</th>
-              <th style="text-align:right;color:#1d4ed8" title="Precio sugerido de publicación en MercadoLibre = Lista1 ARS × 1.80">Pub. ML</th>
-              <th style="text-align:right" title="Margen sobre costo al precio mayorista">Margen May.</th>
-              <th style="text-align:center" title="Cantidad sugerida de venta por bulto para artículos de bajo valor">Bulto</th>
-              <th style="text-align:right;color:#7c3aed" title="Precio total del pack (bulto × precio mayorista)">Pack May.</th>
-              <th style="text-align:right" title="Cantidad vendida (NV) en el período ÷ stock actual. Clic para ver el detalle de comprobantes">Ventas (período)</th>
-              <th></th>
+              <th style="white-space:nowrap;padding:6px 8px;border-bottom:2px solid #e5e7eb">Código</th>
+              <th style="padding:6px 8px;border-bottom:2px solid #e5e7eb;min-width:160px;max-width:200px">Descripción</th>
+              <th style="text-align:right;padding:6px 8px;border-bottom:2px solid #e5e7eb;white-space:nowrap">Stock</th>
+              <th style="text-align:right;color:#92400e;padding:6px 8px;border-bottom:2px solid #e5e7eb;white-space:nowrap" title="Costo de reposición en ARS (ya convertido al tipo de cambio vigente)">Costo ARS</th>
+              <th style="text-align:center;white-space:nowrap;padding:6px 8px;border-bottom:2px solid #e5e7eb" title="Fecha del último Remito de Compra (RC) registrado en el sistema">Últ. Compra</th>
+              <th style="text-align:right;padding:6px 8px;border-bottom:2px solid #e5e7eb;white-space:nowrap" title="Lista 1 en ARS (convertido al tipo de cambio)">Lista1 ARS</th>
+              <th style="text-align:right;color:#15803d;padding:6px 8px;border-bottom:2px solid #e5e7eb;white-space:nowrap" title="Precio oferta para canal mayorista">Mayorista</th>
+              <th style="text-align:right;color:#1d4ed8;padding:6px 8px;border-bottom:2px solid #e5e7eb;white-space:nowrap" title="Precio sugerido de publicación en MercadoLibre">Pub. ML</th>
+              <th style="text-align:right;padding:6px 8px;border-bottom:2px solid #e5e7eb;white-space:nowrap" title="Margen sobre costo al precio mayorista">Margen</th>
+              <th style="text-align:center;padding:6px 8px;border-bottom:2px solid #e5e7eb" title="Cantidad sugerida de venta por bulto">Bulto</th>
+              <th style="text-align:right;color:#7c3aed;padding:6px 8px;border-bottom:2px solid #e5e7eb;white-space:nowrap" title="Precio total del pack">Pack May.</th>
+              <th style="text-align:right;padding:6px 8px;border-bottom:2px solid #e5e7eb;white-space:nowrap" title="Cantidad vendida (NV) en el período ÷ stock actual">Ventas</th>
+              <th style="padding:6px 4px;border-bottom:2px solid #e5e7eb"></th>
             </tr>
           </thead>
           <tbody id="rot-tbody"></tbody>
@@ -1478,7 +1617,35 @@ function auditLog(accion, detalle, seccion){
   }catch(e){ return Promise.resolve(); }
 }
 
+/* ─── Loading popup (consultas lentas al Firebird) ─── */
+let _ldPending=0,_ldTmr=null,_ldSecTmr=null,_ldSec=0;
+function _ldShow(){
+  let el=document.getElementById('_mb-loading');
+  if(!el){
+    el=document.createElement('div');
+    el.id='_mb-loading';
+    el.style.cssText='position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(15,23,42,.92);color:#fff;border-radius:14px;padding:1.5rem 2.2rem;z-index:99999;text-align:center;min-width:230px;box-shadow:0 10px 40px rgba(0,0,0,.55);pointer-events:none';
+    el.innerHTML='<div style="font-size:2rem;margin-bottom:.5rem">⏳</div><div style="font-weight:700;font-size:.95rem;margin-bottom:.35rem;letter-spacing:.01em">Consultando base de datos...</div><div id="_mb-ld-sec" style="font-size:.83rem;opacity:.7">Aguarde un momento</div>';
+    document.body.appendChild(el);
+  }
+  _ldSec=0; el.style.display='block';
+  clearInterval(_ldSecTmr);
+  _ldSecTmr=setInterval(()=>{
+    _ldSec++;
+    const s=document.getElementById('_mb-ld-sec');
+    if(s) s.textContent=`${_ldSec} segundo${_ldSec!==1?'s':''}...`;
+  },1000);
+}
+function _ldHide(){
+  clearTimeout(_ldTmr);clearInterval(_ldSecTmr);_ldTmr=null;
+  const el=document.getElementById('_mb-loading');
+  if(el) el.style.display='none';
+}
+function _ldStart(){ _ldPending++; if(!_ldTmr) _ldTmr=setTimeout(_ldShow,800); }
+function _ldEnd(){ if(--_ldPending<=0){_ldPending=0;_ldHide();} }
+
 async function api(method, url, body){
+  _ldStart();
   try{
     const r = await fetch(BASE+url,{method,headers:{'Content-Type':'application/json','Authorization':'Bearer '+TOKEN},body:body?JSON.stringify(body):undefined});
     if(r.status===401){logout();return null;}
@@ -1488,8 +1655,11 @@ async function api(method, url, body){
     if(!r.ok) throw new Error(data?.detail || `HTTP ${r.status}`);
     return data;
   }catch(e){ console.error('api error',method,url,e); return null; }
+  finally{ _ldEnd(); }
 }
 async function apiStrict(method, url, body){
+  _ldStart();
+  try{
   const r = await fetch(BASE+url,{method,headers:{'Content-Type':'application/json','Authorization':'Bearer '+TOKEN},body:body?JSON.stringify(body):undefined});
   if(r.status===401){logout();throw new Error('Sesión expirada');}
   const ct = r.headers.get('content-type')||'';
@@ -1497,7 +1667,25 @@ async function apiStrict(method, url, body){
   const data = await r.json();
   if(!r.ok) throw new Error(data?.detail || `Error ${r.status}`);
   return data;
+  }finally{ _ldEnd(); }
 }
+
+// ─── BOTÓN ATRÁS ANDROID ────────────────────────────────────────────────────
+// Centinela: siempre hay una entrada en el historial para que el botón Atrás
+// nunca salga del sistema — cierra el modal visible en su lugar.
+(function _initAndroidBack(){
+  history.pushState({admin:'sentinel'}, '');
+
+  window.addEventListener('popstate', function(){
+    // Cerrar el modal-backdrop abierto de mayor prioridad
+    const abiertos = [...document.querySelectorAll('.modal-backdrop.open')];
+    if(abiertos.length){
+      closeModal(abiertos[abiertos.length - 1].id);
+    }
+    // Siempre reponer el centinela para el próximo back
+    history.pushState({admin:'sentinel'}, '');
+  });
+})();
 
 // ─── NAV ───────────────────────────────────────────────────────────────────
 function nav(el){
@@ -1529,6 +1717,7 @@ function nav(el){
   else if(sec==='ajuste-stock') ajInit();
   else if(sec==='auditoria') auditLoad();
   else if(sec==='rotacion') { rotCargarFiltros(); }
+  else if(sec==='ventas') { vtaCargarVendedores(); }
 }
 
 async function initApp(){
@@ -1596,6 +1785,7 @@ async function loadPerfiles(){
         <button class="btn btn-danger btn-sm" onclick="deletePerfil(${p.id})">🗑️</button>
       </td>
     </tr>`).join('');
+  requestAnimationFrame(()=>{ if(window.initResizableCols) initResizableCols('tbl-perfiles'); });
 }
 
 function openModalPerfil(p=null){
@@ -1847,19 +2037,22 @@ async function exportarStock(formato){
       window.location.href = endpoint + `&access_token=${encodeURIComponent(TOKEN)}`;
       msg.textContent = '✓ Descargando…';
     } else {
-      const resp = await fetch(endpoint, {headers:{'Authorization':'Bearer '+TOKEN}});
-      if(!resp.ok){ msg.textContent='Error '+resp.status; return; }
-      const blob = await resp.blob();
-      const url  = URL.createObjectURL(blob);
-      if(formato === 'pdf'){
-        window.open(url, '_blank');
-        msg.textContent = '✓ Abierto';
-      } else {
-        const a = document.createElement('a');
-        a.href = url; a.download = 'stock_admin.xlsx'; a.click();
-        URL.revokeObjectURL(url);
-        msg.textContent = '✓ Descargado';
-      }
+      _ldStart();
+      try{
+        const resp = await fetch(endpoint, {headers:{'Authorization':'Bearer '+TOKEN}});
+        if(!resp.ok){ msg.textContent='Error '+resp.status; return; }
+        const blob = await resp.blob();
+        const url  = URL.createObjectURL(blob);
+        if(formato === 'pdf'){
+          window.open(url, '_blank');
+          msg.textContent = '✓ Abierto';
+        } else {
+          const a = document.createElement('a');
+          a.href = url; a.download = 'stock_admin.xlsx'; a.click();
+          URL.revokeObjectURL(url);
+          msg.textContent = '✓ Descargado';
+        }
+      }finally{ _ldEnd(); }
     }
   }catch(e){ msg.textContent='Error: '+e.message; }
   setTimeout(()=>{ msg.textContent=''; }, 4000);
@@ -1953,6 +2146,7 @@ async function loadAdminStock(offset=0){
 
   const tbody = document.getElementById('sk-tbody');
   let data, totalCount = 0;
+  _ldStart();
   try{
     const resp = await fetch(`${BASE}/admin/stock?${qs}`, {headers:{'Authorization':'Bearer '+TOKEN}});
     if(reqId !== _skReqId) return; // llegó respuesta de búsqueda vieja, ignorar
@@ -1962,7 +2156,7 @@ async function loadAdminStock(offset=0){
   }catch(e){
     if(reqId !== _skReqId) return;
     tbody.innerHTML='<tr><td colspan="20" class="empty">Error al cargar datos</td></tr>'; return;
-  }
+  }finally{ _ldEnd(); }
   if(reqId !== _skReqId) return; // doble check post-json()
   _sk_total = totalCount || data.length;
   if(!Array.isArray(data)||!data){ tbody.innerHTML='<tr><td colspan="20" class="empty">Error al cargar datos</td></tr>'; return; }
@@ -2247,7 +2441,7 @@ function _renderDepVendedor(){
       Marcá los depósitos por vendedor. <em>Hereda global</em> = sin configuración propia.
       El botón <strong>✕</strong> elimina la configuración individual y vuelve al global.
     </p>
-    <div style="overflow-x:auto">
+    <div style="overflow-x:auto;overflow-y:auto;max-height:60vh">
       <table style="width:100%;border-collapse:collapse;font-size:.8rem">
         <thead style="position:sticky;top:0;z-index:3">
           <tr>
@@ -2349,7 +2543,7 @@ function _renderDepPerfil(){
       Marcá los depósitos por perfil. Los vendedores con ese perfil y <em>sin configuración individual</em> heredan estos depósitos.<br>
       Precedencia: <strong>Individual &gt; Perfil &gt; Global</strong>. El botón <strong>✕</strong> elimina la config del perfil y vuelve al global.
     </p>
-    <div style="overflow-x:auto">
+    <div style="overflow-x:auto;overflow-y:auto;max-height:60vh">
       <table style="width:100%;border-collapse:collapse;font-size:.8rem">
         <thead style="position:sticky;top:0;z-index:3">
           <tr>
@@ -2672,9 +2866,11 @@ async function rvEliminarGrupo(){
   await Promise.all(g.items.map(r => api('DELETE', `/admin/reservas-stock/${r.id}`)));
   toast(`Reserva "${g.motivo}" eliminada`);
   auditLog('Eliminó grupo de reserva', `motivo=${g.motivo} items=${g.items.length}`);
-  _rvGroups.splice(_rvDetIdx, 1);
   _rvDetIdx = -1;
-  renderReservasList();
+  // Recargar desde servidor para que _rvCache quede limpio
+  await loadReservas();
+  // Recargar stock para reflejar que la reserva ya no descuenta unidades
+  if(typeof loadAdminStock === 'function') loadAdminStock(_sk_offset||0);
 }
 
 async function rvToggleGrupo(){
@@ -3054,12 +3250,12 @@ async function saveReserva(){
   if(!id && tipo==='articulo'){
     if(_mrfCart.length===0){ errEl.textContent='Agregá al menos un artículo al listado.'; return; }
     try{
+      const esPreventa = document.getElementById('mrf-es-preventa').checked;
+      const codMultiplazo = esPreventa ? (document.getElementById('mrf-codigo-multiplazo')?.value ?? null) : null;
+      if(esPreventa && (codMultiplazo===null||codMultiplazo==='')){ errEl.textContent='Seleccioná la Condición de Venta PREVENTA a bloquear.'; return; }
       const btn = document.getElementById('mrf-btn-save');
       btn.disabled=true; btn.textContent='Guardando…';
       let errores=[];
-      const esPreventa = document.getElementById('mrf-es-preventa').checked;
-      const codMultiplazo = esPreventa ? (document.getElementById('mrf-codigo-multiplazo')?.value || null) : null;
-      if(esPreventa && !codMultiplazo){ errEl.textContent='Seleccioná la Condición de Venta PREVENTA a bloquear.'; return; }
       for(const it of _mrfCart){
         const body={tipo:'articulo', tipo_cantidad:it.tipo_cantidad, cantidad:it.cantidad,
           deposito, motivo, fecha_hasta:fechaHasta, activo:1,
@@ -3161,6 +3357,7 @@ async function openFlagVendor(feature){
   await _renderFlagVendorTable(feature);
   document.getElementById('modal-flag-vend').classList.add('open');
   makeDraggable('modal-flag-vend');
+  requestAnimationFrame(()=>{ if(window.initResizableCols) initResizableCols('tbl-flag-vend'); });
 }
 async function _flagBtn(btn, cod, feature, newEnabled){
   btn.disabled = true;
@@ -3438,6 +3635,7 @@ function mpFbResumen(){
       <td style="padding:5px 8px;text-align:right"><button class="btn btn-ghost btn-sm" onclick="document.getElementById('mpfb-vend').value='${v.codigo}';mpFbVendChange();document.querySelector('[data-sec=multiplazos]')&&window.scrollTo(0,0)">✏️ Editar</button></td>
     </tr>`;
   }).join('');
+  requestAnimationFrame(()=>{ if(window.initResizableCols) initResizableCols('tbl-mpfb-resumen'); });
 }
 
 async function mpFbLoad(){ await loadMultiplazos(); }
@@ -4478,8 +4676,8 @@ function aplicarVisibilidadPerfil(perfil){
   const esGerente = p === 'GERENTES' || p === 'GTES FE';
   const esDiseno  = p === 'DISENO';
 
-  // Ajuste Stock y Auditoría: solo gerentes
-  ['nav-ajuste-stock','nav-auditoria'].forEach(id => {
+  // Ventas, Ajuste Stock y Auditoría: solo gerentes
+  ['nav-ventas','nav-ajuste-stock','nav-auditoria'].forEach(id => {
     const el = document.getElementById(id);
     if(el) el.style.display = esGerente ? '' : 'none';
   });
@@ -4728,6 +4926,15 @@ function ajReset(){
 }
 
 
+async function ajLimpiarHistorial(){
+  if(!confirm('¿Eliminar TODO el historial de ajustes?\nEsta acción no se puede deshacer.')) return;
+  try {
+    const res = await api('DELETE', '/admin/ajuste-stock/historial');
+    alert(`✅ Historial eliminado (${res.deleted} registros).`);
+    ajLoadHistorial();
+  } catch(e){ alert('❌ Error: ' + e.message); }
+}
+
 async function ajRevertir(log_id, deposito, total){
   if(!confirm(`¿Revertir el ajuste #${log_id} del depósito ${deposito} (${total} artículos)?\nEsto restaurará los valores anteriores en Flexxus.`)) return;
   try {
@@ -4758,6 +4965,70 @@ async function ajLoadHistorial(){
       '</tbody></table>';
   } catch(e){ div.innerHTML='<p style="color:#dc2626">Error al cargar historial: '+e.message+'</p>'; }
 }
+
+/* ─── Columnas redimensionables + sticky headers en modales ─── */
+function _initResizable(table){
+  if(!table||table._resInit) return;
+  table._resInit=true;
+  // Asegurar que la tabla no se encoja sola al redimensionar
+  table.style.tableLayout='fixed';
+  const ths=[...table.querySelectorAll('thead th')];
+  ths.forEach((th,i)=>{
+    // Sticky garantizado con fondo
+    th.style.position='sticky';
+    th.style.top='0';
+    th.style.zIndex='2';
+    if(!th.style.background) th.style.background='#f8fafc';
+    th.style.boxShadow='inset 0 -2px 0 #e5e7eb';
+    if(i===ths.length-1) return; // sin handle en última col
+    const handle=document.createElement('div');
+    handle.title='Arrastrar para redimensionar';
+    handle.style.cssText='position:absolute;right:-2px;top:0;bottom:0;width:6px;cursor:col-resize;z-index:10;background:transparent;user-select:none';
+    handle.addEventListener('mousedown',e=>{
+      e.preventDefault();
+      const startX=e.pageX, startW=th.offsetWidth;
+      const onMove=e=>{
+        const w=Math.max(40, startW+e.pageX-startX);
+        th.style.width=w+'px'; th.style.minWidth=w+'px';
+      };
+      const onUp=()=>{
+        document.removeEventListener('mousemove',onMove);
+        document.removeEventListener('mouseup',onUp);
+        handle.style.background='transparent';
+      };
+      handle.style.background='rgba(59,130,246,.35)';
+      document.addEventListener('mousemove',onMove);
+      document.addEventListener('mouseup',onUp);
+    });
+    th.style.position='sticky'; // reafirmar (ya definido arriba)
+    th.appendChild(handle);
+  });
+}
+
+// Aplicar a todas las tablas estáticas ya presentes
+document.querySelectorAll('table').forEach(_initResizable);
+
+// Observer para tablas generadas dinámicamente dentro de modales
+const _resObs=new MutationObserver(muts=>{
+  muts.forEach(m=>{
+    m.addedNodes.forEach(n=>{
+      if(n.nodeType!==1) return;
+      if(n.tagName==='TABLE') _initResizable(n);
+      else n.querySelectorAll&&n.querySelectorAll('table').forEach(_initResizable);
+    });
+  });
+});
+// Observar contenedores de modales donde se inyecta HTML
+document.querySelectorAll('.modal-body,.modal-scroll-inner,[id$="-historial"],[id$="-body"],[id$="-tbody"],[id$="-wrap"]').forEach(el=>{
+  _resObs.observe(el,{childList:true,subtree:true});
+});
+// También observar apertura de modales (class "open")
+document.querySelectorAll('.modal-backdrop').forEach(bd=>{
+  new MutationObserver(()=>{
+    if(bd.classList.contains('open'))
+      bd.querySelectorAll('table').forEach(_initResizable);
+  }).observe(bd,{attributes:true,attributeFilter:['class']});
+});
 </script>
 <!-- MODAL REENVÍO CATÁLOGO -->
 <div id="modal-reenvio" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:1000;align-items:center;justify-content:center">
@@ -4976,24 +5247,27 @@ async function ajLoadHistorial(){
       const packMay    = r.precio_bulto_mayorista
         ? `$${Math.round(r.precio_bulto_mayorista).toLocaleString('es-AR')}`
         : '—';
-      return `<tr>
-        <td style="font-family:monospace;font-size:.82rem;white-space:nowrap">${r.codigoparticular}</td>
-        <td style="max-width:200px;white-space:normal;font-size:.83rem">${r.descripcion}</td>
-        <td style="text-align:right">${r.stock.toLocaleString('es-AR')}</td>
-        <td style="text-align:right;white-space:nowrap">$${Math.round(r.precio1_ars).toLocaleString('es-AR')}</td>
-        <td style="text-align:right;font-weight:700;color:#15803d;white-space:nowrap">$${Math.round(r.precio_mayorista||0).toLocaleString('es-AR')}</td>
-        <td style="text-align:right;font-weight:600;color:#1d4ed8;white-space:nowrap">$${Math.round(r.precio_meli_pub||r.precio_meli||0).toLocaleString('es-AR')}${noPuedeML}</td>
-        <td style="text-align:right;font-weight:600;color:${mc}">${r.margen_mayorista_pct !== null && r.margen_mayorista_pct !== undefined ? r.margen_mayorista_pct+'%' : '—'}</td>
-        <td style="text-align:center;font-weight:700;color:#7c3aed">${bultoLabel}</td>
-        <td style="text-align:right;font-weight:600;color:#7c3aed;white-space:nowrap">${packMay}</td>
-        <td style="text-align:right;white-space:nowrap">
+      const tdBase = 'padding:5px 8px;border-bottom:1px solid #f3f4f6;font-size:.75rem';
+      return `<tr style="vertical-align:top">
+        <td style="${tdBase};font-family:monospace;white-space:nowrap">${r.codigoparticular}</td>
+        <td style="${tdBase};min-width:150px;max-width:190px;white-space:normal;line-height:1.3">${r.descripcion}</td>
+        <td style="${tdBase};text-align:right;white-space:nowrap">${r.stock.toLocaleString('es-AR')}</td>
+        <td style="${tdBase};text-align:right;color:#92400e;white-space:nowrap">${r.costo ? '$'+Math.round(r.costo).toLocaleString('es-AR') : '—'}</td>
+        <td style="${tdBase};text-align:center;white-space:nowrap;color:#374151">${r.ultima_compra ? r.ultima_compra.split('-').reverse().join('/') : '—'}</td>
+        <td style="${tdBase};text-align:right;white-space:nowrap">$${Math.round(r.precio1_ars).toLocaleString('es-AR')}</td>
+        <td style="${tdBase};text-align:right;font-weight:700;color:#15803d;white-space:nowrap">$${Math.round(r.precio_mayorista||0).toLocaleString('es-AR')}</td>
+        <td style="${tdBase};text-align:right;font-weight:600;color:#1d4ed8;white-space:nowrap">$${Math.round(r.precio_meli_pub||r.precio_meli||0).toLocaleString('es-AR')}${noPuedeML}</td>
+        <td style="${tdBase};text-align:right;font-weight:600;color:${mc}">${r.margen_mayorista_pct !== null && r.margen_mayorista_pct !== undefined ? r.margen_mayorista_pct+'%' : '—'}</td>
+        <td style="${tdBase};text-align:center;font-weight:700;color:#7c3aed">${bultoLabel}</td>
+        <td style="${tdBase};text-align:right;font-weight:600;color:#7c3aed;white-space:nowrap">${packMay}</td>
+        <td style="${tdBase};text-align:right;white-space:nowrap">
           <a href="#" onclick="rotVerVentas(${idx});return false"
-            style="color:#1a56db;font-size:.82rem;text-decoration:underline" title="Ver detalle de comprobantes de venta">
+            style="color:#1a56db;text-decoration:underline" title="Ver detalle de comprobantes de venta">
             ${(r.cantidad_vendida_periodo||0).toLocaleString('es-AR')} u. (${r.pct_venta ?? 0}%)
           </a>
         </td>
-        <td><a class="btn btn-ghost btn-sm" style="white-space:nowrap;text-decoration:none"
-          href="${mlUrl}" target="_blank" rel="noopener">🛒 Ver en ML</a></td>
+        <td style="${tdBase};padding-right:4px"><a class="btn btn-ghost btn-sm" style="white-space:nowrap;text-decoration:none;font-size:.7rem;padding:2px 6px"
+          href="${mlUrl}" target="_blank" rel="noopener">🛒 ML</a></td>
       </tr>`;
     }).join('');
   }
@@ -5091,13 +5365,18 @@ async function ajLoadHistorial(){
     const conPerdida  = rows.filter(r => r.margen_mayorista_pct !== null && r.margen_mayorista_pct !== undefined && r.margen_mayorista_pct < 0).length;
     const conBulto    = rows.filter(r => r.bulto_sugerido).length;
     const sinVentas   = rows.filter(r => !(r.cantidad_vendida_periodo > 0)).length;
-    return `<strong>${rows.length}</strong> artículos de baja rotación (ventas ≤ ${pctVtaMax}% del stock) `
+    const sinCompra   = rows.filter(r => !r.ultima_compra).length;
+    const compraHasta = document.getElementById('rot-compra-hasta').value;
+    const compraHastaFmt = compraHasta ? compraHasta.split('-').reverse().join('/') : null;
+    return `<strong>${rows.length}</strong> artículos de baja rotación (ventas ≤ ${pctVtaMax}% del stock)`
+      + (compraHastaFmt ? ` · <span style="color:#1d4ed8;font-weight:600">Compras anteriores al ${compraHastaFmt}</span>` : '')
       + ` · <span style="color:#6b7280;font-size:.82rem">${sinVentas} sin ninguna venta en el período</span>`
       + ` · Capital inmovilizado (costo): <strong>$${Math.round(totalCosto).toLocaleString('es-AR')} ARS</strong>`
       + (sinCosto ? ` <span style="color:#d97706;font-size:.78rem">(${sinCosto} sin costo cargado, no incluidos)</span>` : '')
       + ` · Cambio USD: $${cambio.toLocaleString('es-AR')}`
       + (conBulto    ? ` · <span style="color:#7c3aed;font-weight:600">${conBulto} con venta por bulto sugerida</span>` : '')
       + (conPerdida  ? ` · <span style="color:#dc2626;font-weight:600">${conPerdida} no cubren ni el punto de equilibrio</span>` : '')
+      + (sinCompra   ? ` · <span style="color:#6b7280">${sinCompra} sin remito de compra en el sistema</span>` : '')
       + `<br><span style="font-size:.78rem;color:#6b7280">Baja rotación = ventas NV en el período ÷ stock actual ≤ ${pctVtaMax}% &nbsp;|&nbsp; Punto de equilibrio = Costo × (1+${pctOp}%) &nbsp;|&nbsp; Mayorista = equilibrio × (1+${pctUt}%), sin superar Lista1 &nbsp;|&nbsp; Pub. ML = Mayorista × (1+${pctMl}%) &nbsp;|&nbsp; Bulto = al punto de equilibrio (más agresivo) &nbsp;|&nbsp; Margen May. = utilidad real ya cubierto el operativo</span>`;
   }
 
@@ -5312,6 +5591,8 @@ async function ajLoadHistorial(){
     p.set('pct_utilidad',  document.getElementById('rot-pct-utilidad').value  || '25');
     p.set('pct_meli',      document.getElementById('rot-pct-meli').value     || '80');
     p.set('pct_venta_max', document.getElementById('rot-pct-venta-max').value || '20');
+    const compraHasta = document.getElementById('rot-compra-hasta').value;
+    if(compraHasta) p.set('compra_hasta', compraHasta);
     return p.toString();
   }
 
@@ -5332,7 +5613,7 @@ async function ajLoadHistorial(){
     document.getElementById('tbl-rotacion').style.display = 'none';
 
     _rotOverlayOpen(
-      'Consultando Firebird (Línea 1 + SW)',
+      'Consultando Firebird — Ventas Asociadas al Período de Análisis',
       `Buscando artículos sin movimiento en los últimos ${meses} meses…`
     );
     try {
@@ -5384,21 +5665,24 @@ async function ajLoadHistorial(){
         window.location.href = endpoint + `&access_token=${encodeURIComponent(TOKEN)}`;
         msg.textContent = '✓ Descargando…';
       } else {
-        const resp = await fetch(endpoint, { headers: { 'Authorization': 'Bearer ' + TOKEN } });
-        if (!resp.ok) { msg.textContent = 'Error ' + resp.status; return; }
-        const blob = await resp.blob();
-        const url  = URL.createObjectURL(blob);
-        if (formato === 'pdf') {
-          window.open(url, '_blank');
-          msg.textContent = '✓ Abierto';
-        } else {
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = `rotacion_${meses}m_${new Date().toISOString().slice(0,10)}.xlsx`;
-          a.click();
-          URL.revokeObjectURL(url);
-          msg.textContent = '✓ Descargado';
-        }
+        _ldStart();
+        try{
+          const resp = await fetch(endpoint, { headers: { 'Authorization': 'Bearer ' + TOKEN } });
+          if (!resp.ok) { msg.textContent = 'Error ' + resp.status; return; }
+          const blob = await resp.blob();
+          const url  = URL.createObjectURL(blob);
+          if (formato === 'pdf') {
+            window.open(url, '_blank');
+            msg.textContent = '✓ Abierto';
+          } else {
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `rotacion_${meses}m_${new Date().toISOString().slice(0,10)}.xlsx`;
+            a.click();
+            URL.revokeObjectURL(url);
+            msg.textContent = '✓ Descargado';
+          }
+        }finally{ _ldEnd(); }
       }
     } catch(e) { msg.textContent = 'Error: ' + (e.message || e); }
     setTimeout(() => { msg.textContent = ''; }, 5000);
@@ -5427,6 +5711,658 @@ async function ajLoadHistorial(){
 
   // Iniciar timers cuando hay sesión activa
   document.addEventListener('DOMContentLoaded', resetTimers);
+})();
+</script>
+
+<!-- ══════════════════════════════════════════════════════
+     ANÁLISIS DE VENTAS — script
+══════════════════════════════════════════════════════ -->
+<script>
+(function(){
+  // Chart.js desde CDN
+  if(!window.Chart){
+    const s=document.createElement('script');
+    s.src='https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js';
+    document.head.appendChild(s);
+  }
+
+  const fmtARS = v => {
+    const n = parseFloat(v||0);
+    return '$' + n.toLocaleString('es-AR',{minimumFractionDigits:2,maximumFractionDigits:2});
+  };
+  const fmtFecha = d => d ? d.slice(8,10)+'/'+d.slice(5,7)+'/'+d.slice(0,4) : '';
+  const NC_SET   = new Set(['NCA','NCB','NCCA','NCCB']);
+
+  let _vtaRows = [];           // datos crudos
+  let _vtaPage = 1;
+  const PAGE_SIZE = 100;
+  let _chartCli = null, _chartArt = null, _chartLin = null;
+  let _vtaCliSel = null;       // cliente seleccionado en gráfico (para cross-filter)
+  let _vtaArtSel = null;       // artículo seleccionado en gráfico (para cross-filter)
+  let _vtaPeriodo = null;      // período activo (YYYY-MM | null = todos)
+  let _vtaTrimestre = null;    // trimestre activo ("YYYY-Qn" | null = todos)
+  let _vtaCliTimer = null;
+  let _vtaParams = null;       // params de la última búsqueda (para export)
+
+  // ── Cargar vendedores al entrar a la sección ─────────────────────────────
+  async function vtaCargarVendedores(){
+    const sel = document.getElementById('vta-vend-sel');
+    if(sel.children.length > 1) return; // ya cargados
+    const msgEl = document.getElementById('vta-vend-msg');
+    const list = await api('GET','/ventas/vendedores');
+    if(!list){
+      if(msgEl) msgEl.textContent = '⚠ Error al cargar vendedores — verificá que main.py esté actualizado en el servidor';
+      return;
+    }
+    if(!list.length){
+      if(msgEl) msgEl.textContent = '⚠ Sin vendedores activos en USUARIOS';
+      return;
+    }
+    if(msgEl) msgEl.textContent = '';
+    list.forEach(v=>{
+      const o=document.createElement('option');
+      o.value=v.codigo; o.textContent=`${v.codigo} — ${v.nombre}`;
+      sel.appendChild(o);
+    });
+  }
+
+  function vtaOnVendedorChange(){
+    // Limpiar cliente al cambiar vendedor
+    document.getElementById('vta-cli-inp').value='';
+    document.getElementById('vta-cli-cod').value='';
+    _vtaCliSel=null;
+  }
+
+  // ── Autocomplete clientes ────────────────────────────────────────────────
+  async function vtaBuscarCliente(q){
+    clearTimeout(_vtaCliTimer);
+    const drop=document.getElementById('vta-cli-drop');
+    if(q.length<2){drop.style.display='none';return;}
+    _vtaCliTimer=setTimeout(async()=>{
+      const vend=document.getElementById('vta-vend-sel').value;
+      let url=`/ventas/clientes?buscar=${encodeURIComponent(q)}`;
+      if(vend) url+=`&vendedor=${encodeURIComponent(vend)}`;
+      try{
+        const list=await api('GET',url);
+        if(!list){drop.style.display='none';return;}
+        drop.innerHTML=list.map(c=>`
+          <div style="padding:8px 12px;cursor:pointer;font-size:.85rem;border-bottom:1px solid #f3f4f6"
+            onmouseover="this.style.background='#eff6ff'" onmouseout="this.style.background=''"
+            onclick="vtaSelCliente('${c.codigo}','${(c.razonsocial||'').replace(/'/g,"\\'")}')">
+            <strong>${c.codigoparticular||c.codigo}</strong> — ${c.razonsocial}
+          </div>`).join('');
+        drop.style.display=list.length?'block':'none';
+      }catch(e){}
+    },300);
+  }
+
+  function vtaSelCliente(cod,razon){
+    document.getElementById('vta-cli-inp').value=razon;
+    document.getElementById('vta-cli-cod').value=cod;
+    document.getElementById('vta-cli-drop').style.display='none';
+  }
+
+  function vtaLimpiar(){
+    document.getElementById('vta-vend-sel').value='';
+    document.getElementById('vta-cli-inp').value='';
+    document.getElementById('vta-cli-cod').value='';
+    document.getElementById('vta-desde').value='';
+    document.getElementById('vta-hasta').value='';
+    document.getElementById('vta-tabla-wrap').style.display='none';
+    document.getElementById('vta-dash').style.display='none';
+    document.getElementById('vta-resumen').style.display='none';
+    _vtaRows=[];_vtaParams=null;_vtaCliSel=null;_vtaArtSel=null;_vtaPeriodo=null;_vtaTrimestre=null;
+    if(_chartCli){_chartCli.destroy();_chartCli=null;}
+    if(_chartArt){_chartArt.destroy();_chartArt=null;}
+    if(_chartLin){_chartLin.destroy();_chartLin=null;}
+  }
+
+  async function vtaBuscar(){
+    const vend  = document.getElementById('vta-vend-sel').value;
+    const cliCod= document.getElementById('vta-cli-cod').value;
+    const desde = document.getElementById('vta-desde').value;
+    const hasta = document.getElementById('vta-hasta').value;
+
+    if(!vend && !cliCod && !desde && !hasta){
+      alert('Seleccioná al menos un filtro (vendedor, cliente o período).');
+      return;
+    }
+
+    let url='/ventas?';
+    const p=[];
+    if(vend)  p.push('vendedor='+encodeURIComponent(vend));
+    if(cliCod)p.push('cliente='+encodeURIComponent(cliCod));
+    if(desde) p.push('desde='+encodeURIComponent(desde));
+    if(hasta) p.push('hasta='+encodeURIComponent(hasta));
+    url+=p.join('&');
+    _vtaParams=p.join('&');
+
+    const btn=document.querySelector('#sec-ventas button[onclick="vtaBuscar()"]');
+    if(btn){btn.disabled=true;btn.textContent='⏳ Buscando...';}
+
+    try{
+      const data=await api('GET',url);
+      if(!data){alert('Error al consultar ventas — verificá que main.py esté actualizado en el servidor.');return;}
+      _vtaRows=Array.isArray(data)?data:[];
+    }catch(e){alert('Error de conexión: '+e);return;}
+    finally{if(btn){btn.disabled=false;btn.textContent='🔍 Buscar';}}
+
+    _vtaPage=1;_vtaCliSel=null;_vtaArtSel=null;
+    vtaRenderTabla();
+    vtaRenderDash();
+  }
+
+  // ── Tabla ─────────────────────────────────────────────────────────────────
+  function vtaRenderTabla(){
+    const wrap=document.getElementById('vta-tabla-wrap');
+    const resDiv=document.getElementById('vta-resumen');
+    const resumen=document.getElementById('vta-resumen-txt');
+    const body=document.getElementById('vta-body');
+    const foot=document.getElementById('vta-foot');
+
+    if(!_vtaRows.length){
+      wrap.style.display='none';
+      resDiv.style.display='none';
+      alert('Sin resultados para los filtros seleccionados.');
+      return;
+    }
+
+    const total_pages=Math.ceil(_vtaRows.length/PAGE_SIZE);
+    const start=(_vtaPage-1)*PAGE_SIZE;
+    const pageRows=_vtaRows.slice(start,start+PAGE_SIZE);
+
+    let totImp=0,totTot=0;
+    _vtaRows.forEach(r=>{totImp+=Number(r.importe||0);totTot+=Number(r.total||0);});
+
+    body.innerHTML=pageRows.map((r,i)=>{
+      const pdfUrl=`${BASE}/comprobantes/${encodeURIComponent(r.tipo)}/${encodeURIComponent(r.numero)}/pdf`;
+      const esNC=NC_SET.has((r.tipo||'').toUpperCase());
+      const bg=esNC?(i%2?'#fff0f0':'#ffe4e4'):(i%2?'#f9fafb':'#fff');
+      const col=esNC?'color:#b91c1c':'';
+      const nro=String(r.numero).replace('.0','').padStart(10,'0');
+      return `<tr style="background:${bg};cursor:pointer;${col}" onclick="window.open('${pdfUrl}','_blank')" title="Ver comprobante PDF">
+        <td style="padding:.35rem .6rem;white-space:nowrap">${r.cod_articulo||''}</td>
+        <td style="padding:.35rem .6rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${(r.descripcion||'').replace(/"/g,"&quot;")}">${r.descripcion||''}</td>
+        <td style="padding:.35rem .6rem;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${(r.razonsocial||'').replace(/"/g,"&quot;")}">${r.razonsocial||''}</td>
+        <td style="padding:.35rem .6rem;text-align:center;white-space:nowrap">${r.codigovendedor||''}</td>
+        <td style="padding:.35rem .6rem;text-align:center;white-space:nowrap">${fmtFecha(r.fecha)}</td>
+        <td style="padding:.35rem .6rem;text-align:center">${r.tipo}</td>
+        <td style="padding:.35rem .6rem;text-align:center;font-family:monospace">${nro}</td>
+        <td style="padding:.35rem .6rem;text-align:right">${Number(r.cantidad||0).toLocaleString('es-AR',{minimumFractionDigits:0,maximumFractionDigits:2})}</td>
+        <td style="padding:.35rem .6rem;text-align:right">${fmtARS(r.precio_unitario)}</td>
+        <td style="padding:.35rem .6rem;text-align:right">${fmtARS(r.importe)}</td>
+        <td style="padding:.35rem .6rem;text-align:right">${Number(r.iva_pct||0).toFixed(0)}%</td>
+        <td style="padding:.35rem .6rem;text-align:right;font-weight:600">${fmtARS(r.total)}</td>
+      </tr>`;
+    }).join('');
+
+    foot.innerHTML=`<tr style="background:#e0e7ff;font-weight:700">
+      <td colspan="9" style="padding:.4rem .6rem;text-align:right">TOTALES (${_vtaRows.length} líneas)</td>
+      <td style="padding:.4rem .6rem;text-align:right">${fmtARS(totImp)}</td>
+      <td></td>
+      <td style="padding:.4rem .6rem;text-align:right">${fmtARS(totTot)}</td>
+    </tr>`;
+
+    // Paginador
+    const pager=document.getElementById('vta-pager');
+    pager.innerHTML='';
+    if(total_pages>1){
+      const mkBtn=(label,page,disabled)=>{
+        const b=document.createElement('button');
+        b.textContent=label;b.disabled=disabled;
+        b.style.cssText='padding:4px 10px;border:1px solid #d1d5db;border-radius:4px;cursor:pointer;font-size:.8rem;'+(disabled?'background:#f3f4f6;color:#9ca3af':'background:#fff');
+        b.onclick=()=>{_vtaPage=page;vtaRenderTabla();};
+        return b;
+      };
+      pager.appendChild(mkBtn('‹ Ant',_vtaPage-1,_vtaPage===1));
+      const span=document.createElement('span');
+      span.textContent=`Pág ${_vtaPage} / ${total_pages}`;
+      span.style.cssText='font-size:.82rem;color:#374151;padding:0 8px';
+      pager.appendChild(span);
+      pager.appendChild(mkBtn('Sig ›',_vtaPage+1,_vtaPage===total_pages));
+    }
+
+    resumen.textContent=`${_vtaRows.length} líneas encontradas — Total: ${fmtARS(totTot)}`;
+    resDiv.style.display='flex';
+    wrap.style.display='block';
+  }
+
+  // ── Dashboard ─────────────────────────────────────────────────────────────
+  // Convierte YYYY-MM → "ene-25", "feb-25", etc.
+  function _vtaMesLabel(ym){
+    const MESES=['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'];
+    const [y,m]=ym.split('-');
+    return MESES[(parseInt(m,10)-1)||0]+'-'+y.slice(2);
+  }
+
+  // ── Helpers de filtrado y refresco ──────────────────────────────────────────
+  function _vtaFiltrarRows(){
+    if(_vtaPeriodo){
+      return _vtaRows.filter(r=>r.fecha&&r.fecha.slice(0,7)===_vtaPeriodo);
+    }
+    if(_vtaTrimestre){
+      const [yr,qt]=_vtaTrimestre.split('-Q');
+      const q=parseInt(qt), s=(q-1)*3+1;
+      const ms=[s,s+1,s+2].map(m=>`${yr}-${String(m).padStart(2,'0')}`);
+      return _vtaRows.filter(r=>r.fecha&&ms.includes(r.fecha.slice(0,7)));
+    }
+    return _vtaRows;
+  }
+
+  function _vtaActualizarBotones(){
+    // Resaltar mes activo
+    document.querySelectorAll('#vta-periodos button').forEach(b=>{
+      const activo=_vtaPeriodo===null&&_vtaTrimestre===null
+        ? b.id==='vta-per-all'
+        : b.dataset.ym===_vtaPeriodo;
+      b.style.background =activo?'#1e429f':'#e5e7eb';
+      b.style.color      =activo?'#fff':'#374151';
+      b.style.borderColor=activo?'#1e429f':'#9ca3af';
+      b.style.fontWeight =activo?'600':'400';
+    });
+    // Resaltar trimestre activo
+    document.querySelectorAll('#vta-trimestres button').forEach(b=>{
+      const activo=b.dataset.ytq===_vtaTrimestre&&_vtaPeriodo===null;
+      b.style.background =activo?'#7c3aed':'#ede9fe';
+      b.style.color      =activo?'#fff':'#5b21b6';
+      b.style.borderColor=activo?'#7c3aed':'#c4b5fd';
+      b.style.fontWeight =activo?'600':'400';
+    });
+  }
+
+  function vtaActualizarTotales(rows){
+    let neto=0, costo=0, comision=0;
+    rows.forEach(r=>{
+      neto     +=Number(r.importe   ||0);
+      costo    +=Number(r.costo_total||0);
+      comision +=Number(r.comision  ||0);
+    });
+    document.getElementById('vta-kpi-neto').textContent     =fmtARS(neto);
+    document.getElementById('vta-kpi-costo').textContent    =fmtARS(costo);
+    document.getElementById('vta-kpi-comision').textContent =fmtARS(comision);
+    document.getElementById('vta-totales').style.display    =rows.length?'block':'none';
+  }
+
+  function _vtaRefreshCharts(){
+    const rows=_vtaFiltrarRows();
+    const tieneVendedor=!!document.getElementById('vta-vend-sel').value;
+    const tieneCliente =!!document.getElementById('vta-cli-cod').value;
+    if(_chartCli){_chartCli.destroy();_chartCli=null;}
+    if(_chartArt){_chartArt.destroy();_chartArt=null;}
+    if(_chartLin){_chartLin.destroy();_chartLin=null;}
+    _vtaCliSel=null; _vtaArtSel=null;
+    document.getElementById('vta-dash-art-titulo').textContent='Top 15 artículos más vendidos';
+    vtaActualizarTotales(rows);
+    if(tieneVendedor||!tieneCliente) vtaBuiltChartClientes(rows,null);
+    vtaBuiltChartArticulos(rows,null);
+    if(tieneCliente) vtaBuildChartLinea(rows);
+  }
+
+  window.vtaSelPeriodo=function(ym){
+    _vtaPeriodo=ym; _vtaTrimestre=null;
+    _vtaActualizarBotones();
+    _vtaRefreshCharts();
+  };
+
+  window.vtaSelTrimestre=function(ytq){
+    _vtaTrimestre=ytq; _vtaPeriodo=null;
+    _vtaActualizarBotones();
+    _vtaRefreshCharts();
+  };
+
+  function vtaRenderDash(){
+    if(!_vtaRows.length)return;
+    const tieneVendedor=!!document.getElementById('vta-vend-sel').value;
+    const tieneCliente =!!document.getElementById('vta-cli-cod').value;
+    document.getElementById('vta-dash').style.display='block';
+    _vtaPeriodo=null; _vtaTrimestre=null; _vtaCliSel=null; _vtaArtSel=null;
+
+    const meses=[...new Set(_vtaRows.filter(r=>r.fecha).map(r=>r.fecha.slice(0,7)))].sort();
+
+    // ── Botones de MES ────────────────────────────────────────────────────────
+    const divPer=document.getElementById('vta-periodos');
+    if(meses.length>1){
+      divPer.style.display='flex';
+      divPer.innerHTML=
+        `<span style="font-size:.78rem;font-weight:600;color:#374151;margin-right:4px">Mes:</span>`+
+        `<button onclick="vtaSelPeriodo(null)" id="vta-per-all" `+
+        `style="padding:4px 10px;border-radius:20px;border:1px solid #1e429f;background:#1e429f;color:#fff;font-size:.78rem;cursor:pointer;font-weight:600">Todos</button>`;
+      meses.forEach(ym=>{
+        divPer.innerHTML+=
+          `<button data-ym="${ym}" onclick="vtaSelPeriodo('${ym}')" `+
+          `style="padding:4px 10px;border-radius:20px;border:1px solid #9ca3af;background:#e5e7eb;color:#374151;font-size:.78rem;cursor:pointer">${_vtaMesLabel(ym)}</button>`;
+      });
+    } else {
+      divPer.style.display='none';
+    }
+
+    // ── Botones de TRIMESTRE ──────────────────────────────────────────────────
+    const divTri=document.getElementById('vta-trimestres');
+    // Generar trimestres únicos que tengan al menos 1 mes con datos
+    const mesesSets=new Set(meses);
+    const trimestres=[];
+    meses.forEach(ym=>{
+      const [yr,mm]=ym.split('-');
+      const q=Math.ceil(parseInt(mm)/3);
+      const ytq=`${yr}-Q${q}`;
+      if(!trimestres.find(t=>t.ytq===ytq)){
+        const s=(q-1)*3+1;
+        const msQ=[s,s+1,s+2].map(m=>`${yr}-${String(m).padStart(2,'0')}`);
+        if(msQ.some(m=>mesesSets.has(m))) trimestres.push({ytq,yr,q});
+      }
+    });
+
+    if(trimestres.length>1){
+      divTri.style.display='flex';
+      divTri.innerHTML=
+        `<span style="font-size:.78rem;font-weight:600;color:#5b21b6;margin-right:4px">Trimestre:</span>`;
+      trimestres.forEach(({ytq,yr,q})=>{
+        const lbl=`T${q}-${yr.slice(2)}`;
+        divTri.innerHTML+=
+          `<button data-ytq="${ytq}" onclick="vtaSelTrimestre('${ytq}')" `+
+          `style="padding:4px 10px;border-radius:20px;border:1px solid #c4b5fd;background:#ede9fe;color:#5b21b6;font-size:.78rem;cursor:pointer">${lbl}</button>`;
+      });
+    } else {
+      divTri.style.display='none';
+    }
+
+    document.getElementById('vta-dash-clientes').style.display=(tieneVendedor||!tieneCliente)?'block':'none';
+    document.getElementById('vta-dash-linea').style.display=tieneCliente?'block':'none';
+
+    _vtaRefreshCharts();
+  }
+
+  // ── Agrupación auxiliar ───────────────────────────────────────────────────
+  function agruparPor(rows, keyFn, filtroFn){
+    const map={};
+    rows.filter(filtroFn||(() => true)).forEach(r=>{
+      const k=keyFn(r);
+      if(!k)return;
+      if(!map[k])map[k]={label:k,cant:0,imp:0};
+      map[k].cant+=Number(r.cantidad||0);
+      map[k].imp +=Number(r.total||0);
+    });
+    return Object.values(map).sort((a,b)=>b.imp-a.imp).slice(0,15);
+  }
+
+  function vtaBuiltChartClientes(rows, filterArt){
+    const ctx=document.getElementById('chartVtaClientes');
+    if(!ctx)return;
+    const data=agruparPor(rows, r=>r.razonsocial||r.codigocliente,
+      r=>!filterArt||(r.cod_articulo===filterArt||r.descripcion===filterArt));
+    if(_chartCli){_chartCli.destroy();_chartCli=null;}
+    if(!data.length)return;
+
+    const labels=data.map(d=>d.label.length>22?d.label.slice(0,22)+'…':d.label);
+    _chartCli=new Chart(ctx,{
+      type:'bar',
+      data:{
+        labels,
+        datasets:[
+          {label:'Facturación ($)',data:data.map(d=>d.imp),backgroundColor:'rgba(30,66,159,0.75)',
+           yAxisID:'y',order:1},
+          {label:'Cantidad',data:data.map(d=>d.cant),type:'line',borderColor:'#f59e0b',
+           backgroundColor:'rgba(245,158,11,0.15)',pointRadius:4,yAxisID:'y2',order:0}
+        ]
+      },
+      options:{
+        responsive:true,maintainAspectRatio:false,
+        plugins:{
+          legend:{position:'top'},
+          tooltip:{callbacks:{label:ctx=>{
+            if(ctx.dataset.yAxisID==='y') return ' '+fmtARS(ctx.raw);
+            return ' '+Number(ctx.raw).toLocaleString('es-AR',{minimumFractionDigits:0,maximumFractionDigits:2})+' u.';
+          }}}
+        },
+        scales:{
+          y:{position:'left',ticks:{callback:v=>fmtARS(v)},title:{display:true,text:'Facturación'}},
+          y2:{position:'right',grid:{drawOnChartArea:false},title:{display:true,text:'Cantidad'}}
+        },
+        onClick(evt,els){
+          if(!els.length)return;
+          const idx=els[0].index;
+          const selLabel=data[idx].label;
+          if(_vtaCliSel===selLabel){
+            // Deselect
+            _vtaCliSel=null;
+            document.getElementById('vta-dash-art-titulo').textContent='Top 15 artículos más vendidos';
+            vtaBuiltChartArticulos(_vtaRows,null);
+          } else {
+            _vtaCliSel=selLabel;
+            document.getElementById('vta-dash-art-titulo').textContent=`Top 15 artículos — ${selLabel.slice(0,30)}`;
+            vtaBuiltChartArticulos(_vtaRows,selLabel);
+          }
+        }
+      }
+    });
+  }
+
+  function vtaBuiltChartArticulos(rows, filterCliente){
+    const ctx=document.getElementById('chartVtaArticulos');
+    if(!ctx)return;
+    // Agrupar por código de artículo (evita duplicados por descripción con espacios)
+    const map={};
+    rows.filter(r=>!filterCliente||(r.razonsocial===filterCliente||r.codigocliente===filterCliente))
+      .forEach(r=>{
+        const k=((r.cod_articulo||'').trim()||((r.descripcion||'').trim().replace(/\s+/g,' ')));
+        if(!k)return;
+        if(!map[k]){
+          const desc=(r.descripcion||k).trim().replace(/\s+/g,' ');
+          map[k]={label:desc,cant:0,imp:0};
+        }
+        map[k].cant+=Number(r.cantidad||0);
+        map[k].imp +=Number(r.total||0);
+      });
+    const data=Object.values(map).sort((a,b)=>b.imp-a.imp).slice(0,15);
+    if(_chartArt){_chartArt.destroy();_chartArt=null;}
+    if(!data.length)return;
+
+    const labels=data.map(d=>d.label.length>26?d.label.slice(0,26)+'…':d.label);
+
+    // Plugin inline: dibuja la cantidad como texto sobre cada barra
+    const cantPlugin={
+      id:'cantLabel',
+      afterDatasetsDraw(chart){
+        const {ctx:c2}=chart;
+        const meta=chart.getDatasetMeta(0);
+        meta.data.forEach((bar,i)=>{
+          const cant=data[i].cant;
+          if(!cant||cant<=0)return;
+          const txt=Number(cant).toLocaleString('es-AR',{maximumFractionDigits:0})+' u.';
+          c2.save();
+          c2.font='bold 9px Helvetica,Arial,sans-serif';
+          c2.textBaseline='middle';
+          const bw=Math.abs(bar.x-bar.base);
+          const tw=c2.measureText(txt).width;
+          if(bw>tw+12){
+            c2.fillStyle='rgba(255,255,255,0.92)';
+            c2.fillText(txt,bar.x-tw-5,bar.y);
+          } else {
+            c2.fillStyle='#1f2937';
+            c2.fillText(txt,bar.x+4,bar.y);
+          }
+          c2.restore();
+        });
+      }
+    };
+
+    _chartArt=new Chart(ctx,{
+      type:'bar',
+      data:{
+        labels,
+        datasets:[{
+          label:'Facturación ($)',
+          data:data.map(d=>d.imp),
+          backgroundColor:'rgba(5,150,105,0.78)',
+          borderColor:'rgba(4,120,87,0.9)',
+          borderWidth:1
+        }]
+      },
+      options:{
+        indexAxis:'y',
+        responsive:true,maintainAspectRatio:false,
+        plugins:{
+          legend:{position:'top'},
+          cantLabel:{},  // activar plugin inline
+          tooltip:{callbacks:{
+            label:c=>' '+fmtARS(c.raw),
+            afterLabel:c=>{
+              const d=data[c.dataIndex];
+              return ' Cant: '+Number(d.cant).toLocaleString('es-AR',{minimumFractionDigits:0,maximumFractionDigits:2})+' u.';
+            }
+          }}
+        },
+        scales:{
+          y:{ticks:{font:{size:9},autoSkip:false}},
+          x:{position:'top',
+             ticks:{callback:v=>fmtARS(v),maxTicksLimit:6},
+             title:{display:true,text:'Facturación ($)'}}
+        },
+        onClick(evt,els){
+          if(!els.length)return;
+          const idx=els[0].index;
+          const selLabel=data[idx].label;
+          const divCli=document.getElementById('vta-dash-clientes');
+          if(divCli.style.display==='none') return;
+          const baseRows=_vtaPeriodo?_vtaRows.filter(r=>r.fecha&&r.fecha.slice(0,7)===_vtaPeriodo):_vtaRows;
+          if(_vtaArtSel===selLabel){
+            _vtaArtSel=null;
+            vtaBuiltChartClientes(baseRows,null);
+          } else {
+            _vtaArtSel=selLabel;
+            vtaBuiltChartClientes(baseRows,selLabel);
+          }
+        }
+      },
+      plugins:[cantPlugin]
+    });
+  }
+
+  function vtaBuildChartLinea(rows){
+    const ctx=document.getElementById('chartVtaLinea');
+    if(!ctx)return;
+    if(_chartLin){_chartLin.destroy();_chartLin=null;}
+
+    // Agrupar por artículo + mes
+    const byArt={};
+    const meses=new Set();
+    rows.forEach(r=>{
+      if(!r.fecha)return;
+      const mes=r.fecha.slice(0,7); // YYYY-MM
+      meses.add(mes);
+      const art=r.descripcion||r.cod_articulo;
+      if(!byArt[art])byArt[art]={};
+      byArt[art][mes]=(byArt[art][mes]||0)+Number(r.total||0);
+    });
+
+    const mesesOrd=[...meses].sort();
+    // Top 8 artículos por total
+    const topArts=Object.entries(byArt).sort((a,b)=>{
+      const sa=Object.values(a[1]).reduce((x,y)=>x+y,0);
+      const sb=Object.values(b[1]).reduce((x,y)=>x+y,0);
+      return sb-sa;
+    }).slice(0,8).map(e=>e[0]);
+
+    const COLORS=['#1e429f','#059669','#f59e0b','#ef4444','#8b5cf6','#ec4899','#0ea5e9','#84cc16'];
+    _chartLin=new Chart(ctx,{
+      type:'line',
+      data:{
+        labels:mesesOrd,
+        datasets:topArts.map((art,i)=>({
+          label:art.length>25?art.slice(0,25)+'…':art,
+          data:mesesOrd.map(m=>byArt[art][m]||0),
+          borderColor:COLORS[i%COLORS.length],
+          backgroundColor:COLORS[i%COLORS.length]+'22',
+          tension:.3,pointRadius:3,fill:false
+        }))
+      },
+      options:{
+        responsive:true,maintainAspectRatio:false,
+        plugins:{legend:{position:'bottom'}},
+        scales:{
+          y:{ticks:{callback:v=>fmtARS(v)}},
+          x:{title:{display:true,text:'Mes'}}
+        }
+      }
+    });
+  }
+
+  // ── Export ────────────────────────────────────────────────────────────────
+  async function vtaExportar(fmt){
+    if(!_vtaParams) return;
+    const endpoint=`${BASE}/ventas/${fmt}?${_vtaParams}`;
+    _ldStart();
+    try{
+      const resp=await fetch(endpoint,{headers:{'Authorization':'Bearer '+TOKEN}});
+      if(!resp.ok){alert('Error al generar '+fmt+': '+resp.status);return;}
+      const blob=await resp.blob();
+      const objUrl=URL.createObjectURL(blob);
+      if(fmt==='pdf'){
+        window.open(objUrl,'_blank');
+      } else {
+        const a=document.createElement('a');
+        a.href=objUrl;
+        a.download='ventas_'+new Date().toISOString().slice(0,10)+'.xlsx';
+        a.click();
+        URL.revokeObjectURL(objUrl);
+      }
+    }catch(e){alert('Error: '+e);}finally{_ldEnd();}
+  }
+
+  // ── Exponer globalmente ───────────────────────────────────────────────────
+  window.vtaCargarVendedores = vtaCargarVendedores;
+  window.vtaOnVendedorChange  = vtaOnVendedorChange;
+  window.vtaBuscarCliente     = vtaBuscarCliente;
+  window.vtaSelCliente        = vtaSelCliente;
+  window.vtaLimpiar           = vtaLimpiar;
+  window.vtaBuscar            = vtaBuscar;
+  window.vtaExportar          = vtaExportar;
+})();
+
+/* ─── Sticky headers + Resizable columns (universal) ─── */
+(function(){
+  const PFX='mbColW_';
+  function _tkey(tbl,i){
+    const id=tbl.id||(tbl.closest('[id]')||{}).id||'tb';
+    const hdr=Array.from(tbl.querySelectorAll('thead th')).map(t=>t.textContent.trim().slice(0,5)).join('');
+    return PFX+id+'_'+btoa(hdr).slice(0,12)+'_'+i;
+  }
+  function initTable(tbl){
+    if(tbl._rzInit) return;
+    tbl._rzInit=1;
+    const ths=Array.from(tbl.querySelectorAll('thead th'));
+    if(!ths.length) return;
+    ths.forEach((th,i)=>{
+      try{ const w=localStorage.getItem(_tkey(tbl,i)); if(w) th.style.width=w+'px'; }catch(_){}
+      const h=document.createElement('div');
+      h.className='col-rz';
+      th.appendChild(h);
+      let sx,sw;
+      h.addEventListener('pointerdown',e=>{
+        e.preventDefault(); e.stopPropagation();
+        h.setPointerCapture(e.pointerId);
+        h.classList.add('on');
+        sx=e.clientX; sw=th.offsetWidth;
+        const onMove=mv=>{ th.style.width=Math.max(24,sw+mv.clientX-sx)+'px'; };
+        h.addEventListener('pointermove',onMove);
+        h.addEventListener('pointerup',()=>{
+          h.classList.remove('on');
+          h.removeEventListener('pointermove',onMove);
+          try{ localStorage.setItem(_tkey(tbl,i),th.offsetWidth); }catch(_){}
+        },{once:true});
+      });
+    });
+  }
+  function scan(root){ (root||document).querySelectorAll('table').forEach(initTable); }
+  const mo=new MutationObserver(muts=>{
+    for(const m of muts) m.addedNodes.forEach(n=>{
+      if(n.nodeType!==1) return;
+      if(n.tagName==='TABLE') initTable(n);
+      else if(n.querySelectorAll) n.querySelectorAll('table').forEach(initTable);
+    });
+  });
+  document.addEventListener('DOMContentLoaded',()=>{ scan(); mo.observe(document.body,{childList:true,subtree:true}); });
+  window._initResizableTables=scan;
 })();
 </script>
 </body>

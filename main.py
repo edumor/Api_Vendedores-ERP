@@ -19,7 +19,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
-from fastapi import FastAPI, HTTPException, Query, File, UploadFile, Form, Depends, Request, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Query, File, UploadFile, Form, Depends, Request, BackgroundTasks, Body
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse, RedirectResponse, FileResponse
@@ -156,6 +156,32 @@ def _s(v):
     """Convierte cualquier valor Firebird a str limpio."""
     if v is None: return ''
     return str(v).strip()
+
+# ── Tabla de Comisiones de Vendedores ────────────────────────────────────────
+# Cargada desde comisiones.json (generado desde la tabla Paradox).
+# Clave: (vendedor_upper, gruposuperrubro_upper, superrubro_upper, rubro_upper)
+# Valor: porcentaje de comisión (float)
+_COMISIONES: dict = {}
+
+def _load_comisiones():
+    """Carga tabla comisiones_vendedores desde admin.db en memoria."""
+    global _COMISIONES
+    import sqlite3 as _sq3
+    db_path = os.path.join(os.path.dirname(__file__), 'admin.db')
+    if not os.path.exists(db_path):
+        return
+    try:
+        _db = _sq3.connect(db_path)
+        rows = _db.execute(
+            'SELECT vendedor, gruposuperrubro, superrubro, rubro, porcentaje '
+            'FROM comisiones_vendedores'
+        ).fetchall()
+        _db.close()
+        _COMISIONES = {(r[0], r[1], r[2], r[3]): r[4] for r in rows}
+    except Exception:
+        pass
+
+_load_comisiones()
 
 def _load_catalog(charset='WIN1252') -> tuple:
     """Carga todos los artículos activos con jerarquía completa desde Firebird."""
@@ -1261,7 +1287,7 @@ def get_multiplazos_for_vendor(vendedor: Optional[str] = None):
         fb = conn('WIN1252')
         cur = fb.cursor()
         cur.execute('SELECT CODIGOMULTIPLAZO, DESCRIPCION FROM "MULTIPLAZOS" WHERE ACTIVO=? ORDER BY DESCRIPCION', ('1',))
-        todos = [{"codigo": str(r[0] or '').strip(), "descripcion": str(r[1] or '').strip()} for r in cur.fetchall()]
+        todos = [{"codigo": ('' if r[0] is None else str(r[0]).strip()), "descripcion": str(r[1] or '').strip()} for r in cur.fetchall()]
         fb.close()
     except Exception:
         todos = []
@@ -1415,7 +1441,7 @@ def get_depositos_publico():
         rows = cur.fetchall()
         c.close()
         result = [
-            {"codigo": str(r[0] or '').strip(), "nombre": str(r[1] or '').strip()}
+            {"codigo": str(r[0] or '').strip().zfill(3), "nombre": str(r[1] or '').strip()}
             for r in rows
             if str(r[0] or '').strip()
         ]
@@ -1761,6 +1787,16 @@ def ajuste_stock_historial(_u=Depends(get_gerente_user)):
         except Exception:
             pass
     return result
+
+@app.delete("/admin/ajuste-stock/historial")
+def ajuste_stock_limpiar_historial(_u=Depends(get_gerente_user)):
+    """Borra todo el historial de ajustes de stock (y sus backups en cascada)."""
+    db = _admin_db()
+    db.execute("DELETE FROM stock_ajuste_log")
+    db.commit()
+    deleted = db.execute("SELECT changes()").fetchone()[0]
+    db.close()
+    return {"deleted": deleted}
 
 @app.post("/admin/audit-event")
 def admin_audit_event(data: dict, request: Request, _u=Depends(get_admin_user)):
@@ -2363,7 +2399,8 @@ def admin_test_whatsapp(req: _TestWAReq, _u=Depends(get_admin_user)):
                     "type": "body",
                     "parameters": [
                         {"type": "text", "text": "Test Catálogo"},
-                        {"type": "text", "text": "Prueba de envío desde API"}
+                        {"type": "text", "text": "Prueba de envío desde API"},
+                        {"type": "text", "text": "https://vendedores.microbellsa.com.ar"}
                     ]
                 }]
             }
@@ -2982,6 +3019,23 @@ def admin_get_stock(
         raise HTTPException(500, str(e))
 
 # ─── Admin: exportar stock ───────────────────────────────────────────────────
+def _dep_nombres(dep_lista: list) -> dict:
+    """Devuelve {codigo: nombre} consultando Firebird para los depósitos dados."""
+    if not dep_lista:
+        return {}
+    try:
+        placeholders = ','.join('?' * len(dep_lista))
+        _c = conn('WIN1252'); _cur = _c.cursor()
+        _cur.execute(
+            f'SELECT TRIM(CODIGODEPOSITO), TRIM(DESCRIPCION) FROM "DEPOSITOS" WHERE CODIGODEPOSITO IN ({placeholders})',
+            dep_lista
+        )
+        mapa = {str(r[0]).strip(): str(r[1] or r[0]).strip() for r in _cur.fetchall()}
+        _c.close()
+        return mapa
+    except Exception:
+        return {d: d for d in dep_lista}  # fallback: usar el código
+
 def _admin_stock_data(buscar=None, depositos=None, gruposuperrubro=None,
                       superrubro=None, rubro=None, marca=None):
     """Devuelve todos los artículos activos según filtros (sin paginación) para export.
@@ -3050,7 +3104,7 @@ def admin_exportar_stock_excel(
 
         rows, dep_lista = _admin_stock_data(buscar, depositos, gruposuperrubro, superrubro, rubro, marca)
 
-        DEP_LABELS = {'001':'VAC-LOG','002':'MARKET PL.','003':'PACHECO','005':'OUTLET','013':'FULL ML','016':'EXPO'}
+        DEP_LABELS = _dep_nombres(dep_lista)
 
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -3125,7 +3179,7 @@ def admin_exportar_stock_pdf(
         from reportlab.lib.enums import TA_RIGHT, TA_CENTER
 
         rows, dep_lista = _admin_stock_data(buscar, depositos, gruposuperrubro, superrubro, rubro, marca)
-        DEP_LABELS = {'001':'VAC-LOG','002':'MARKET PL.','003':'PACHECO','005':'OUTLET','013':'FULL ML','016':'EXPO'}
+        DEP_LABELS = _dep_nombres(dep_lista)
 
         import io
         buf = io.BytesIO()
@@ -3229,6 +3283,27 @@ def admin_rotacion_filtros(_u=Depends(get_admin_user)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/admin/debug-tipos-comprobante")
+def admin_debug_tipos_comprobante(_u=Depends(get_admin_user)):
+    """Debug: lista todos los TIPOCOMPROBANTE distintos en CABEZACOMPROBANTES con cantidad de registros."""
+    try:
+        c = conn('WIN1252', db=DATABASE)
+        cur = c.cursor()
+        cur.execute("""
+            SELECT TIPOCOMPROBANTE, COUNT(*) AS cant, MAX(FECHACOMPROBANTE) AS ultima_fecha
+            FROM "CABEZACOMPROBANTES"
+            WHERE ANULADA = 0
+            GROUP BY TIPOCOMPROBANTE
+            ORDER BY cant DESC
+        """)
+        rows = cur.fetchall()
+        c.close()
+        return [{"tipo": (r[0] or '').strip(), "cantidad": int(r[1] or 0),
+                 "ultima_fecha": str(r[2])[:10] if r[2] else None} for r in rows]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/admin/analisis-rotacion")
 def admin_analisis_rotacion(
     meses: int = 12,
@@ -3242,6 +3317,7 @@ def admin_analisis_rotacion(
     pct_utilidad: float = 25,    # % utilidad sobre (Costo + Operativo)
     pct_meli: float = 80,        # % para Pub. ML sobre el Mayorista resultante
     pct_venta_max: float = 20,   # % máx. de (vendido en el período / stock) para entrar
+    compra_hasta: str = None,    # YYYY-MM-DD — solo artículos cuya última compra sea ANTES de esta fecha (o sin compra registrada)
     _u=Depends(get_admin_user)
 ):
     """
@@ -3348,6 +3424,30 @@ def admin_analisis_rotacion(
         except Exception:
             pass
 
+        # 4b. Última compra (RC = Remito Compra) por artículo — L1 únicamente.
+        ultima_compra = {}  # CODIGOARTICULO -> fecha más reciente de RC
+        c_rc = conn('WIN1252', db=DATABASE)
+        cur_rc = c_rc.cursor()
+        try:
+            cur_rc.execute("""
+                SELECT cu.CODIGOARTICULO, MAX(cb.FECHACOMPROBANTE)
+                FROM "CUERPOCOMPROBANTES" cu
+                JOIN "CABEZACOMPROBANTES" cb
+                  ON cb.TIPOCOMPROBANTE = cu.TIPOCOMPROBANTE
+                 AND cb.NUMEROCOMPROBANTE = cu.NUMEROCOMPROBANTE
+                WHERE cu.TIPOCOMPROBANTE = 'RE' AND cb.ANULADA = 0
+                GROUP BY cu.CODIGOARTICULO
+            """)
+            for row in cur_rc.fetchall():
+                cod = (row[0] or '').strip()
+                if cod and row[1]:
+                    dt = row[1] if isinstance(row[1], datetime) else datetime.strptime(str(row[1])[:10], '%Y-%m-%d')
+                    ultima_compra[cod] = dt
+        except Exception:
+            pass
+        finally:
+            c_rc.close()
+
         # 4. Costo (PRECIOCOMPRA) — confirmado que solo aparece correcto
         #    buscando por CODIGOPARTICULAR (no por CODIGOARTICULO). Se indexa
         #    por codigoparticular y se cruza con catalog[art_id]['codigoparticular'].
@@ -3401,6 +3501,14 @@ def admin_analisis_rotacion(
             if pct_venta > pct_venta_max:
                 continue
             ultimo_mov = ultimo_venta.get(art_id_str) or ultimo_venta.get(cod)
+
+            # Filtro por fecha de última compra:
+            # - Si ultima_compra existe y es >= compra_hasta → EXCLUIR (compraron recientemente)
+            # - Si ultima_compra es None → INCLUIR siempre (sin registro en Firebird, no se castiga)
+            uc_pre = ultima_compra.get(art_id_str) or ultima_compra.get(cod)
+            ultima_compra_str = uc_pre.strftime('%Y-%m-%d') if uc_pre else None
+            if compra_hasta and ultima_compra_str and ultima_compra_str >= compra_hasta:
+                continue
 
             precio1 = art['precio1']
             moneda  = art['codigomoneda']
@@ -3473,6 +3581,7 @@ def admin_analisis_rotacion(
                 except Exception:
                     ultimo_str = str(ultimo_mov)[:10]
 
+            # ultima_compra_str ya calculado arriba en el filtro
             resultado.append({
                 'codigo':             cod,
                 'art_id':             art_id_str,
@@ -3489,6 +3598,7 @@ def admin_analisis_rotacion(
                 'margen_lista_pct':   margen_lista,
                 'puede_pub_meli':     puede_pub_meli,
                 'ultimo_movimiento':  ultimo_str,
+                'ultima_compra':      ultima_compra_str,
                 'cantidad_vendida_periodo': round(vendido, 2),
                 'pct_venta':          pct_venta,
                 'bulto_sugerido':     bulto,
@@ -3523,6 +3633,7 @@ def admin_rotacion_exportar_excel(
     pct_utilidad: float = 25,
     pct_meli: float = 80,
     pct_venta_max: float = 20,
+    compra_hasta: str = None,
     _u=Depends(get_admin_download_auth)
 ):
     try:
@@ -3535,7 +3646,7 @@ def admin_rotacion_exportar_excel(
             meses=meses, grupo=grupo, superrubro=superrubro, rubro=rubro, marca=marca,
             articulo=articulo, depositos=depositos, pct_operativo=pct_operativo,
             pct_utilidad=pct_utilidad, pct_meli=pct_meli, pct_venta_max=pct_venta_max,
-            _u=_u
+            compra_hasta=compra_hasta, _u=_u
         )
         if not rows:
             raise HTTPException(404, "Sin datos de rotación para los filtros indicados")
@@ -3551,15 +3662,19 @@ def admin_rotacion_exportar_excel(
         sin_costo    = sum(1 for r in rows if not r.get('costo'))
         con_bulto    = sum(1 for r in rows if r.get('bulto_sugerido'))
         con_perdida  = sum(1 for r in rows if r.get('margen_mayorista_pct') is not None and r['margen_mayorista_pct'] < 0)
+        sin_compra   = sum(1 for r in rows if not r.get('ultima_compra'))
 
+        ch_fmt = '/'.join(reversed(compra_hasta.split('-'))) if compra_hasta else None
         linea_resumen = (
             f"{len(rows)} artículos de baja rotación (ventas ≤ {pct_vtx}% del stock)"
-            f" · {sin_ventas} sin ninguna venta en el período"
-            f" · Capital inmovilizado (costo): ${round(total_costo):,} ARS"
-            f" · Cambio USD: ${cambio:,}"
+            + (f" · Compras anteriores al {ch_fmt}" if ch_fmt else "")
+            + f" · {sin_ventas} sin ninguna venta en el período"
+            + f" · Capital inmovilizado (costo): ${round(total_costo):,} ARS"
+            + f" · Cambio USD: ${cambio:,}"
             + (f" · {con_bulto} con venta por bulto sugerida" if con_bulto else "")
             + (f" · {con_perdida} no cubren ni el punto de equilibrio" if con_perdida else "")
-            + (f" · {sin_costo} sin costo cargado (no incluidos en capital)" if sin_costo else "")
+            + (f" · {sin_costo} sin costo cargado" if sin_costo else "")
+            + (f" · {sin_compra} sin remito de compra registrado" if sin_compra else "")
         )
         linea_leyenda = (
             f"Baja rotación = ventas NV en el período ÷ stock actual ≤ {pct_vtx}%"
@@ -3584,7 +3699,7 @@ def admin_rotacion_exportar_excel(
         right_al  = Alignment(horizontal="right", vertical="center")
         center_al = Alignment(horizontal="center", vertical="center")
         left_al   = Alignment(horizontal="left", vertical="center", wrap_text=True)
-        NUM_COLS  = 12
+        NUM_COLS  = 14
 
         # Fila 1: Título
         ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=NUM_COLS)
@@ -3608,8 +3723,9 @@ def admin_rotacion_exportar_excel(
         ws.row_dimensions[4].height = 6
 
         # Fila 5: Encabezados de tabla
-        HEADERS = ["Código", "Descripción", "Stock", "Lista1 ARS", "Mayorista",
-                   "Pub. ML", "Margen May.%", "Bulto", "Pack May.", "Vendido (u.)", "Rotación %", "Último movimiento"]
+        HEADERS = ["Código", "Descripción", "Stock", "Costo ARS", "Últ. Compra",
+                   "Lista1 ARS", "Mayorista", "Pub. ML", "Margen May.%",
+                   "Bulto", "Pack May.", "Vendido (u.)", "Rotación %", "Última venta"]
         for ci, h in enumerate(HEADERS, 1):
             cell = ws.cell(5, ci, h)
             cell.font = hdr_font; cell.fill = hdr_fill; cell.alignment = center_al
@@ -3628,38 +3744,43 @@ def admin_rotacion_exportar_excel(
                 return c
 
             wc(1,  r.get('codigoparticular', ''))
-            wc(2,  r.get('descripcion', ''),       left_al)
-            wc(3,  round(r.get('stock', 0)),        right_al)
-            wc(4,  round(r.get('precio1_ars', 0)),  right_al, '#,##0')
-            wc(5,  round(r.get('precio_mayorista', 0) or 0), right_al, '#,##0')
-            wc(6,  round(r.get('precio_meli_pub', 0) or 0),  right_al, '#,##0')
+            wc(2,  r.get('descripcion', ''),        left_al)
+            wc(3,  round(r.get('stock', 0)),         right_al)
+            costo = r.get('costo')
+            wc(4,  round(costo) if costo else '—',   right_al, '#,##0' if costo else None)
+            wc(5,  r.get('ultima_compra') or '—',    center_al)
+            wc(6,  round(r.get('precio1_ars', 0)),   right_al, '#,##0')
+            wc(7,  round(r.get('precio_mayorista', 0) or 0), right_al, '#,##0')
+            wc(8,  round(r.get('precio_meli_pub', 0) or 0),  right_al, '#,##0')
             mg = r.get('margen_mayorista_pct')
-            c_mg = wc(7, (str(mg)+'%') if mg is not None else '—', center_al)
+            c_mg = wc(9, (str(mg)+'%') if mg is not None else '—', center_al)
             if mg is not None:
-                if mg < 0:   c_mg.font = Font(color="DC2626", bold=True)
+                if mg < 0:        c_mg.font = Font(color="DC2626", bold=True)
                 elif mg < pct_ut: c_mg.font = Font(color="D97706")
-                else:         c_mg.font = Font(color="15803D", bold=True)
+                else:             c_mg.font = Font(color="15803D", bold=True)
             bulto = r.get('bulto_sugerido')
-            wc(8,  f"×{bulto}" if bulto else '—',  center_al)
+            wc(10, f"×{bulto}" if bulto else '—',   center_al)
             pbm = r.get('precio_bulto_mayorista')
-            wc(9,  round(pbm) if pbm else '—',      right_al, '#,##0' if pbm else None)
-            wc(10, round(r.get('cantidad_vendida_periodo', 0) or 0), right_al)
-            wc(11, str(r.get('pct_venta', 0) or 0)+'%', center_al)
-            wc(12, r.get('ultimo_movimiento') or '—')
+            wc(11, round(pbm) if pbm else '—',       right_al, '#,##0' if pbm else None)
+            wc(12, round(r.get('cantidad_vendida_periodo', 0) or 0), right_al)
+            wc(13, str(r.get('pct_venta', 0) or 0)+'%', center_al)
+            wc(14, r.get('ultimo_movimiento') or '—')
 
         # Anchos de columna
-        ws.column_dimensions['A'].width = 11
-        ws.column_dimensions['B'].width = 42
-        ws.column_dimensions['C'].width = 9
-        ws.column_dimensions['D'].width = 13
-        ws.column_dimensions['E'].width = 13
-        ws.column_dimensions['F'].width = 13
-        ws.column_dimensions['G'].width = 13
-        ws.column_dimensions['H'].width = 9
-        ws.column_dimensions['I'].width = 13
-        ws.column_dimensions['J'].width = 13
-        ws.column_dimensions['K'].width = 12
-        ws.column_dimensions['L'].width = 16
+        ws.column_dimensions['A'].width = 11   # Código
+        ws.column_dimensions['B'].width = 42   # Descripción
+        ws.column_dimensions['C'].width = 9    # Stock
+        ws.column_dimensions['D'].width = 13   # Costo ARS
+        ws.column_dimensions['E'].width = 13   # Últ. Compra
+        ws.column_dimensions['F'].width = 13   # Lista1 ARS
+        ws.column_dimensions['G'].width = 13   # Mayorista
+        ws.column_dimensions['H'].width = 13   # Pub. ML
+        ws.column_dimensions['I'].width = 13   # Margen May.%
+        ws.column_dimensions['J'].width = 9    # Bulto
+        ws.column_dimensions['K'].width = 13   # Pack May.
+        ws.column_dimensions['L'].width = 13   # Vendido (u.)
+        ws.column_dimensions['M'].width = 12   # Rotación %
+        ws.column_dimensions['N'].width = 16   # Última venta
 
         buf = io.BytesIO()
         wb.save(buf); buf.seek(0)
@@ -3686,6 +3807,7 @@ def admin_rotacion_exportar_pdf(
     pct_utilidad: float = 25,
     pct_meli: float = 80,
     pct_venta_max: float = 20,
+    compra_hasta: str = None,
     _u=Depends(get_admin_download_auth)
 ):
     try:
@@ -3701,7 +3823,7 @@ def admin_rotacion_exportar_pdf(
             meses=meses, grupo=grupo, superrubro=superrubro, rubro=rubro, marca=marca,
             articulo=articulo, depositos=depositos, pct_operativo=pct_operativo,
             pct_utilidad=pct_utilidad, pct_meli=pct_meli, pct_venta_max=pct_venta_max,
-            _u=_u
+            compra_hasta=compra_hasta, _u=_u
         )
         if not rows:
             raise HTTPException(404, "Sin datos de rotación para los filtros indicados")
@@ -3717,15 +3839,19 @@ def admin_rotacion_exportar_pdf(
         sin_costo    = sum(1 for r in rows if not r.get('costo'))
         con_bulto    = sum(1 for r in rows if r.get('bulto_sugerido'))
         con_perdida  = sum(1 for r in rows if r.get('margen_mayorista_pct') is not None and r['margen_mayorista_pct'] < 0)
+        sin_compra   = sum(1 for r in rows if not r.get('ultima_compra'))
 
+        ch_fmt = '/'.join(reversed(compra_hasta.split('-'))) if compra_hasta else None
         linea_resumen = (
             f"<b>{len(rows)}</b> artículos de baja rotación (ventas ≤ {pct_vtx}% del stock)"
-            f" &nbsp;·&nbsp; {sin_ventas} sin ninguna venta en el período"
-            f" &nbsp;·&nbsp; Capital inmovilizado (costo): <b>${round(total_costo):,} ARS</b>"
-            f" &nbsp;·&nbsp; Cambio USD: ${cambio:,}"
+            + (f" &nbsp;·&nbsp; Compras anteriores al <b>{ch_fmt}</b>" if ch_fmt else "")
+            + f" &nbsp;·&nbsp; {sin_ventas} sin ninguna venta en el período"
+            + f" &nbsp;·&nbsp; Capital inmovilizado (costo): <b>${round(total_costo):,} ARS</b>"
+            + f" &nbsp;·&nbsp; Cambio USD: ${cambio:,}"
             + (f" &nbsp;·&nbsp; <font color='#7c3aed'><b>{con_bulto} con venta por bulto sugerida</b></font>" if con_bulto else "")
             + (f" &nbsp;·&nbsp; <font color='#dc2626'><b>{con_perdida} no cubren el punto de equilibrio</b></font>" if con_perdida else "")
             + (f" &nbsp;·&nbsp; <font color='#d97706'>{sin_costo} sin costo cargado</font>" if sin_costo else "")
+            + (f" &nbsp;·&nbsp; <font color='#6b7280'>{sin_compra} sin remito de compra en el sistema</font>" if sin_compra else "")
         )
         linea_leyenda = (
             f"Baja rotación = ventas NV ÷ stock actual ≤ {pct_vtx}%  |  "
@@ -3769,9 +3895,10 @@ def admin_rotacion_exportar_pdf(
         def fmt_ars(v): return f"${round(v):,}".replace(',', '.') if v else '—'
         def fmt_pct(v): return f"{v}%" if v is not None else '—'
 
-        col_headers = ["Código", "Descripción", "Stock", "Lista1", "Mayorista",
-                       "Pub. ML", "Margen\nMay.%", "Bulto", "Pack\nMay.", "Vendido\n(u.)", "Rot.%", "Último\nmov."]
-        col_widths  = [22*mm, 68*mm, 16*mm, 22*mm, 22*mm, 22*mm, 18*mm, 14*mm, 22*mm, 18*mm, 15*mm, 22*mm]
+        col_headers = ["Código", "Descripción", "Stock", "Costo ARS", "Últ.\nCompra",
+                       "Lista1", "Mayorista", "Pub. ML", "Margen\nMay.%",
+                       "Bulto", "Pack\nMay.", "Vendido\n(u.)", "Rot.%", "Última\nventa"]
+        col_widths  = [20*mm, 52*mm, 13*mm, 18*mm, 18*mm, 18*mm, 18*mm, 18*mm, 14*mm, 12*mm, 18*mm, 13*mm, 12*mm, 18*mm]
 
         tbl_data = [col_headers]
         row_colors = []  # (row_idx, color) for margen color
@@ -3780,13 +3907,15 @@ def admin_rotacion_exportar_pdf(
             bulto = r.get('bulto_sugerido')
             pbm   = r.get('precio_bulto_mayorista')
             if mg is not None:
-                if mg < 0:      row_colors.append((ri, RED, 6))
-                elif mg < pct_ut: row_colors.append((ri, ORANGE, 6))
-                else:             row_colors.append((ri, GREEN, 6))
+                if mg < 0:        row_colors.append((ri, RED, 8))
+                elif mg < pct_ut: row_colors.append((ri, ORANGE, 8))
+                else:             row_colors.append((ri, GREEN, 8))
             tbl_data.append([
                 r.get('codigoparticular', ''),
                 Paragraph(r.get('descripcion', ''), st_desc),
                 str(round(r.get('stock', 0))),
+                fmt_ars(r.get('costo')),
+                r.get('ultima_compra') or '—',
                 fmt_ars(r.get('precio1_ars')),
                 fmt_ars(r.get('precio_mayorista')),
                 fmt_ars(r.get('precio_meli_pub')),
@@ -3809,11 +3938,13 @@ def admin_rotacion_exportar_pdf(
             ('FONTSIZE',    (0,1), (-1,-1), 7.5),
             ('ROWBACKGROUND', (0,1), (-1,-1), [colors.white, ALTBG]),
             ('GRID',        (0,0), (-1,-1), 0.3, colors.HexColor('#D1D5DB')),
-            ('ALIGN',       (2,1), (2,-1), 'RIGHT'),
-            ('ALIGN',       (3,1), (5,-1), 'RIGHT'),
-            ('ALIGN',       (8,1), (9,-1), 'RIGHT'),
-            ('ALIGN',       (6,1), (7,-1), 'CENTER'),
-            ('ALIGN',       (10,1), (10,-1), 'CENTER'),
+            ('ALIGN',       (2,1), (3,-1), 'RIGHT'),   # Stock, Costo ARS
+            ('ALIGN',       (4,1), (4,-1), 'CENTER'),  # Últ. Compra
+            ('ALIGN',       (5,1), (7,-1), 'RIGHT'),   # Lista1, Mayorista, Pub. ML
+            ('ALIGN',       (8,1), (9,-1), 'CENTER'),  # Margen, Bulto
+            ('ALIGN',       (10,1), (10,-1), 'RIGHT'), # Pack May.
+            ('ALIGN',       (11,1), (11,-1), 'RIGHT'), # Vendido
+            ('ALIGN',       (12,1), (13,-1), 'CENTER'),# Rot%, Última venta
         ]
         for (ri, clr, ci) in row_colors:
             base_style.append(('TEXTCOLOR', (ci, ri), (ci, ri), clr))
@@ -5071,7 +5202,6 @@ def get_articulos_batch(codigos: str = Query(..., description="Códigos separado
     # FMA stock (cache compartido, una llamada paralela)
     _DEPS = ['001', '002', '003', '005', '013', '016']
     rem_bulk = _fma_stock_parallel(_DEPS)
-    reservas = _get_reservas_activas()
     results = []
     for cod in codes:
         row = rows_by_part.get(cod) or rows_by_art.get(cod)
@@ -5101,9 +5231,6 @@ def get_articulos_batch(codigos: str = Query(..., description="Códigos separado
             "permite_stock_negativo": permite_neg,
             "_input_cod": cod,
         }
-        _apply_reservas([item], reservas, rem_key='remanente_001')
-        item.pop('reservado', None)
-        item.pop('reservado_por_deposito', None)
         results.append(item)
     return results
 
@@ -5222,10 +5349,6 @@ def get_articulo(codigo: str):
         "permite_stock_negativo": str(row[17] or '0').strip() == '1',
         "es_conjunto": str(row[18] or '').strip().upper() == 'C'
     }
-    # Aplicar reservas activas: descuenta remanente_XXX por depósito
-    _apply_reservas([item], _get_reservas_activas(), rem_key='remanente_001')
-    item.pop('reservado', None)
-    item.pop('reservado_por_deposito', None)
     item.pop('codigo_rubro', None)
     item.pop('codigo_superrubro', None)
     item.pop('codigo_gruposuperrubro', None)
@@ -5630,6 +5753,117 @@ def debug_cae(numero: str):
         result['error'] = str(e)
     return result
 
+@app.get("/debug/cuerpo-cols")
+def debug_cuerpo_cols(db: str = Query("prod")):
+    """Lista TODAS las columnas de CUERPOCOMPROBANTES con su valor en la 1ra FA."""
+    DB_PROD = 'c:/flexxus/DB/DB-Microbell.gdb'
+    db_path = {'sw': DATABASE_MLT, 'prod': DB_PROD, 'oficial': DATABASE}.get(db, DB_PROD)
+    try:
+        c = conn('WIN1252', db=db_path)
+        cur = c.cursor()
+        cur.execute('SELECT FIRST 1 * FROM "CUERPOCOMPROBANTES" WHERE TIPOCOMPROBANTE=?',('FA',))
+        row  = cur.fetchone()
+        cols = [d[0] for d in cur.description]
+        c.close()
+        if not row:
+            return {"error": "Sin filas FA", "cols": cols}
+        data = {cols[i]: (float(row[i]) if isinstance(row[i], (int, float)) else str(row[i]) if row[i] is not None else None)
+                for i in range(len(cols))}
+        # Destacar las que parecen de costo/precio
+        relevantes = {k: v for k, v in data.items() if any(t in k.upper() for t in ['COSTO','PRECIO','COMPRA','REPO'])}
+        return {"relevantes": relevantes, "todos": data}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+
+
+@app.get("/admin/import-comisiones")
+def admin_import_comisiones(token: str = Query(...)):
+    """Importa comisiones_vendedores desde importar_comisiones.sql. Uso único."""
+    if token != "microbell2026":
+        raise HTTPException(status_code=403, detail="Token inválido")
+
+    sql_path = os.path.join(os.path.dirname(__file__), 'importar_comisiones.sql')
+    if not os.path.exists(sql_path):
+        raise HTTPException(status_code=404, detail="importar_comisiones.sql no encontrado en el servidor")
+
+    import sqlite3 as _sq3
+    db_path = os.path.join(os.path.dirname(__file__), 'admin.db')
+    db = _sq3.connect(db_path)
+    db.executescript(open(sql_path, encoding='utf-8').read())
+    count = db.execute('SELECT COUNT(*) FROM comisiones_vendedores').fetchone()[0]
+    db.close()
+    _load_comisiones()  # recarga en memoria
+    return {"ok": True, "filas_importadas": count}
+
+@app.get("/debug/comisiones-check")
+def debug_comisiones_check():
+    """Muestra nombres de USUARIOS vs primeras claves de _COMISIONES para diagnosticar matching."""
+    DB_PROD = 'c:/flexxus/DB/DB-Microbell.gdb'
+    usuarios = {}
+    for _db in [DATABASE, DB_PROD]:
+        try:
+            c = conn('WIN1252', db=_db)
+            cur = c.cursor()
+            cur.execute('SELECT CODIGOUSUARIO, RAZONSOCIAL FROM "USUARIOS"')
+            for row in cur.fetchall():
+                cod = (row[0] or '').strip().upper()
+                nom = (row[1] or '').strip().upper()
+                if cod and cod not in usuarios:
+                    usuarios[cod] = nom
+            c.close()
+        except Exception:
+            pass
+    # Primeros 30 keys del dict de comisiones
+    sample_com = list(_COMISIONES.keys())[:30]
+    # Ver qué vendedores tienen comisiones definidas
+    vend_com = sorted({k[0] for k in _COMISIONES.keys()})
+    return {
+        "usuarios_mapa": usuarios,
+        "vendedores_en_comisiones": vend_com[:50],
+        "sample_comisiones_keys": [str(k) for k in sample_com],
+        "total_comisiones": len(_COMISIONES),
+    }
+
+@app.get("/debug/cuerpo-costo/{numero}")
+def debug_cuerpo_costo(numero: str, tipo: str = "FA", db: str = Query("oficial")):
+    """Muestra todos los campos de CUERPOCOMPROBANTES con COSTO o PRECIO en el nombre,
+    para una línea del comprobante dado. Útil para identificar el campo de costo de venta."""
+    DB_PROD = 'c:/flexxus/DB/DB-Microbell.gdb'
+    db_path = {'sw': DATABASE_MLT, 'prod': DB_PROD}.get(db, DATABASE)
+    try:
+        c = conn('WIN1252', db=db_path)
+        cur = c.cursor()
+        cur.execute(
+            'SELECT FIRST 3 * FROM "CUERPOCOMPROBANTES" '
+            'WHERE TIPOCOMPROBANTE=? AND NUMEROCOMPROBANTE=?',
+            (tipo.upper(), numero)
+        )
+        rows = cur.fetchall()
+        if not rows:
+            # fallback: últimas 3 líneas FA
+            cur.execute(
+                "SELECT FIRST 3 * FROM \"CUERPOCOMPROBANTES\" "
+                "WHERE TIPOCOMPROBANTE='FA' ORDER BY NUMEROCOMPROBANTE DESC"
+            )
+            rows = cur.fetchall()
+        cols = [d[0] for d in cur.description]
+        c.close()
+        # Filtrar columnas con COSTO o PRECIO en el nombre (case-insensitive)
+        idx_rel = [i for i, c in enumerate(cols) if 'COSTO' in c.upper() or 'PRECIO' in c.upper()]
+        result = []
+        for row in rows:
+            full = {cols[i]: (str(row[i]) if row[i] is not None else None) for i in range(len(cols))}
+            rel  = {cols[i]: (str(row[i]) if row[i] is not None else None) for i in idx_rel}
+            result.append({"linea": full.get("CODIGOPARTICULAR") or full.get("CODIGOARTICULO"),
+                           "campos_precio_costo": rel})
+        return {"columnas_totales": len(cols), "todas_las_columnas": cols,
+                "lineas": result}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.get("/debug/comp_cols/{numero}")
 def debug_comp_cols(numero: str, db: str = Query("oficial")):
     """Muestra TODOS los campos de CABEZACOMPROBANTES para un comprobante dado."""
@@ -5952,8 +6186,8 @@ def que_vendi(
     from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
     DB_PROD     = 'c:/flexxus/DB/DB-Microbell.gdb'
     DB_MLT_PROD = 'c:/flexxus/DB/DB-MLT-Microbell.gdb'
-    # Mismas 4 BDs que Cuenta Corriente — prueba + producción, L1 + SW
-    DBS_FACT   = [DATABASE, DATABASE_MLT, DB_PROD, DB_MLT_PROD]
+    # Solo producción — las BDs de prueba tienen datos sucios con códigos distintos
+    DBS_FACT   = [DB_PROD, DB_MLT_PROD]
     # Lookup solo en las BDs que tienen tabla CLIENTES
     DBS_LOOKUP = [DATABASE, DB_PROD]
 
@@ -6008,8 +6242,7 @@ def que_vendi(
 
     sql = f"""
         SELECT FIRST {limit} SKIP {offset}
-            COALESCE(NULLIF(TRIM(cu.CODIGOPARTICULAR),''),
-                     TRIM(cu.CODIGOARTICULO))             AS COD_ART,
+            TRIM(cu.CODIGOARTICULO)                        AS COD_ART,
             COALESCE(NULLIF(TRIM(cu.DESCRIPCION),''), '') AS DESCR,
             cb.FECHACOMPROBANTE,
             cb.TIPOCOMPROBANTE,
@@ -6263,6 +6496,507 @@ def que_vendi_excel(vendedor: str, cliente: str,
     return StreamingResponse(buf,
         media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         headers={'Content-Disposition': f'attachment; filename="que_vendi_{cliente}.xlsx"'})
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ANÁLISIS DE VENTAS (admin) — /ventas/*
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/ventas/vendedores")
+def ventas_vendedores(_u=Depends(get_admin_user)):
+    """Lista de vendedores activos para el combo del panel de Ventas."""
+    try:
+        c = conn('WIN1252', DATABASE)
+        cur = c.cursor()
+        cur.execute(
+            "SELECT CODIGOUSUARIO, RAZONSOCIAL FROM \"USUARIOS\" "
+            "WHERE ACTIVO='1' AND UPPER(TRIM(ESVENDEDOR))='1' ORDER BY RAZONSOCIAL"
+        )
+        rows = cur.fetchall()
+        c.close()
+        return [{"codigo": (r[0] or '').strip(), "nombre": (r[1] or '').strip()} for r in rows]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ventas/clientes")
+def ventas_clientes(vendedor: Optional[str] = None, buscar: Optional[str] = None,
+                    _u=Depends(get_admin_user)):
+    """Clientes para autocomplete. Si vendedor dado, filtra por CODIGOVENDEDOR."""
+    DB_PROD = 'c:/flexxus/DB/DB-Microbell.gdb'
+    params = []
+    where_parts = ["ACTIVO = '1'"]
+    if vendedor:
+        where_parts.append("UPPER(CODIGOVENDEDOR) = ?")
+        params.append(vendedor.upper())
+    if buscar:
+        where_parts.append(
+            "(UPPER(RAZONSOCIAL) CONTAINING UPPER(?) OR CODIGOCLIENTE CONTAINING ? OR CODIGOPARTICULAR CONTAINING ?)"
+        )
+        params += [buscar, buscar, buscar]
+    where_sql = " AND ".join(where_parts)
+    try:
+        c = conn('WIN1252', DB_PROD)
+        cur = c.cursor()
+        cur.execute(
+            f"SELECT FIRST 40 CODIGOCLIENTE, RAZONSOCIAL, CODIGOPARTICULAR "
+            f"FROM \"CLIENTES\" WHERE {where_sql} ORDER BY RAZONSOCIAL",
+            params
+        )
+        rows = cur.fetchall()
+        c.close()
+        return [{"codigo": (r[0] or '').strip(),
+                 "razonsocial": (r[1] or '').strip(),
+                 "codigoparticular": (r[2] or '').strip()} for r in rows]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _ventas_query(vendedor: Optional[str], cliente: Optional[str],
+                  desde: Optional[str], hasta: Optional[str], limit: int = 2000):
+    """Core query reutilizable por /ventas, /ventas/pdf y /ventas/excel."""
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+    DB_PROD     = 'c:/flexxus/DB/DB-Microbell.gdb'
+    DB_MLT_PROD = 'c:/flexxus/DB/DB-MLT-Microbell.gdb'
+    DBS_FACT    = [DATABASE, DATABASE_MLT, DB_PROD, DB_MLT_PROD]
+    DBS_LOOKUP  = [DATABASE, DB_PROD]
+
+    TIPOS_FACTURA = ("('FA','FB','FE','FCA','FCB','FCE',"
+                     "'FCCA','FCCB','FCCE',"
+                     "'NCA','NCB','NCCA','NCCB')")
+    TIPOS_NC = {'NCA', 'NCB', 'NCCA', 'NCCB'}
+
+    # Resolver códigos del cliente si se especificó
+    codigos_cliente = []
+    if cliente:
+        def _lookup(db_path):
+            try:
+                c = conn('WIN1252', db_path)
+                cur = c.cursor()
+                cur.execute(
+                    'SELECT CODIGOCLIENTE, CODIGOPARTICULAR FROM "CLIENTES" '
+                    'WHERE CODIGOCLIENTE = ? OR CODIGOPARTICULAR = ?',
+                    (cliente, cliente)
+                )
+                row = cur.fetchone()
+                c.close()
+                if row:
+                    return [str(v).strip() for v in row if v is not None and str(v).strip()]
+            except Exception:
+                pass
+            return []
+
+        codigos_set = set([str(cliente).strip()])
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            for r in ex.map(_lookup, DBS_LOOKUP):
+                codigos_set.update(r)
+        codigos_cliente = list(codigos_set)
+
+    # WHERE dinámico
+    where_parts = [f"cb.ANULADA = '0'", f"cb.TIPOCOMPROBANTE IN {TIPOS_FACTURA}"]
+    params_extra = []
+    if codigos_cliente:
+        ph = ','.join('?' * len(codigos_cliente))
+        where_parts.append(f"cb.CODIGOCLIENTE IN ({ph})")
+        params_extra += codigos_cliente
+    if vendedor:
+        where_parts.append("UPPER(TRIM(cb.CODIGOUSUARIO)) = ?")
+        params_extra.append(vendedor.upper())
+    if desde:
+        where_parts.append("cb.FECHACOMPROBANTE >= ?")
+        params_extra.append(desde)
+    if hasta:
+        where_parts.append("cb.FECHACOMPROBANTE <= ?")
+        params_extra.append(hasta)
+    where_sql = " AND ".join(where_parts)
+
+    sql = f"""
+        SELECT FIRST {limit} SKIP 0
+            TRIM(cu.CODIGOARTICULO)                                                  AS COD_ART,
+            COALESCE(NULLIF(TRIM(cu.DESCRIPCION),''), '')                            AS DESCR,
+            cb.FECHACOMPROBANTE,
+            cb.TIPOCOMPROBANTE,
+            cb.NUMEROCOMPROBANTE,
+            CAST(cu.CANTIDAD       AS DOUBLE PRECISION) AS CANT,
+            CAST(cu.PRECIOUNITARIO AS DOUBLE PRECISION) AS PU,
+            CAST(cu.PRECIOTOTAL    AS DOUBLE PRECISION) AS SUBTOTAL,
+            COALESCE(CAST(cu.PORCENTAJEIVA AS DOUBLE PRECISION), 21) AS IVA_PCT,
+            TRIM(cb.CODIGOCLIENTE)  AS COD_CLI,
+            TRIM(cb.RAZONSOCIAL)    AS RAZON,
+            TRIM(cb.CODIGOUSUARIO)  AS COD_VEND,
+            CAST(cu.COSTOVENTA AS DOUBLE PRECISION) AS COSTO_VENTA,
+            CAST(cb.TOTAL  AS DOUBLE PRECISION) AS CB_TOTAL,
+            CAST(cb.IVA1   AS DOUBLE PRECISION) AS CB_IVA1,
+            CAST(cb.IVA2   AS DOUBLE PRECISION) AS CB_IVA2,
+            CAST(cb.PAGADO AS DOUBLE PRECISION) AS CB_PAGADO
+        FROM "CUERPOCOMPROBANTES" cu
+        JOIN "CABEZACOMPROBANTES" cb
+             ON cb.TIPOCOMPROBANTE   = cu.TIPOCOMPROBANTE
+            AND cb.NUMEROCOMPROBANTE = cu.NUMEROCOMPROBANTE
+        WHERE {where_sql}
+        ORDER BY cb.FECHACOMPROBANTE DESC, cb.NUMEROCOMPROBANTE DESC
+    """
+
+    def _query_db(db_path):
+        try:
+            c = conn('LATIN1', db=db_path)
+            cur = c.cursor()
+            cur.execute(sql, params_extra)
+            rows = cur.fetchall()
+            c.close()
+            return rows
+        except Exception:
+            return []
+
+    all_rows = []
+    seen = set()
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        futs = {ex.submit(_query_db, db): db for db in DBS_FACT}
+        for f in futs:
+            try:
+                for r in f.result(timeout=25):
+                    key = (str(r[3]).strip(), str(r[4]).strip(), str(r[0]).strip(), str(r[9] or '').strip())
+                    if key not in seen:
+                        seen.add(key)
+                        all_rows.append(r)
+            except FutureTimeout:
+                pass
+
+    def _fmt(v):
+        if hasattr(v, 'strftime'):
+            return v.strftime('%Y-%m-%d')
+        return str(v)[:10] if v else ''
+
+    all_rows.sort(key=lambda r: (_fmt(r[2]), str(r[4] or '')), reverse=True)
+
+    result = []
+    for r in all_rows:
+        try:
+            tipo   = (r[3] or '').strip().upper()
+            signo  = -1 if tipo in TIPOS_NC else 1
+            cant   = signo * float(r[5] or 0)
+            pu     = float(r[6] or 0)
+            subtot = signo * float(r[7] or 0)
+            iva_pct= float(r[8] or 21)
+            total  = round(subtot * (1 + iva_pct / 100), 2)
+            # Porcentaje cobrado de la cabeza del comprobante
+            cb_total  = float(r[13] or 0) + float(r[14] or 0) + float(r[15] or 0)
+            cb_pagado = float(r[16] or 0)
+            if tipo in TIPOS_NC:
+                pct_cobrado = 1.0   # NC: comisión sobre el total (ya está aplicada a una FA)
+            elif cb_total > 0:
+                pct_cobrado = min(cb_pagado / cb_total, 1.0)
+            else:
+                pct_cobrado = 0.0
+            result.append({
+                "cod_articulo":    (r[0] or '').strip(),
+                "descripcion":     (r[1] or '').strip(),
+                "fecha":           _fmt(r[2]),
+                "tipo":            tipo,
+                "numero":          str(r[4] or '').strip().replace('.0', ''),
+                "cantidad":        cant,
+                "precio_unitario": pu,
+                "importe":         subtot,
+                "iva_pct":         iva_pct,
+                "total":           total,
+                "codigocliente":   (r[9]  or '').strip(),
+                "razonsocial":     (r[10] or '').strip(),
+                "codigovendedor":  (r[11] or '').strip(),
+                "costo_venta":      float(r[12] or 0),
+                "pct_cobrado":      round(pct_cobrado * 100, 1),
+            })
+        except Exception:
+            pass
+
+    # ── Enriquecimiento: costo, jerarquía y comisión ─────────────────────────
+    try:
+        DB_PROD = 'c:/flexxus/DB/DB-Microbell.gdb'
+        catalog, cambio_usd = _get_catalog()
+
+        # Índice inverso: por codigoparticular Y por codigoarticulo interno
+        cat_by_part: dict = {}
+        cat_by_art:  dict = {}
+        for art_id, art in catalog.items():
+            cp = art.get('codigoparticular', '').strip()
+            if cp:
+                cat_by_part[cp] = art
+            cat_by_art[str(art_id).strip()] = art
+
+        # Vendedor asociado al cliente (fallback para comisiones cuando
+        # CODIGOUSUARIO del comprobante no matchea tabla de comisiones)
+        cliente_vend_code = ''
+        if cliente and codigos_cliente:
+            for _db_cli in [DB_PROD, DATABASE]:
+                try:
+                    _c_cli = conn('WIN1252', db=_db_cli)
+                    _cur_cli = _c_cli.cursor()
+                    _ph_cli = ','.join(['?'] * len(codigos_cliente))
+                    _cur_cli.execute(
+                        f'SELECT FIRST 1 UPPER(TRIM(CODIGOVENDEDOR)) FROM "CLIENTES" '
+                        f'WHERE CODIGOCLIENTE IN ({_ph_cli}) AND ACTIVO=\'1\'',
+                        codigos_cliente)
+                    _row_cli = _cur_cli.fetchone()
+                    _c_cli.close()
+                    if _row_cli and _row_cli[0]:
+                        cliente_vend_code = (_row_cli[0] or '').strip().upper()
+                        break
+                except Exception:
+                    pass
+
+        # Costos — tomados de CUERPOCOMPROBANTES.COSTOVENTA (ya en cada row)
+
+        # Nombres de vendedores (CODIGOUSUARIO → RAZONSOCIAL uppercase)
+        # Busca en ambas bases para mayor cobertura
+        vend_nombre_map: dict = {}
+        for _db_vend in [DATABASE, DB_PROD]:
+            try:
+                _cu = conn('WIN1252', _db_vend)
+                _curu = _cu.cursor()
+                _curu.execute('SELECT CODIGOUSUARIO, RAZONSOCIAL FROM "USUARIOS"')
+                for row in _curu.fetchall():
+                    cu = (row[0] or '').strip().upper()
+                    if cu and cu not in vend_nombre_map:
+                        vend_nombre_map[cu] = (row[1] or '').strip().upper()
+                _cu.close()
+            except Exception:
+                pass
+
+        for r in result:
+            cod = r['cod_articulo']
+            # Buscar en catálogo: primero por codigoparticular, luego por código interno
+            art = cat_by_part.get(cod) or cat_by_art.get(cod) or {}
+            moneda = art.get('codigomoneda', '').upper()
+
+            # Costo de venta — COSTOVENTA es el total de la línea (no unitario)
+            _cant = abs(r['cantidad']) or 1
+            r['costo_total']    = round(r['costo_venta'], 2)
+            r['costo_unitario'] = round(r['costo_venta'] / _cant, 2)
+
+            # Jerarquía de categorías
+            gsr  = art.get('gruposuperrubro', '').upper()
+            sr   = art.get('superrubro',      '').upper()
+            rubr = art.get('rubro',           '').upper()
+            r['gruposuperrubro'] = gsr
+            r['superrubro']      = sr
+            r['rubro']           = rubr
+
+            # Comisión: usar vendedor del comprobante con fallback al vendedor del cliente
+            vend_code   = r['codigovendedor'].upper() or cliente_vend_code
+            vend_nombre = vend_nombre_map.get(vend_code, '')
+            if not vend_nombre and cliente_vend_code and vend_code != cliente_vend_code:
+                vend_nombre = vend_nombre_map.get(cliente_vend_code, '')
+            pct = _COMISIONES.get((vend_nombre, gsr, sr, rubr), 0)
+            pct_cob = r.get('pct_cobrado', 0) / 100.0  # 0.0–1.0
+            r['comision_pct']    = pct
+            # Comisión solo sobre la parte cobrada (NC siempre al 100%)
+            r['comision']        = round(r['importe'] * pct / 100 * pct_cob, 2)
+            r['vendedor_nombre'] = vend_nombre
+    except Exception:
+        # Si el enriquecimiento falla no rompemos el endpoint
+        for r in result:
+            r.setdefault('costo_unitario', 0)
+            r.setdefault('costo_total', 0)
+            r.setdefault('gruposuperrubro', '')
+            r.setdefault('superrubro', '')
+            r.setdefault('rubro', '')
+            r.setdefault('comision_pct', 0)
+            r.setdefault('comision', 0)
+            r.setdefault('vendedor_nombre', '')
+
+    return result
+
+
+@app.get("/ventas")
+def ventas(
+    vendedor: Optional[str] = None,
+    cliente:  Optional[str] = None,
+    desde:    Optional[str] = None,
+    hasta:    Optional[str] = None,
+    _u=Depends(get_admin_user)
+):
+    """Análisis de ventas para el panel admin. vendedor y cliente son opcionales."""
+    if not vendedor and not cliente and not desde and not hasta:
+        raise HTTPException(status_code=400, detail="Especificá al menos un filtro (vendedor, cliente o período).")
+    return _ventas_query(vendedor=vendedor, cliente=cliente, desde=desde, hasta=hasta)
+
+
+@app.get("/ventas/pdf")
+def ventas_pdf(
+    vendedor: Optional[str] = None,
+    cliente:  Optional[str] = None,
+    desde:    Optional[str] = None,
+    hasta:    Optional[str] = None,
+    titulo:   Optional[str] = None,
+    _u=Depends(get_admin_user)
+):
+    from reportlab.lib.pagesizes import landscape, A4
+    from reportlab.lib.units import mm
+    from reportlab.lib import colors
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Image
+    from reportlab.lib.styles import ParagraphStyle
+    from io import BytesIO
+    from datetime import datetime
+
+    rows = _ventas_query(vendedor=vendedor, cliente=cliente, desde=desde, hasta=hasta)
+
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=landscape(A4),
+                            leftMargin=12*mm, rightMargin=12*mm,
+                            topMargin=10*mm, bottomMargin=10*mm)
+
+    azul = colors.HexColor('#1e429f')
+    AR   = lambda v: f"{float(v or 0):,.2f}".replace(',','X').replace('.',',').replace('X','.')
+    sDesc= ParagraphStyle('desc', fontSize=7, fontName='Helvetica', leading=8)
+    sHdr = ParagraphStyle('hdr',  fontSize=7, fontName='Helvetica-Bold',
+                          textColor=colors.white, leading=8, alignment=1)
+    sSub = ParagraphStyle('sub',  fontSize=8, fontName='Helvetica', leading=10)
+    sTit = ParagraphStyle('tit',  fontSize=12, fontName='Helvetica-Bold', leading=14)
+
+    per = f"{desde or ''} a {hasta or ''}"
+    emi = datetime.now().strftime('%d/%m/%Y %H:%M')
+    sub_linea = titulo or (f"Vendedor: {vendedor}" if vendedor else '') + (' | ' if vendedor and cliente else '') + (f"Cliente: {cliente}" if cliente else '')
+    logo_cell = ''
+    if os.path.exists(LOGO_PATH):
+        logo_cell = Image(LOGO_PATH, width=38*mm, height=12*mm, kind='proportional')
+    hdr_table = Table(
+        [[logo_cell,
+          [Paragraph('Microbell S.A. — Análisis de Ventas', sTit),
+           Paragraph(sub_linea, sSub),
+           Paragraph(f'Período: {per}   |   Emisión: {emi}', sSub)]]],
+        colWidths=[42*mm, 231*mm]
+    )
+    hdr_table.setStyle(TableStyle([
+        ('VALIGN',  (0,0),(-1,-1), 'MIDDLE'),
+        ('ALIGN',   (1,0),(1,0),   'LEFT'),
+        ('LEFTPADDING',  (0,0),(-1,-1), 0),
+        ('RIGHTPADDING', (0,0),(-1,-1), 4),
+        ('TOPPADDING',   (0,0),(-1,-1), 0),
+        ('BOTTOMPADDING',(0,0),(-1,-1), 4),
+    ]))
+
+    # CodArt Descripcion Cliente Fecha Tipo Nro Cant PUnit Importe IVA Total
+    cw  = [14*mm, 70*mm, 50*mm, 16*mm, 10*mm, 22*mm, 11*mm, 18*mm, 18*mm, 8*mm, 18*mm]
+    hdrs = [Paragraph(h, sHdr) for h in
+            ['Cód.Art.','Descripción','Cliente','Fecha','Tipo','Nro. Comp.','Cant.','P.Unit.','Importe','IVA%','Total']]
+    data = [hdrs]
+    tot_imp = tot_tot = 0.0
+    for r in rows:
+        nro   = str(r['numero']).replace('.0','').zfill(10)
+        fecha = r['fecha'][8:10]+'/'+r['fecha'][5:7]+'/'+r['fecha'][:4] if r['fecha'] else ''
+        tot_imp += float(r['importe'] or 0)
+        tot_tot += float(r['total']   or 0)
+        data.append([
+            r['cod_articulo'],
+            Paragraph(r['descripcion'], sDesc),
+            Paragraph(r['razonsocial'], sDesc),
+            fecha, r['tipo'], nro,
+            str(int(float(r['cantidad'] or 0))),
+            f"${AR(r['precio_unitario'])}",
+            f"${AR(r['importe'])}", AR(r['iva_pct']), f"${AR(r['total'])}",
+        ])
+    data.append(['','','','','','','',
+                 Paragraph('TOTALES', ParagraphStyle('tb', fontSize=7, fontName='Helvetica-Bold')),
+                 f"${AR(tot_imp)}", '', f"${AR(tot_tot)}"])
+
+    t = Table(data, colWidths=cw, repeatRows=1)
+    t.setStyle(TableStyle([
+        ('BACKGROUND',    (0,0),  (-1,0),  azul),
+        ('ROWBACKGROUNDS',(0,1),  (-1,-2), [colors.white, colors.HexColor('#f3f4f6')]),
+        ('BACKGROUND',    (0,-1), (-1,-1), colors.HexColor('#e0e7ff')),
+        ('FONTNAME',      (0,1),  (-1,-1), 'Helvetica'),
+        ('FONTNAME',      (0,-1), (-1,-1), 'Helvetica-Bold'),
+        ('FONTSIZE',      (0,0),  (-1,-1), 7),
+        ('ALIGN',         (0,0),  (-1,-1), 'LEFT'),
+        ('ALIGN',         (0,0),  (-1,0),  'CENTER'),
+        ('ALIGN',         (3,0),  (3,-1),  'CENTER'),
+        ('ALIGN',         (4,0),  (4,-1),  'CENTER'),
+        ('ALIGN',         (5,0),  (5,-1),  'CENTER'),
+        ('ALIGN',         (6,0),  (6,-1),  'CENTER'),
+        ('ALIGN',         (7,0),  (-1,-1), 'RIGHT'),
+        ('VALIGN',        (0,0),  (-1,-1), 'MIDDLE'),
+        ('GRID',          (0,0),  (-1,-1), 0.3, colors.HexColor('#d1d5db')),
+        ('TOPPADDING',    (0,0),  (-1,-1), 2),
+        ('BOTTOMPADDING', (0,0),  (-1,-1), 2),
+        ('LEFTPADDING',   (0,0),  (-1,-1), 3),
+        ('RIGHTPADDING',  (0,0),  (-1,-1), 3),
+    ]))
+
+    doc.build([hdr_table, t])
+    buf.seek(0)
+    from fastapi.responses import StreamingResponse
+    return StreamingResponse(buf, media_type='application/pdf',
+        headers={'Content-Disposition': 'inline; filename="ventas.pdf"'})
+
+
+@app.get("/ventas/excel")
+def ventas_excel(
+    vendedor: Optional[str] = None,
+    cliente:  Optional[str] = None,
+    desde:    Optional[str] = None,
+    hasta:    Optional[str] = None,
+    _u=Depends(get_admin_user)
+):
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+    from io import BytesIO
+
+    rows = _ventas_query(vendedor=vendedor, cliente=cliente, desde=desde, hasta=hasta)
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = 'Ventas'
+
+    azul  = PatternFill('solid', fgColor='1e429f')
+    gris  = PatternFill('solid', fgColor='f3f4f6')
+    azulc = PatternFill('solid', fgColor='e0e7ff')
+    bF    = Font(bold=True, color='FFFFFF', size=9)
+    bN    = Font(bold=True, size=9)
+    nN    = Font(size=9)
+    cen   = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    der   = Alignment(horizontal='right',  vertical='center')
+    izq   = Alignment(horizontal='left',   vertical='center', wrap_text=True)
+    thin  = Side(style='thin', color='d1d5db')
+    brd   = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    hdrs   = ['Cód.Art.','Descripción','Cliente','Vendedor','Fecha','Tipo','Nro. Comp.','Cant.','P.Unit.','Importe','IVA%','Total']
+    widths = [12,         45,           35,        15,       12,     8,     14,           10,     16,       16,      8,     16]
+    for ci, (h, w) in enumerate(zip(hdrs, widths), 1):
+        cell = ws.cell(row=1, column=ci, value=h)
+        cell.fill = azul; cell.font = bF; cell.alignment = cen; cell.border = brd
+        ws.column_dimensions[get_column_letter(ci)].width = w
+
+    tot_imp = tot_tot = 0.0
+    for ri, r in enumerate(rows, 2):
+        nro   = str(r['numero']).replace('.0','').zfill(10)
+        fg    = None if ri % 2 == 0 else gris
+        fecha = r['fecha'][8:10]+'/'+r['fecha'][5:7]+'/'+r['fecha'][:4] if r['fecha'] else ''
+        vals  = [r['cod_articulo'], r['descripcion'], r['razonsocial'], r['codigovendedor'],
+                 fecha, r['tipo'], nro,
+                 float(r['cantidad'] or 0), float(r['precio_unitario'] or 0),
+                 float(r['importe'] or 0), float(r['iva_pct'] or 0), float(r['total'] or 0)]
+        tot_imp += float(r['importe'] or 0); tot_tot += float(r['total'] or 0)
+        aligns = [cen, izq, izq, cen, cen, cen, cen, cen, der, der, der, der]
+        for ci, (v, al) in enumerate(zip(vals, aligns), 1):
+            cell = ws.cell(row=ri, column=ci, value=v)
+            cell.font = nN; cell.alignment = al; cell.border = brd
+            if fg: cell.fill = fg
+            if ci == 8:             cell.number_format = '#,##0'
+            elif ci in (9, 10, 12): cell.number_format = '"$"#,##0.00'
+            elif ci == 11:          cell.number_format = '#,##0.00'
+
+    tr = len(rows) + 2
+    for ci, v in enumerate(['']*8 + ['TOTALES', tot_imp, '', tot_tot], 1):
+        cell = ws.cell(row=tr, column=ci, value=v)
+        cell.fill = azulc; cell.font = bN; cell.border = brd
+        cell.alignment = der if ci >= 8 else cen
+        if ci in (10, 12): cell.number_format = '"$"#,##0.00'
+
+    buf = BytesIO(); wb.save(buf); buf.seek(0)
+    from fastapi.responses import StreamingResponse
+    return StreamingResponse(buf,
+        media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        headers={'Content-Disposition': 'attachment; filename="ventas.xlsx"'})
 
 
 @app.get("/resumen-deudas")
@@ -8845,7 +9579,7 @@ _BANCOS = [
     ('HSBC','1500607500060732055732','607','607-3-205573'),
     ('Galicia','0070154520000005006724','154','5006-7-154/2'),
 ]
-_CVU = 'E-mail: marketing@microbellsa.com.ar\nCVU: 000000310000004756934965'
+_CVU = 'E-mail: marketing@microbellsa.com.ar\nCVU: 0000003100004756934965'
 
 def _fmt_num(numero: str):
     """4400014918.0 → ('0044','00014918','0044-00014918')"""
@@ -8904,20 +9638,20 @@ def comprobante_pdf_route(tipo: str, numero: str):
     if not cab:
         raise HTTPException(404, f"{tipo} {numero} no encontrado")
 
-    # ── 2. CAE (solo Línea 1) ──────────────────────────────────────────────────
+    # ── 2. CAE (L1 y SW — ambos sistemas emiten facturas electrónicas con CAE) ──
     cae = None; vto_cae = None
-    if not is_mlt:
-        for db_path in [found_db, DATABASE, DB_PROD]:
-            try:
-                c = conn('WIN1252', db=db_path)
-                cur = c.cursor()
-                cur.execute('SELECT CAE,VENCIMIENTOCAE FROM "CAEAFIP" WHERE TIPOCOMPROBANTE=? AND NUMEROCOMPROBANTE=?',(tipo,numero))
-                r = cur.fetchone(); c.close()
-                if r and r[0]:
-                    cae = str(r[0]).strip()
-                    vto_cae = r[1]; break
-            except Exception:
-                pass
+    _dbs_cae = [found_db, DATABASE, DB_PROD] if not is_mlt else [found_db, DATABASE_MLT, DB_MLT_PROD]
+    for db_path in _dbs_cae:
+        try:
+            c = conn('WIN1252', db=db_path)
+            cur = c.cursor()
+            cur.execute('SELECT CAE,VENCIMIENTOCAE FROM "CAEAFIP" WHERE TIPOCOMPROBANTE=? AND NUMEROCOMPROBANTE=?',(tipo,numero))
+            r = cur.fetchone(); c.close()
+            if r and r[0]:
+                cae = str(r[0]).strip()
+                vto_cae = r[1]; break
+        except Exception:
+            pass
 
     # ── 2b. Despachos (solo Línea 1) ──────────────────────────────────────────
     # Busca despachos por los códigos de artículo que componen la factura
@@ -9020,6 +9754,53 @@ def comprobante_pdf_route(tipo: str, numero: str):
     cw = W - 2*m  # ancho útil
 
     story = []
+
+    # ── Helper QR compartido (L1 y SW) ───────────────────────────────────────
+    def _make_qr_img(url, w=32*mm, h=32*mm):
+        """Genera imagen QR para ReportLab. Auto-instala qrcode si falta."""
+        try:
+            import qrcode as _qrc
+        except ImportError:
+            import subprocess as _sp, sys as _sys
+            _sp.check_call(
+                [_sys.executable, '-m', 'pip', 'install', 'qrcode[pil]', '--break-system-packages', '-q'],
+                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+            import qrcode as _qrc
+        _qr = _qrc.QRCode(error_correction=_qrc.constants.ERROR_CORRECT_L, box_size=6, border=2)
+        _qr.add_data(url); _qr.make(fit=True)
+        # Intento 1: PIL/Pillow
+        try:
+            _img = _qr.make_image(fill_color='black', back_color='white')
+            _buf = BytesIO(); _img.save(_buf, format='PNG'); _buf.seek(0)
+            return Image(_buf, width=w, height=h)
+        except Exception:
+            pass
+        # Intento 2: PyPNGImage (sin Pillow)
+        try:
+            from qrcode.image.pure import PyPNGImage
+            _img = _qr.make_image(image_factory=PyPNGImage)
+            _buf = BytesIO(); _img.save(_buf); _buf.seek(0)
+            return Image(_buf, width=w, height=h)
+        except Exception:
+            pass
+        # Intento 3: PNG puro via struct+zlib (sin dependencias externas)
+        import struct as _st, zlib as _zl
+        _mat = _qr.modules; _sz = len(_mat); _sc = 8
+        _rows = []
+        for _row in _mat:
+            _rb = b'\x00'
+            for _c in _row:
+                _rb += (b'\x00\x00\x00' if _c else b'\xff\xff\xff') * _sc
+            _rows.extend([_rb] * _sc)
+        _raw = b''.join(_rows); _iw = _ih = _sz * _sc
+        def _ck(_t, _d):
+            _cd = _t + _d
+            return _st.pack('>I', len(_d)) + _cd + _st.pack('>I', _zl.crc32(_cd) & 0xffffffff)
+        _png = (b'\x89PNG\r\n\x1a\n'
+                + _ck(b'IHDR', _st.pack('>IIBBBBB', _iw, _ih, 8, 2, 0, 0, 0))
+                + _ck(b'IDAT', _zl.compress(_raw))
+                + _ck(b'IEND', b''))
+        return Image(BytesIO(_png), width=w, height=h)
 
     if is_mlt:
         # ══════════════════════════════════════════════════════════════════════
@@ -9126,7 +9907,7 @@ def comprobante_pdf_route(tipo: str, numero: str):
             story.append(Paragraph(f'<b>Observaciones:</b> {obs_sw}', sN))
             story.append(Spacer(1,4))
 
-        story.append(BottomSpacer(65*mm))   # empuja footer al pie
+        story.append(BottomSpacer(105*mm))  # empuja footer al pie (banco + QR ~105mm)
 
         # Tabla bancaria compacta (125mm) centrada
         bw = [26*mm, 46*mm, 18*mm, 26*mm]   # total ~116mm
@@ -9167,6 +9948,71 @@ def comprobante_pdf_route(tipo: str, numero: str):
             ('ALIGN',(0,0),(-1,-1),'CENTER'),
         ]))
         story.append(KeepTogether([footer_sw]))
+
+        # QR ARCA/CAE + QR sitio web (igual que Línea 1)
+        story.append(HRFlowable(width=cw, thickness=0.5, color=colors.grey, spaceAfter=6))
+        if cae:
+            vto_cae_str_sw = ''
+            if vto_cae:
+                try: vto_cae_str_sw = vto_cae.strftime('%d/%m/%Y')
+                except Exception: vto_cae_str_sw = str(vto_cae)[:10]
+            import json as _json_sw, base64 as _b64_sw, urllib.parse as _uparse_sw
+            _TIPO_AFIP_MAP_SW = {
+                'FA':1,'NDA':2,'NCA':3,'FB':6,'NDB':7,'NCB':8,
+                'FCA':201,'FCB':206,'FE':19,'NCE':13,'NDE':12,
+            }
+            pv_sw, seq_sw, _ = _fmt_num(numero)
+            try: pv_int_sw = int(pv_sw)
+            except Exception: pv_int_sw = 1
+            try: seq_int_sw = int(seq_sw)
+            except Exception: seq_int_sw = 0
+            fecha_afip_sw = ''
+            if cab.get('FECHACOMPROBANTE'):
+                try: fecha_afip_sw = cab['FECHACOMPROBANTE'].strftime('%Y-%m-%d')
+                except Exception: fecha_afip_sw = str(cab['FECHACOMPROBANTE'])[:10]
+            gran_total_sw_cae = float(cab.get('TOTAL',0) or 0) + float(cab.get('IVA1',0) or 0) + float(cab.get('IVA2',0) or 0)
+            cuit_sw_raw = str(cab.get('CUIT','0') or '0')
+            cuit_sw_num = int(''.join(c for c in cuit_sw_raw if c.isdigit()) or '0')
+            qr_data_sw = {
+                "ver":1, "fecha":fecha_afip_sw,
+                "cuit":30708390182, "ptoVta":pv_int_sw,
+                "tipoCmp":_TIPO_AFIP_MAP_SW.get(tipo,6), "nroCmp":seq_int_sw,
+                "importe":round(gran_total_sw_cae,2),
+                "moneda":"PES", "ctz":1,
+                "tipoDocRec":80, "nroDocRec":cuit_sw_num,
+                "tipoCodAut":"E", "codAut":int(cae) if cae.isdigit() else 0
+            }
+            _jb_sw = _json_sw.dumps(qr_data_sw, separators=(',',':')).encode()
+            qr_b64_sw = _b64_sw.b64encode(_jb_sw).decode().rstrip('=')
+            qr_afip_url_sw = 'https://servicioscf.afip.gob.ar/publico/comprobantes/cae.aspx?p=' + _uparse_sw.quote(qr_b64_sw, safe='')
+            qr_web_url_sw  = 'https://www.microbellsa.com'
+            # SW: solo QR sitio web Microbell (derecha) — sin QR AFIP
+            qr_ir = None
+            try:
+                qr_ir = _make_qr_img(qr_web_url_sw)
+            except Exception as _qe_sw:
+                qr_ir = Paragraph(f'[{type(_qe_sw).__name__}]', sN)
+            sCAEc_sw = ParagraphStyle('sCAEc_sw', fontSize=8, leading=11, fontName='Helvetica')
+            sCAEb_sw = ParagraphStyle('sCAEb_sw', fontSize=8, leading=11, fontName='Helvetica-Bold')
+            cae_center_sw = [
+                Paragraph('Factura Electrónica / CAE:', sCAEc_sw),
+                Paragraph(f'<b>{cae}</b>', sCAEb_sw),
+                Spacer(1,4),
+                Paragraph('Fecha Vencimiento CAE:', sCAEc_sw),
+                Paragraph(f'<b>{vto_cae_str_sw}</b>', sCAEb_sw),
+            ]
+            qr_w_sw = 34*mm
+            mid_w_sw = cw - qr_w_sw  # solo columna CAE + QR derecha
+            cae_tbl_sw = Table([[cae_center_sw, qr_ir]], colWidths=[mid_w_sw, qr_w_sw])
+            cae_tbl_sw.setStyle(TableStyle([
+                ('VALIGN',(0,0),(-1,-1),'MIDDLE'),
+                ('ALIGN',(0,0),(0,-1),'LEFT'),
+                ('ALIGN',(1,0),(1,-1),'RIGHT'),
+                ('TOPPADDING',(0,0),(-1,-1),2),('BOTTOMPADDING',(0,0),(-1,-1),2),
+            ]))
+            story.append(cae_tbl_sw)
+        else:
+            story.append(Paragraph('Factura Electrónica / CAE: (pendiente)', sN))
 
     else:
         # ══════════════════════════════════════════════════════════════════════
@@ -9299,9 +10145,7 @@ def comprobante_pdf_route(tipo: str, numero: str):
                                    ParagraphStyle('sDesp', fontSize=7, leading=9,
                                                   fontName='Helvetica', wordWrap='CJK')))
 
-        story.append(BottomSpacer(95*mm))   # empuja footer al pie
-
-        # Footer: cuentas bancarias centradas + totales IVA derecha
+        # Footer: cuentas bancarias + totales en flujo normal (antes del BottomSpacer)
         obs   = str(cab.get('COMENTARIOS','') or '').strip()
         cotiz = float(cab.get('COTIZACION',1) or 1)
         total_cab = float(cab.get('TOTAL',0) or 0)
@@ -9310,7 +10154,7 @@ def comprobante_pdf_route(tipo: str, numero: str):
         gran_total = total_cab + iva1_cab + iva2_cab
         dto_total  = float(cab.get('DESCUENTOMONTO',0) or 0)
 
-        bw_l1 = [26*mm, 46*mm, 18*mm, 26*mm]   # 116mm total — compacto, centrado
+        bw_l1 = [26*mm, 46*mm, 18*mm, 26*mm]   # 116mm total
         bk_data = [[Paragraph('<b>CUENTAS BANCARIAS</b>', sTc), '', '', '']]
         bk_data.append([Paragraph('<b>BANCO</b>',sNb),Paragraph('<b>CBU</b>',sNb),Paragraph('<b>SUC.</b>',sNb),Paragraph('<b>CTA. CTE.</b>',sNb)])
         for b,cbu,suc,cta in _BANCOS:
@@ -9342,15 +10186,19 @@ def comprobante_pdf_route(tipo: str, numero: str):
             ('LINEABOVE',(0,-1),(-1,-1),1.5,CELESTE),
         ]))
 
-        bk_total_l1 = sum(bw_l1)         # 116mm
-        tot_total_l1 = 72*mm             # 32+40
-        pad_l1 = (cw - bk_total_l1 - tot_total_l1) / 2  # centra banco dejando totales a la derecha
+        bk_total_l1 = sum(bw_l1)
+        tot_total_l1 = 72*mm
+        pad_l1 = (cw - bk_total_l1 - tot_total_l1) / 2
 
         footer_tbl = Table(
             [[Spacer(1,1), bk_tbl, Spacer(1,4), tot_tbl]],
             colWidths=[pad_l1, bk_total_l1, 4*mm, tot_total_l1]
         )
         footer_tbl.setStyle(TableStyle([('VALIGN',(0,0),(-1,-1),'BOTTOM')]))
+
+        # Todo el footer al pie de página (banco + totales + obs + QR)
+        story.append(BottomSpacer(95*mm))
+
         footer_items = [footer_tbl]
         if obs:
             footer_items.append(Spacer(1,3))
@@ -9358,13 +10206,13 @@ def comprobante_pdf_route(tipo: str, numero: str):
         footer_items.append(Paragraph(f'Tipo de Cambio: $ {cotiz:.2f}', sN))
         footer_items.append(Spacer(1,8))
         footer_items.append(HRFlowable(width=cw, thickness=0.5, color=colors.grey, spaceAfter=6))
+
         if cae:
             vto_cae_str = ''
             if vto_cae:
                 try: vto_cae_str = vto_cae.strftime('%d/%m/%Y')
                 except Exception: vto_cae_str = str(vto_cae)[:10]
 
-            # Construir URL QR AFIP
             import json as _json, base64 as _b64
             _TIPO_AFIP_MAP = {
                 'FA':1,'NDA':2,'NCA':3,'FB':6,'NDB':7,'NCB':8,
@@ -9388,35 +10236,21 @@ def comprobante_pdf_route(tipo: str, numero: str):
                 "tipoDocRec":80, "nroDocRec":cuit_rec_num,
                 "tipoCodAut":"E", "codAut":int(cae)
             }
-            # Base64 estándar (sin padding) — mismo formato que ARCA emite
             import urllib.parse as _uparse
             _json_bytes = _json.dumps(qr_data, separators=(',',':')).encode()
             qr_b64 = _b64.b64encode(_json_bytes).decode().rstrip('=')
-            # URL-encode el parámetro para que + y / no rompan la URL
             qr_afip_url = ('https://servicioscf.afip.gob.ar/publico/comprobantes/cae.aspx?p='
                            + _uparse.quote(qr_b64, safe=''))
-            # URL sitio web empresa (derecho)
             qr_web_url = 'https://www.microbellsa.com'
 
-            # Generar imágenes QR
             qr_img_l = qr_img_r = None
             try:
-                import qrcode as _qrc
-                # QR izquierdo: AFIP CAE — ERROR_CORRECT_L para menor densidad y mejor escaneo
-                _qr_l = _qrc.QRCode(error_correction=_qrc.constants.ERROR_CORRECT_L, box_size=6, border=2)
-                _qr_l.add_data(qr_afip_url); _qr_l.make(fit=True)
-                _pil_l = _qr_l.make_image(fill_color='black', back_color='white')
-                _buf_l = BytesIO(); _pil_l.save(_buf_l, format='PNG'); _buf_l.seek(0)
-                qr_img_l = Image(_buf_l, width=32*mm, height=32*mm)
-                # QR derecho: sitio web empresa — URL corta, baja densidad
-                _qr_r = _qrc.QRCode(error_correction=_qrc.constants.ERROR_CORRECT_L, box_size=6, border=2)
-                _qr_r.add_data(qr_web_url); _qr_r.make(fit=True)
-                _pil_r = _qr_r.make_image(fill_color='black', back_color='white')
-                _buf_r = BytesIO(); _pil_r.save(_buf_r, format='PNG'); _buf_r.seek(0)
-                qr_img_r = Image(_buf_r, width=32*mm, height=32*mm)
-            except Exception:
-                qr_img_l = Paragraph('[ QR AFIP ]', sN)
-                qr_img_r = Paragraph('[ QR Web ]', sN)
+                qr_img_l = _make_qr_img(qr_afip_url)
+                qr_img_r = _make_qr_img(qr_web_url)
+            except Exception as _qe:
+                _qe_txt = f'[{type(_qe).__name__}]'
+                qr_img_l = Paragraph(_qe_txt, sN)
+                qr_img_r = Paragraph(_qe_txt, sN)
 
             sCAEc = ParagraphStyle('sCAEc', fontSize=8, leading=11, fontName='Helvetica')
             sCAEb = ParagraphStyle('sCAEb', fontSize=8, leading=11, fontName='Helvetica-Bold')
@@ -9428,16 +10262,40 @@ def comprobante_pdf_route(tipo: str, numero: str):
                 Paragraph(f'<b>{vto_cae_str}</b>', sCAEb),
             ]
             qr_w = 34*mm
-            mid_w = cw - 2*qr_w
-            cae_tbl = Table([[qr_img_l, cae_center, qr_img_r]],
-                            colWidths=[qr_w, mid_w, qr_w])
-            cae_tbl.setStyle(TableStyle([
-                ('VALIGN',(0,0),(-1,-1),'MIDDLE'),
-                ('ALIGN',(0,0),(0,-1),'LEFT'),
-                ('ALIGN',(2,0),(2,-1),'RIGHT'),
-                ('ALIGN',(1,0),(1,-1),'LEFT'),
-                ('TOPPADDING',(0,0),(-1,-1),2),('BOTTOMPADDING',(0,0),(-1,-1),2),
-            ]))
+            # QR Mercado Pago — solo para Facturas tipo A
+            import os as _os_mp
+            _QR_MP_PATH = _os_mp.path.join(_os_mp.path.dirname(__file__), 'qr_mercadopago.jpeg')
+            _qr_mp_cell = None
+            if tipo.upper() in ('FA','FCA','FCE','FCCA','FCCE') and _os_mp.path.exists(_QR_MP_PATH):
+                from reportlab.platypus import Image as _RLImgMP
+                _sMP = ParagraphStyle('sMP', fontSize=6, fontName='Helvetica-Bold',
+                                      alignment=TA_CENTER, leading=7, textColor=colors.HexColor('#009ee3'))
+                _qr_mp_cell = [_RLImgMP(_QR_MP_PATH, width=qr_w, height=qr_w),
+                               Paragraph('Mercado Pago', _sMP)]
+
+            if _qr_mp_cell:
+                mid_w = cw - 3*qr_w
+                cae_tbl = Table([[qr_img_l, cae_center, _qr_mp_cell, qr_img_r]],
+                                colWidths=[qr_w, mid_w, qr_w, qr_w])
+                cae_tbl.setStyle(TableStyle([
+                    ('VALIGN',(0,0),(-1,-1),'MIDDLE'),
+                    ('ALIGN',(0,0),(0,-1),'LEFT'),
+                    ('ALIGN',(2,0),(2,-1),'CENTER'),
+                    ('ALIGN',(3,0),(3,-1),'RIGHT'),
+                    ('ALIGN',(1,0),(1,-1),'LEFT'),
+                    ('TOPPADDING',(0,0),(-1,-1),2),('BOTTOMPADDING',(0,0),(-1,-1),2),
+                ]))
+            else:
+                mid_w = cw - 2*qr_w
+                cae_tbl = Table([[qr_img_l, cae_center, qr_img_r]],
+                                colWidths=[qr_w, mid_w, qr_w])
+                cae_tbl.setStyle(TableStyle([
+                    ('VALIGN',(0,0),(-1,-1),'MIDDLE'),
+                    ('ALIGN',(0,0),(0,-1),'LEFT'),
+                    ('ALIGN',(2,0),(2,-1),'RIGHT'),
+                    ('ALIGN',(1,0),(1,-1),'LEFT'),
+                    ('TOPPADDING',(0,0),(-1,-1),2),('BOTTOMPADDING',(0,0),(-1,-1),2),
+                ]))
             footer_items.append(cae_tbl)
         else:
             footer_items.append(Paragraph('Factura Electrónica / CAE: (pendiente)', sN))
@@ -11723,7 +12581,6 @@ def debug_mlt_tablas_pedidos():
             res["cabezacomprobantes_NP_error"] = str(e)
         # Contar NP en CABEZAPEDIDOS si existe
         try:
-            cur.execute("SELECT COUNT(*) FROM \"CABEZAPEDIDOS\" WHERE TIPOCOMPROBANTE='NP'")
             res["cabezapedidos_NP"] = cur.fetchone()[0]
         except Exception as e:
             res["cabezapedidos_NP_error"] = str(e)
@@ -12284,6 +13141,108 @@ def debug_gap2_akrafft():
     except Exception as e:
         result["error_sin_cta"] = str(e)
 
+
+# ─── Debug: estructura de pagos en Flexxus para comisiones ───────────────────
+@app.get("/debug/pagos-estructura")
+def debug_pagos_estructura(vendedor: str = 'RBOCHOR', _u=Depends(get_admin_user)):
+    """
+    Inspecciona cómo Flexxus registra los pagos de facturas.
+    Muestra:
+    - Tablas del sistema que contienen 'RECIBO','COBRO','IMPUTAC','PAGO'
+    - Columnas de CABEZACOMPROBANTES relacionadas con pago
+    - Muestra FA/NCA de un vendedor con TOTAL, IVA1, IVA2, PAGADO y % cobrado
+    """
+    DB_PROD = 'c:/flexxus/DB/DB-Microbell.gdb'
+    result = {}
+
+    def _q(sql, params=()):
+        c = conn('WIN1252', DB_PROD)
+        cur = c.cursor()
+        cur.execute(sql, params)
+        rows = cur.fetchall()
+        cols = [d[0] for d in cur.description] if cur.description else []
+        c.close()
+        return cols, rows
+
+    # 1. Tablas del sistema relacionadas con pagos/cobros
+    try:
+        cols, rows = _q(
+            "SELECT TRIM(RDB$RELATION_NAME) FROM RDB$RELATIONS "
+            "WHERE RDB$SYSTEM_FLAG=0 AND RDB$VIEW_BLR IS NULL "
+            "ORDER BY RDB$RELATION_NAME"
+        )
+        all_tables = [r[0] for r in rows if r[0]]
+        pago_tables = [t for t in all_tables if any(
+            x in t.upper() for x in ['RECIBO','COBRO','IMPUTAC','PAGO','APLICA','CAJA','BANCO']
+        )]
+        result["tablas_pago_relacionadas"] = pago_tables
+        result["total_tablas"] = len(all_tables)
+    except Exception as e:
+        result["error_tablas"] = str(e)
+
+    # 2. Columnas de CABEZACOMPROBANTES (campo PAGADO y relacionados)
+    try:
+        cols, rows = _q(
+            "SELECT TRIM(RDB$FIELD_NAME) FROM RDB$RELATION_FIELDS "
+            "WHERE RDB$RELATION_NAME='CABEZACOMPROBANTES' "
+            "ORDER BY RDB$FIELD_POSITION"
+        )
+        all_cols = [r[0] for r in rows if r[0]]
+        pago_cols = [c for c in all_cols if any(
+            x in c.upper() for x in ['PAG','COBR','SALDO','CANCEL','IMPUT']
+        )]
+        result["cols_pago_en_cabeza"] = pago_cols
+    except Exception as e:
+        result["error_cols"] = str(e)
+
+    # 3. Muestra de FA/NCA del vendedor con estado de pago
+    try:
+        cols, rows = _q(
+            "SELECT FIRST 20 TIPOCOMPROBANTE, NUMEROCOMPROBANTE, FECHACOMPROBANTE, "
+            "CAST(TOTAL AS DOUBLE PRECISION), CAST(IVA1 AS DOUBLE PRECISION), "
+            "CAST(IVA2 AS DOUBLE PRECISION), CAST(PAGADO AS DOUBLE PRECISION), "
+            "CODIGOCLIENTE "
+            "FROM \"CABEZACOMPROBANTES\" "
+            "WHERE UPPER(TRIM(CODIGOUSUARIO))=? AND ANULADA='0' "
+            "AND TIPOCOMPROBANTE IN ('FA','NCA','FCA','NCB') "
+            "ORDER BY FECHACOMPROBANTE DESC",
+            (vendedor.upper(),)
+        )
+        muestra = []
+        for r in rows:
+            tipo, num, fecha = str(r[0]).strip(), str(r[1]).strip(), r[2]
+            total = float(r[3] or 0); iva1 = float(r[4] or 0); iva2 = float(r[5] or 0)
+            pagado = float(r[6] or 0); cli = str(r[7] or '').strip()
+            gran_total = total + iva1 + iva2
+            pct = round(pagado / gran_total * 100, 1) if gran_total > 0 else 0
+            muestra.append({
+                "tipo": tipo, "numero": num,
+                "fecha": fecha.strftime('%Y-%m-%d') if hasattr(fecha,'strftime') else str(fecha)[:10],
+                "total": round(gran_total, 2), "pagado": round(pagado, 2),
+                "deuda": round(gran_total - pagado, 2), "pct_cobrado": pct,
+                "cliente": cli
+            })
+        result["muestra_fa_nca"] = muestra
+    except Exception as e:
+        result["error_muestra"] = str(e)
+
+    # 4. Si existe tabla RECIBOS, mostrar sus columnas
+    for tabla in (result.get("tablas_pago_relacionadas") or []):
+        try:
+            _, rows2 = _q(
+                "SELECT FIRST 3 * FROM \"" + tabla + "\""
+            )
+            _, col_rows = _q(
+                "SELECT TRIM(RDB$FIELD_NAME) FROM RDB$RELATION_FIELDS "
+                f"WHERE RDB$RELATION_NAME='{tabla}' ORDER BY RDB$FIELD_POSITION"
+            )
+            result[f"cols_{tabla}"] = [r[0] for r in col_rows if r[0]]
+            result[f"sample_{tabla}_count"] = len(rows2)
+        except Exception as e:
+            result[f"error_{tabla}"] = str(e)
+
+    return result
+
     # 3. Suma SIN filtro de ANULADA (solo CUENTACORRIENTE='1', debe>0)
     # 3. Suma bruta de clientes activos AKRAFFT (sin conversión de moneda)
     try:
@@ -12301,5 +13260,7 @@ def debug_gap2_akrafft():
         result["activos_suma_debe_bruta_sin_conversion"] = float(rows[0][1] or 0)
     except Exception as e:
         result["error_activos_debe"] = str(e)
+
+
 
     return result
