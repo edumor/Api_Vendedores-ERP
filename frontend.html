@@ -732,6 +732,7 @@ async function doLogin(){
   const adminToken = params.get('__admin_token');
   const goto = params.get('__goto');
   const gotoDb = params.get('__db') || 'oficial';  // 'oficial' | 'sw'
+  const clienteCod = params.get('__cliente') || '';
   _adminDefaultDb = gotoDb; // guardar globalmente para usarlo en copia admin
   if(!adminToken) return;
   // Limpiar URL sin recargar
@@ -756,21 +757,34 @@ async function doLogin(){
     // Cargar flags del vendedor ANTES de abrir el formulario
     aplicarFlags(SESSION.codigousuario).then(()=>{
       cargarOfertas(SESSION.codigousuario);
-      cargarClientesCache().then(()=>{
+      cargarClientesCache().then(async()=>{
         cargarGruposSuperRubro();
         cargarMultiplazos(); cargarTransportes();
-        loadPedidos(); loadPresupuestos();
+        await Promise.all([loadPedidos(), loadPresupuestos()]);
         if(goto==='pedido'||goto==='pedidos'){
           const btn=document.querySelector('nav button:nth-child(3)');
-          if(btn){goSection('pedidos',btn);setTimeout(()=>openNuevo('pedido',gotoDb),400);}
+          if(btn){goSection('pedidos',btn);setTimeout(async()=>{await openNuevo('pedido',gotoDb);if(clienteCod)_adminPreSelectCliente(clienteCod);},400);}
         } else if(goto==='presupuesto'||goto==='presupuestos'){
           const btn=document.querySelector('nav button:nth-child(4)');
-          if(btn){goSection('presupuestos',btn);setTimeout(()=>openNuevo('presupuesto'),400);}
+          if(btn){goSection('presupuestos',btn);setTimeout(async()=>{await openNuevo('presupuesto');if(clienteCod)_adminPreSelectCliente(clienteCod);},400);}
         }
       });
     });
   }catch(e){ console.error('Admin impersonate error:', e); }
 })();
+async function _adminPreSelectCliente(cod){
+  try{
+    const r = await apiFetch(`${API}/clientes?buscar=${encodeURIComponent(cod)}&limit=10`);
+    if(!r.ok) return;
+    const lista = await r.json();
+    const c = lista.find(x=>String(x.codigo).trim()===String(cod).trim()
+                          || String(x.codigoparticular).trim()===String(cod).trim())
+             || lista[0];
+    if(!c) return;
+    _nvCliCache[c.codigo] = c;
+    seleccionarClienteNuevo(c.codigo);
+  }catch(_){}
+}
 // ── Feature flags ────────────────────────────────────────────────────────────
 let FLAGS = {};  // global — accedido por renderNuevoForm para ocultar botón SW
 let _ofertasActivas = []; // ofertas vigentes del vendedor actual
@@ -918,6 +932,7 @@ window.addEventListener('popstate', function(e){
 });
 function closeOv(id){
   const ov=document.getElementById(id); if(!ov) return;
+  ov.style.zIndex='';
   ov.classList.remove('open');
   const m=ov.querySelector('.modal');
   if(m){m.classList.remove('modal-dragged');m.style.left='';m.style.top='';}
@@ -926,6 +941,14 @@ function closeOv(id){
 }
 function openOv(id){
   const ov=document.getElementById(id); if(!ov) return;
+  // Si hay overlays ya abiertos, apilar encima del más alto
+  const openOvs=[...document.querySelectorAll('.overlay.open')];
+  if(openOvs.length){
+    const maxZ=openOvs.reduce((z,el)=>Math.max(z,parseInt(el.style.zIndex||'200')||200),200);
+    ov.style.zIndex=maxZ+10;
+  } else {
+    ov.style.zIndex='';
+  }
   ov.classList.add('open');
   _makeDraggableFe(ov);
 }
@@ -2101,24 +2124,25 @@ function verDetallePdf(){ if(_detPdfUrl) _verPdf(_detPdfUrl); }
 let nvVendedorOverride     = null;   // {codigo, nombre} — seteado por popup admin
 let nvClienteOverride      = null;   // cliente elegido en popup admin
 let _nvVendedorCopiaAdmin  = null;   // se aplica al guardar
+let _nvSkipVendInit        = false;  // evita doble init en copiarNV
+let _caVendCodToPreselect  = null;   // vendor code elegido en popup, para preseleccionar en form
 
 function copiarDesdeDetalle(){
   if(!_detCtx.numero) return;
-  if(SESSION && SESSION.admin_perfil){
+  const _PERFILES_COPY=['ADV','ADVJUAN','GERENTES','GTES FE'];
+  if(SESSION?.admin_perfil && _PERFILES_COPY.includes((SESSION.admin_perfil||'').toUpperCase().trim())){
+    // Para perfiles admin: abrir popup de selección de vendedor/cliente antes de copiar
     _abrirPopupCopiaAdmin(_detCtx.tipo, _detCtx.numero, _detCtx.db);
   } else {
-    copiarNV(_detCtx.tipo, _detCtx.numero, _detCtx.db);
+    closeOv('ov-detalle');
+    copiarNV(_detCtx.tipo, _detCtx.numero, _detCtx.db, _adminDefaultDb || _detCtx.db);
   }
 }
 function copiarDesdeSelect(tipo){
   const sel=document.getElementById(tipo==='pedidos'?'ped-select':'pre-select');
   const num=sel.value; if(!num) return;
   const db=sel.options[sel.selectedIndex]?.dataset?.db||'oficial';
-  if(SESSION && SESSION.admin_perfil){
-    _abrirPopupCopiaAdmin(tipo, num, db);
-  } else {
-    copiarNV(tipo, num, db);
-  }
+  copiarNV(tipo, num, db, _adminDefaultDb || db);
 }
 
 // ── Popup de copia admin ──────────────────────────────────────────────────────
@@ -2178,7 +2202,8 @@ function caFiltrarClientes(){
     const lista = document.getElementById('ca-cli-lista');
     if(q.length < 2){ lista.style.display='none'; return; }
     try{
-      const r = await apiFetch(`${API}/clientes?buscar=${encodeURIComponent(q)}&limit=12`);
+      const vendParam=nvVendedorOverride?.codigo?`&vendedor=${encodeURIComponent(nvVendedorOverride.codigo)}`:'';
+      const r = await apiFetch(`${API}/clientes?buscar=${encodeURIComponent(q)}&limit=12${vendParam}`);
       const data = r.ok ? await r.json() : [];
       if(!data.length){ lista.style.display='none'; return; }
       lista.innerHTML = data.map(c=>`<div class="autocomplete-item" onclick="caSelCliente(${JSON.stringify(c).replace(/"/g,'&quot;')})">${c.razonsocial} <small style="color:#9ca3af">${c.codigoparticular||c.codigo}</small></div>`).join('');
@@ -2199,12 +2224,11 @@ function caSelCliente(c){
 async function caConfirmar(){
   const vend = nvVendedorOverride;
   if(!vend || !vend.codigo){ alert('Seleccioná un vendedor'); return; }
-  nvClienteOverride = _caCliSel || null;
+  if(!_caCliSel){ alert('Seleccioná un cliente asociado al vendedor'); return; }
+  nvClienteOverride = _caCliSel;
+  _caVendCodToPreselect = vend.codigo; // para que _nvAdminInitVendSelector lo preseleccione
   closeOv('ov-copia-admin');
-  // Leer desde DB origen (_caCtx.db), guardar en DB destino del admin (_adminDefaultDb)
   await copiarNV(_caCtx.tipo, _caCtx.numero, _caCtx.db, _adminDefaultDb || _caCtx.db);
-  // Después de cargar el form, forzar el codigousuario del vendedor elegido
-  _nvVendedorCopiaAdmin = vend;
 }
 
 async function verDetalle(tipo,numero,nombre,db='oficial'){
@@ -2261,6 +2285,8 @@ async function copiarNV(tipo, numero, db='oficial', targetDb=null){
     // Cerrar overlay de detalle si está abierto
     closeOv('ov-detalle');
     // Abrir formulario vacío (resetea nvItems, nvMultiplazo, nvDeposito, etc.)
+    // _nvSkipVendInit=true evita que openNuevo inicialice el selector (lo haremos aquí con preselect)
+    _nvSkipVendInit = true;
     await openNuevo(tipo==='pedidos'?'pedido':'presupuesto', targetDb||db);
     // ── 1. Setear estado global ANTES de renderNuevoForm para que poblarSelectsForm use nvMultiplazo ──
     nvDeposito = datos.codigodeposito || '001';
@@ -2278,6 +2304,11 @@ async function copiarNV(tipo, numero, db='oficial', targetDb=null){
     if(!nvItems.length) nvItems=[{codigo:'',codDisplay:'',descripcion:'',cantidad:1,precio:0,precio_base:0,descuento:0,dto_max:null,iva:21,rem001:null,rem002:null,rem003:null,rem005:null,rem013:null,rem016:null,reserva_elegida:null}];
     // ── 2. Re-renderizar con los valores ya seteados (deposito, multiplazo, items) ──
     renderNuevoForm(); // poblarSelectsForm() selecciona nvMultiplazo; nv-deposito usa nvDeposito
+    if(SESSION?.admin_perfil){
+      // Usar el vendor elegido en el popup (si viene de caConfirmar), o el impersonado
+      _nvAdminInitVendSelector(_caVendCodToPreselect);
+      _caVendCodToPreselect = null;
+    }
     // ── 3. Pre-cargar cliente y seleccionarlo DESPUÉS del render ──
     // Si admin eligió un cliente diferente, usarlo en lugar del original
     const codigoCliTarget = nvClienteOverride ? nvClienteOverride.codigo : datos.codigocliente;
@@ -2435,6 +2466,12 @@ async function _loadDepositosAdmin(){
 function _nvRemForDep(it, dep){
   const k='rem'+dep; return (it[k]!==undefined&&it[k]!==null)?it[k]:null;
 }
+function _mpEsCuentaCorriente(){
+  if(!nvMultiplazo) return false;
+  const mp = (MULTIPLAZOS_ALL||MULTIPLAZOS||[]).find(m=>String(m.codigo)===String(nvMultiplazo));
+  return mp?.cuentacorriente || false;
+}
+
 function _nvGetRemAjustado(codArticulo, it){
   // El servidor devuelve stock bruto de Firebird.
   // Esta función descuenta las reservas activas por depósito en el frontend.
@@ -2488,7 +2525,7 @@ async function openNuevo(tipo, forceDB=null){
     if(r.ok) _nvReservasActivas=await r.json();
   }catch(_){}
   nvClienteSeleccionado=null;
-  nvMultiplazo=null; nvTransporte='0'; nvSucursales=[]; nvDireccionEntrega=null; nvDeposito=(FLAGS.deposito_exclusivo||'001').split(',')[0]; nvDescuentoGeneral=0; window._finMontoAplicado=false; window._ofertaActivaTipo=null; window._promoComboDescuento=0; window._promoComboNombre=''; window._promoComboEscalones=[];
+  nvMultiplazo=null; nvTransporte='0'; nvSucursales=[]; nvDireccionEntrega=null; nvDeposito=(FLAGS.deposito_exclusivo||'001').split(',')[0]; nvDescuentoGeneral=0; window._finMontoAplicado=false; window._ofertaActivaTipo=null; window._promoComboDescuento=0; window._promoComboNombre=''; window._promoComboEscalones=[]; window._bonifMontoAplicado=false; window._bonifMontoPct=0; window._bonifMontoNombre=''; window._bonifCondComLocked=false; window._bonifCondCom=null; window._bonifCondComNombre=''; window._bonifCondComPrev=null;
   _nvPreventaActiva=false;
   _nvVendedorCopiaAdmin=null; // resetear override de vendedor al abrir nuevo doc
   // Refrescar ofertas activas en cada apertura para garantizar datos vigentes sin necesidad de F5
@@ -2512,6 +2549,8 @@ async function openNuevo(tipo, forceDB=null){
   renderNuevoForm();
   openOv('ov-nuevo');
   actualizarProximoNum(nvDB);
+  if(SESSION?.admin_perfil && !_nvSkipVendInit) _nvAdminInitVendSelector();
+  _nvSkipVendInit = false;
 }
 
 async function actualizarProximoNum(db){
@@ -2539,13 +2578,68 @@ function _nvCopiarDesdeSelect(){
   const num=sel&&sel.value; if(!num) return;
   const db=(sel.options[sel.selectedIndex]?.dataset?.db)||'oficial';
   const tipo=nvTipo==='pedido'?'pedidos':'presupuestos';
-  if(SESSION&&SESSION.admin_perfil) _abrirPopupCopiaAdmin(tipo,num,db);
-  else copiarNV(tipo,num,db);
+  const _PERFILES_COPY=['ADV','ADVJUAN','GERENTES','GTES FE'];
+  if(SESSION?.admin_perfil && _PERFILES_COPY.includes((SESSION.admin_perfil||'').toUpperCase().trim())){
+    _abrirPopupCopiaAdmin(tipo,num,db);
+  } else {
+    copiarNV(tipo,num,db);
+  }
+}
+function _nvVerDesdeSelect(){
+  const sel=document.getElementById('nv-copia-sel');
+  const num=sel&&sel.value; if(!num){ alert('Seleccioná un '+( nvTipo==='pedido'?'pedido':'presupuesto')+' primero'); return; }
+  const opt=sel.options[sel.selectedIndex];
+  const db=opt.dataset.db||'oficial';
+  const razon=opt.dataset.razon||'';
+  verDetalle(nvTipo==='pedido'?'pedidos':'presupuestos', num, razon, db);
+}
+async function _nvAdminInitVendSelector(preselect=null){
+  const sel=document.getElementById('nv-vend-admin-sel');
+  if(!sel) return;
+  try{
+    const r=await apiFetch(`${API}/vendedores-lista`);
+    if(!r.ok) throw new Error();
+    const vends=await r.json();
+    const selCod = preselect || SESSION.codigousuario;
+    sel.innerHTML=vends.map(v=>`<option value="${v.codigo}"${v.codigo===selCod?' selected':''}>${v.nombre} (${v.codigo})</option>`).join('');
+    const found=vends.find(v=>v.codigo===selCod);
+    _nvVendedorCopiaAdmin=found?{codigo:found.codigo,nombre:found.nombre}:{codigo:SESSION.codigousuario,nombre:SESSION.razonsocial};
+  }catch(_){
+    sel.innerHTML=`<option value="${SESSION.codigousuario}" selected>${SESSION.razonsocial}</option>`;
+    _nvVendedorCopiaAdmin={codigo:SESSION.codigousuario,nombre:SESSION.razonsocial};
+  }
+}
+function nvAdminCambiarVend(){
+  const sel=document.getElementById('nv-vend-admin-sel');
+  if(!sel) return;
+  const cod=sel.value;
+  const nombre=sel.options[sel.selectedIndex]?.textContent||cod;
+  _nvVendedorCopiaAdmin=cod?{codigo:cod,nombre}:null;
+  // Limpiar cliente — debe pertenecer al nuevo vendedor
+  nvClienteSeleccionado=null;
+  const inp=document.getElementById('nv-cli-input');
+  const lst=document.getElementById('nv-cli-lista');
+  const slc=document.getElementById('nv-cli-sel');
+  if(inp) inp.value='';
+  if(lst) lst.style.display='none';
+  if(slc) slc.style.display='none';
+  // Limpiar panel de crédito del cliente anterior
+  const cred=document.getElementById('nv-credito-panel');
+  if(cred) cred.innerHTML='';
 }
 function renderNuevoForm(){
   const _esAdminForm=!!(SESSION&&SESSION.admin_perfil);
   const _showL1=nvTipo!=='pedido'||FLAGS.pedidos!==false||_esAdminForm;
   const _showSW=nvTipo==='pedido'&&(FLAGS.pedidos_sw!==false||_esAdminForm);
+  const _PERFILES_VEND=['ADV','ADVJUAN','GERENTES','GTES FE'];
+  const _puedeAdminCambiarVend=_esAdminForm&&_PERFILES_VEND.includes((SESSION?.admin_perfil||'').toUpperCase().trim());
+  const _vendPanel=_puedeAdminCambiarVend?`
+  <div class="card" style="margin-bottom:.75rem" id="nv-vend-admin-wrap">
+    <label class="lbl">Vendedor / Corredor</label>
+    <select id="nv-vend-admin-sel" style="width:100%;box-sizing:border-box" onchange="nvAdminCambiarVend()">
+      <option value="">Cargando vendedores...</option>
+    </select>
+  </div>`:'';
   // Opciones de docs recientes para el picker "Copiar desde existente"
   const _srcSel=document.getElementById(nvTipo==='pedido'?'ped-select':'pre-select');
   const _srcOpts=Array.from(_srcSel?.options||[]).filter(o=>o.value);
@@ -2558,8 +2652,9 @@ function renderNuevoForm(){
       <div style="margin-top:.6rem;display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">
         <select id="nv-copia-sel" style="flex:1;min-width:0;border:1px solid #86efac;border-radius:6px;padding:6px 8px;font-size:.8rem;background:#fff">
           <option value="">— Seleccioná un ${_tipoLbl} —</option>
-          ${_srcOpts.map(o=>`<option value="${o.value}" data-db="${o.dataset?.db||'oficial'}">${o.textContent}</option>`).join('')}
+          ${_srcOpts.map(o=>`<option value="${o.value}" data-db="${o.dataset?.db||'oficial'}" data-razon="${(o.dataset?.razonsocial||'').replace(/"/g,'&quot;')}">${o.textContent}</option>`).join('')}
         </select>
+        <button class="btn btn-sm" style="background:#0284c7;color:#fff;white-space:nowrap" onclick="_nvVerDesdeSelect()">🔍 Ver</button>
         <button class="btn btn-sm" style="background:#16a34a;color:#fff;white-space:nowrap" onclick="_nvCopiarDesdeSelect()">📋 Copiar</button>
       </div>
     </details>`:'';
@@ -2577,6 +2672,7 @@ function renderNuevoForm(){
       <span id="nv-proximo-num" style="font-size:.85rem;color:var(--c1);font-weight:600"></span>
     </div>
     <div id="nv-credito-panel" style="margin-bottom:.75rem"></div>
+    ${_vendPanel}
     <div class="card" style="margin-bottom:.75rem">
       <label class="lbl">Cliente</label>
       <div class="autocomplete-wrap">
@@ -2639,10 +2735,10 @@ function renderNuevoForm(){
       </div>
     </div>
     <div style="font-weight:600;font-size:.9rem;margin-bottom:.5rem">Artículos</div>
-    <div id="nv-oferta-monto-banner" style="display:none;margin-bottom:.5rem;padding:8px 12px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;font-size:.82rem;color:#1e40af"></div>
     <div id="sp-resume-banner" style="display:none;background:#d1fae5;border:2px solid #059669;border-radius:8px;padding:.55rem 1rem;margin-bottom:.7rem;display:none;align-items:center;justify-content:space-between;gap:.5rem"></div>
     <div id="nv-items-wrap"></div>
     <button class="btn btn-outline btn-sm" onclick="addItem()" style="margin-bottom:.75rem">+ Agregar artículo</button>
+    <div id="nv-oferta-monto-banner" style="display:none;margin-bottom:.5rem;margin-top:.25rem;padding:8px 12px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;font-size:.82rem;color:#1e40af"></div>
     <div id="nv-total" style="text-align:right;font-weight:700;font-size:1rem;margin-bottom:1rem"></div>
     <div style="display:flex;gap:.5rem;justify-content:flex-end;flex-wrap:wrap">
       <button class="btn btn-outline" onclick="closeOv('ov-nuevo')">Cancelar</button>
@@ -2678,7 +2774,14 @@ function filtrarClientesNuevo(){
     const lista=document.getElementById('nv-cli-lista');
     if(!q){lista.style.display='none';return}
     let matches=[];
-    if(SESSION.perfil==='VENDEDORES'){
+    if(_nvVendedorCopiaAdmin){
+      // Admin con vendedor seteado — siempre filtra por ese vendedor via API
+      try{
+        const r=await apiFetch(`${API}/clientes?buscar=${encodeURIComponent(q)}&limit=12&vendedor=${encodeURIComponent(_nvVendedorCopiaAdmin.codigo)}`);
+        const data=await r.json();
+        matches=Array.isArray(data)?data:[];
+      }catch{matches=[];}
+    } else if(SESSION.perfil==='VENDEDORES'){
       matches=CLIENTES.filter(c=>
         c.razonsocial.toLowerCase().includes(q.toLowerCase())||c.codigo.toLowerCase().includes(q.toLowerCase())||
         (c.codigoparticular&&c.codigoparticular.toLowerCase().includes(q.toLowerCase()))||
@@ -2906,6 +3009,25 @@ function mostrarAlertaStock(msg, altDeps, artIdx){
 }
 
 function validarStockItem(i){
+  if(_mpEsCuentaCorriente()) return; // CC/preventa por multiplazo seleccionado
+  // También omitir si el artículo matchea una oferta cuyo multiplazo es CC
+  // (necesario porque el auto-set del multiplazo ocurre DESPUÉS de esta llamada)
+  if(_ofertasActivas){
+    const itRef = nvItems[i];
+    if(itRef && itRef.codigo){
+      for(const o of _ofertasActivas){
+        if(o.tipo!=='financiero' || o.tipo_financiero!=='descuento_monto') continue;
+        if(!(o.financial_escalones||[]).length && !(o.monto_minimo)) continue;
+        const hasFiltros = (o.category_filters||[]).length > 0;
+        if(hasFiltros && !_articuloMatcheaFiltros(o, itRef)) continue;
+        const condCod = (o.conditions||[])[0]||null;
+        if(!condCod) continue;
+        const allMPs = [...(MULTIPLAZOS_ALL||[]), ...(MULTIPLAZOS||[])];
+        const mp = allMPs.find(m=>String(m.codigo)===String(condCod));
+        if(mp?.cuentacorriente) return; // oferta con multiplazo CC → no validar stock
+      }
+    }
+  }
   const it=nvItems[i];
   const remAj=_nvGetRemAjustado(it.codigo, it);
   const rem=remAj['rem'+nvDeposito]??null;
@@ -2981,6 +3103,7 @@ function _nvAbrirSplit(dep, artIdx){
           oninput="_spBuscar(this.value)" onfocus="this.style.borderColor='#059669'" onblur="setTimeout(()=>{const l=document.getElementById('sp-art-list');if(l)l.style.display='none'},200)">
         <div id="sp-art-list" style="display:none;position:absolute;top:100%;left:0;right:0;background:#fff;border:1.5px solid #059669;border-radius:0 0 8px 8px;max-height:260px;overflow-y:auto;z-index:60;box-shadow:0 6px 20px rgba(0,0,0,.18)"></div>
       </div>
+      <div id="sp-bonif-cond-badge" style="display:none;background:#dcfce7;border:1.5px solid #86efac;border-radius:7px;padding:5px 10px;margin-bottom:6px;font-size:.8rem;font-weight:600;color:#065f46"></div>
       <div id="sp-items-wrap" style="overflow-x:auto"></div>
     </div>
     <div style="padding:.7rem 1.1rem;border-top:2px solid #6ee7b7;display:flex;justify-content:space-between;align-items:center;gap:.5rem;flex-shrink:0;background:#f0fdf4">
@@ -3108,23 +3231,63 @@ async function _spSeleccionar(idx){
   _spRenderItems();
 }
 
+// Aplica bonificaciones activas a un array de items (sp.items o nvItems)
+function _aplicarBonifALista(items){
+  const bonifs = _ofertasActivas.filter(o => o.tipo === 'bonificacion');
+  items.forEach(it => {
+    if(!it.codigo || it._promo_readonly){
+      if(it._bonif_pct > 0){ it.descuento = Math.max(0,(it.descuento||0)-it._bonif_pct); it._bonif_pct=0; }
+      return;
+    }
+    const cod = it.codDisplay || it.codigo;
+    let bestPct = 0;
+    bonifs.forEach(o => {
+      const det = (o.product_details||[]).find(d => d.codigo_producto === cod);
+      if(det && (det.bonificacion_pct||0) > bestPct) bestPct = det.bonificacion_pct;
+    });
+    const prev = it._bonif_pct || 0;
+    if(bestPct !== prev){
+      it.descuento = Math.min(100, Math.max(0, (it.descuento||0) - prev + bestPct));
+      it._bonif_pct = bestPct;
+    }
+  });
+}
+
 function _spRenderItems(){
   if(!_sp) return;
   const wrap=document.getElementById('sp-items-wrap'); if(!wrap) return;
+  // Aplicar bonificaciones a los items del split
+  _aplicarBonifALista(_sp.items);
+  // Evaluar escalones por monto (necesario: el split cambia el total combinado)
+  _checkBonifMonto();
+  // Indicador de condición comercial bloqueada por escalón de bonificación
+  const spCondEl = document.getElementById('sp-bonif-cond-badge');
+  if(spCondEl){
+    if(window._bonifCondComLocked && window._bonifCondCom){
+      spCondEl.style.display='';
+      const _mpDesc = (MULTIPLAZOS_ALL||MULTIPLAZOS||[]).find(m=>String(m.codigo)===String(window._bonifCondCom));
+      spCondEl.textContent=`🎁 Condición de venta sugerida por bonificación "${window._bonifCondComNombre}": ${_mpDesc?_mpDesc.descripcion:window._bonifCondCom}`;
+    } else { spCondEl.style.display='none'; }
+  }
   const discIva=_sp.cliente?.discriminaIva??true;
   let html='<table style="width:100%;border-collapse:collapse;font-size:.82rem"><thead><tr>'
     +'<th style="width:64px">Cód.</th><th>Descripción</th>'
     +`<th style="width:56px;text-align:center" title="Rem. dep. ${_sp.depShort}">S.Rem.</th>`
     +'<th style="width:54px">Cant.</th><th style="width:90px">Precio $</th>'
+    +'<th style="width:62px;text-align:center;font-size:.75rem">Bon%</th>'
     +'<th style="width:38px">IVA%</th><th style="width:90px;text-align:right">Subtotal</th><th style="width:26px"></th>'
     +'</tr></thead><tbody>';
   let totalCIva=0;
   _sp.items.forEach((it,i)=>{
-    const sub=it.cantidad*it.precio*(1-it.descuento/100);
+    const sub=it.cantidad*it.precio*(1-(it.descuento||0)/100);
     const tot=discIva?sub*(1+it.iva/100):sub;
     totalCIva+=tot;
     const rc=it.rem===null?'#e5e7eb':it.rem>0?'#d1fae5':'#fee2e2';
     const rt=it.rem===null?'—':Math.floor(it.rem).toLocaleString('es-AR');
+    const bonifPct = it._bonif_pct || 0;
+    const bonifCell = bonifPct > 0
+      ? `<td style="padding:.3rem .2rem;text-align:center;font-weight:700;color:#065f46;background:#f0fdf4">${it.descuento}</td>`
+      : `<td style="padding:.3rem .2rem;text-align:center;color:#9ca3af">${it.descuento||0}</td>`;
     html+=`<tr>
       <td style="padding:.3rem .4rem;font-weight:700;color:#2563eb">${it.codDisplay||it.codigo}</td>
       <td style="padding:.3rem .4rem">${it.descripcion}</td>
@@ -3138,6 +3301,7 @@ function _spRenderItems(){
             onchange="_sp.items[${i}].precio=+this.value||0;_spRenderItems()"></td>`
         : `<td style="padding:.3rem .2rem"><input type="text" value="${it.precio.toLocaleString('es-AR',{minimumFractionDigits:2,maximumFractionDigits:2})}" readonly
             style="width:82px;padding:3px 4px;background:#f8fafc;font-weight:600;text-align:right;cursor:default;font-size:.82rem;border:1px solid #e5e7eb;border-radius:4px" title="Precio de Firebird"></td>`}
+      ${bonifCell}
       <td style="padding:.3rem .2rem;text-align:center">${it.iva}%</td>
       <td style="padding:.3rem .4rem;text-align:right;font-weight:600">$${tot.toLocaleString('es-AR',{minimumFractionDigits:2,maximumFractionDigits:2})}</td>
       <td style="padding:.3rem .2rem;text-align:center"><button onclick="_sp.items.splice(${i},1);_spRenderItems()"
@@ -3195,6 +3359,8 @@ function _actualizarBotonGuardar(){
   }
   // Para admins: solo verificar que haya ítems (sin restricción de stock)
   if(esAdminActuando()) { btn.disabled=false; btn.style.opacity=''; btn.title=''; return; }
+  // Multiplazo Cuenta Corriente (preventa): no valida stock
+  if(_mpEsCuentaCorriente()) { btn.disabled=false; btn.style.opacity=''; btn.title='Preventa — sin validación de stock'; return; }
   // Para VENDEDORES: bloquear si algún ítem válido tiene remanente 0 en el depósito actual
   // (excepto artículos que permiten stock negativo en Flexxus)
   const itemSinStock = itemsValidos.find(it => {
@@ -3229,9 +3395,24 @@ function renderItems(){
     // Para ítems de promo usar stock bruto de Firebird (sin descuento de reservas admin.db)
     // ya que la promo validó stock suficiente en FMA_STOCK al momento de aplicarla.
     const remDep = it._promo_readonly ? remDepRaw : (remAj[remDepKey]??null);
-    const remColor = remDepRaw===null ? '#e5e7eb' : remDep > 0 ? '#d1fae5' : '#fee2e2';
-    const remTextColor = remDepRaw===null ? '#9ca3af' : remDep > 0 ? '#065f46' : '#991b1b';
-    const remText = remDepRaw===null ? '—' : Math.floor(remDep).toLocaleString('es-AR');
+    // Es preventa si el multiplazo actual es CC O si el artículo matchea una oferta con multiplazo CC
+    let _esPreventa = _mpEsCuentaCorriente();
+    if(!_esPreventa && _ofertasActivas && it.codigo){
+      for(const _oCC of _ofertasActivas){
+        if(_oCC.tipo!=='financiero' || _oCC.tipo_financiero!=='descuento_monto') continue;
+        if(!((_oCC.financial_escalones||[]).length) && !(_oCC.monto_minimo)) continue;
+        const _hF = (_oCC.category_filters||[]).length > 0;
+        if(_hF && !_articuloMatcheaFiltros(_oCC, it)) continue;
+        const _cC = (_oCC.conditions||[])[0]||null;
+        if(!_cC) continue;
+        const _mAll = [...(MULTIPLAZOS_ALL||[]), ...(MULTIPLAZOS||[])];
+        const _mp2 = _mAll.find(m=>String(m.codigo)===String(_cC));
+        if(_mp2?.cuentacorriente){ _esPreventa = true; break; }
+      }
+    }
+    const remColor = _esPreventa ? '#dbeafe' : remDepRaw===null ? '#e5e7eb' : remDep > 0 ? '#d1fae5' : '#fee2e2';
+    const remTextColor = _esPreventa ? '#1d4ed8' : remDepRaw===null ? '#9ca3af' : remDep > 0 ? '#065f46' : '#991b1b';
+    const remText = _esPreventa ? 'PREV' : remDepRaw===null ? '—' : Math.floor(remDep).toLocaleString('es-AR');
     const depLabel = (_NV_DEPOSITOS_ADMIN.find(d=>d.value===nvDeposito)||{label:nvDeposito}).label.replace(/^\d+\s*-\s*/,'');
     const remTitle = remDepRaw!==null
       ? _NV_DEPOSITOS_ADMIN.filter(d=>it['rem'+d.value]!==null).map(d=>`${d.label.replace(/^\d+\s*-\s*/,'')}: ${Math.floor(remAj['rem'+d.value]||0).toLocaleString('es-AR')}`).join(' | ')
@@ -3268,7 +3449,7 @@ function renderItems(){
           <div title="${remTitle}" style="background:${remColor};color:${remTextColor};border-radius:4px;padding:.15rem .4rem;font-weight:700;white-space:nowrap">S:${remText}${remAj.tieneReserva?`<button onclick="openReservaConsumo(${i})" style="background:${it.reserva_elegida?'#f59e0b':'#9ca3af'};color:#fff;border:none;border-radius:3px;padding:0 4px;margin-left:3px;font-size:.65rem;cursor:pointer">🔒</button>${rvInfo?`<span style="font-size:.6rem;background:#fef3c7;color:#92400e;border-radius:3px;padding:0 3px;margin-left:2px;white-space:nowrap" title="Usados de reserva: ${rvInfo.cant} | Saldo reserva: ${rvInfo.saldo}">−${rvInfo.cant} saldo:${rvInfo.saldo}</span>`:''}`:''}</div>
           <label style="display:flex;align-items:center;gap:2px;white-space:nowrap">Cant
             <input type="number" value="${it.cantidad}" min="0.001" step="any"
-              onchange="nvItems[${i}].cantidad=+this.value;validarStockItem(${i});renderItems()"
+              onchange="nvItems[${i}].cantidad=+this.value;validarStockItem(${i});renderItems();actualizarDescuentoGeneral()"
               style="width:50px;font-size:.82rem;margin-left:2px">
           </label>
           <span style="color:var(--sub);white-space:nowrap">$${parseFloat(it.precio).toLocaleString('es-AR',{minimumFractionDigits:2})}</span>
@@ -3334,7 +3515,7 @@ function renderItems(){
         <td style="text-align:center">
           ${it._promo_readonly
             ? `<input type="number" value="${it.cantidad}" min="1" step="1" onchange="nvItems[${i}].cantidad=+this.value;_sincronizarCantidadPromo(${i});renderItems()" style="width:48px;font-size:.8rem;background:#fff7ed;border-color:#fed7aa" title="Cantidad de promos">`
-            : `<input type="number" value="${it.cantidad}" min="0.001" step="any" onchange="nvItems[${i}].cantidad=+this.value;validarStockItem(${i});renderItems()" style="width:48px;font-size:.8rem">`
+            : `<input type="number" value="${it.cantidad}" min="0.001" step="any" onchange="nvItems[${i}].cantidad=+this.value;validarStockItem(${i});renderItems();actualizarDescuentoGeneral()" style="width:48px;font-size:.8rem">`
           }
           ${(()=>{
             if(it._promo_readonly || it._oferta_aplicada || it._from_presupuesto || it._fin_bonif_oferta || remText === '—') return '';
@@ -3514,9 +3695,10 @@ function _syncDepositoReserva(){
 }
 
 function recalcTotal(){
+  _aplicarBonificacionesAItems();
   const discIva = nvClienteSeleccionado ? nvClienteSeleccionado.discriminaIva : true;
   const subtotal=nvItems.reduce((s,it)=>{
-    const sub=it.cantidad*it.precio*(1-it.descuento/100);
+    const sub=it.cantidad*it.precio*(1-(it.descuento||0)/100);
     return s+(discIva ? sub*(1+it.iva/100) : sub);
   },0);
   const hayBonif = nvItems.some(it=>it.descuento>0);
@@ -3524,6 +3706,8 @@ function recalcTotal(){
   const neto = subtotal*(1-pctDG/100);
   const el=document.getElementById('nv-total');
   if(!el) return;
+  // Evaluar escalón de bonif por monto en cada recálculo
+  _checkBonifMonto();
   if(esAdminActuando()){
     const bloqDG = hayBonif;
     el.innerHTML=
@@ -3542,12 +3726,21 @@ function recalcTotal(){
     // Corredores: mostrar descuento y neto cuando hay oferta por monto o combo aplicada
     const _comboPct = (window._ofertaActivaTipo==='producto' && (window._promoComboDescuento||0)>0)
       ? window._promoComboDescuento : 0;
+    const _bonifMontoPct = window._bonifMontoAplicado ? (window._bonifMontoPct||0) : 0;
     if(window._finMontoAplicado && nvDescuentoGeneral > 0){
-      const neto2 = subtotal*(1-nvDescuentoGeneral/100);
+      const neto2 = subtotal*(1-nvDescuentoGeneral/100)*(1-_bonifMontoPct/100);
       el.innerHTML=`<div style="display:flex;flex-direction:column;gap:.25rem;align-items:flex-end">
         <span style="color:var(--sub);font-size:.88rem">Subtotal c/IVA: <b>$${subtotal.toLocaleString('es-AR',{minimumFractionDigits:2,maximumFractionDigits:2})}</b></span>
         <span style="font-size:.88rem;color:#d97706;background:#fef9c3;padding:2px 8px;border-radius:4px">💰 Descuento por volumen: <b>${nvDescuentoGeneral}%</b></span>
+        ${_bonifMontoPct>0?`<span style="font-size:.88rem;color:#065f46;background:#dcfce7;padding:2px 8px;border-radius:4px">🎁 ${window._bonifMontoNombre||'Bonif. monto'}: <b>${_bonifMontoPct}%</b></span>`:''}
         <span style="font-size:1rem;font-weight:700;color:var(--c1)">Total c/IVA: $${neto2.toLocaleString('es-AR',{minimumFractionDigits:2,maximumFractionDigits:2})}</span>
+      </div>`;
+    } else if(_bonifMontoPct > 0){
+      const netoBonif = subtotal*(1-_bonifMontoPct/100);
+      el.innerHTML=`<div style="display:flex;flex-direction:column;gap:.25rem;align-items:flex-end">
+        <span style="color:var(--sub);font-size:.88rem">Subtotal c/IVA: <b>$${subtotal.toLocaleString('es-AR',{minimumFractionDigits:2,maximumFractionDigits:2})}</b></span>
+        <span style="font-size:.88rem;color:#065f46;background:#dcfce7;padding:2px 8px;border-radius:4px">🎁 ${window._bonifMontoNombre||'Bonif. monto'}: <b>${_bonifMontoPct}%</b></span>
+        <span style="font-size:1rem;font-weight:700;color:var(--c1)">Total c/IVA: $${netoBonif.toLocaleString('es-AR',{minimumFractionDigits:2,maximumFractionDigits:2})}</span>
       </div>`;
     } else if(_comboPct > 0){
       const netoCombo = subtotal*(1-_comboPct/100);
@@ -3564,10 +3757,11 @@ function recalcTotal(){
 
 function actualizarDescuentoGeneral(){
   const hayBonif=nvItems.some(it=>it.descuento>0);
-  if(hayBonif && !window._finMontoAplicado) nvDescuentoGeneral=0;
+  if(hayBonif && !window._finMontoAplicado && !window._finMontoEscalonKey) nvDescuentoGeneral=0;
+  _checkBonifMonto();
   recalcTotal();
-  // Re-evaluar descuento por monto cada vez que cambia el total
-  if(!window._finMontoAplicado) _checkDescuentoMonto();
+  // Re-evaluar escalones financieros siempre (auto-apply)
+  _checkDescuentoMonto();
 }
 
 async function autocompletarArticulo(i){
@@ -3694,6 +3888,128 @@ async function buscarDescripcion(i, inputEl){
 }
 
 // ─── MOTOR DE OFERTAS — FRONTEND VENDEDOR ────────────────────────────────────
+
+// ── Bonificación automática ───────────────────────────────────────────────────
+// Aplica bonificaciones activas (tipo='bonificacion') a cada item automáticamente.
+// Escribe directamente en it.descuento usando delta (prev → nuevo) para no acumular.
+function _aplicarBonificacionesAItems(){
+  const bonifs = _ofertasActivas.filter(o => o.tipo === 'bonificacion');
+  nvItems.forEach(it => {
+    if(!it.codigo || it._promo_readonly){
+      // Revertir cualquier bonif aplicada previamente
+      if(it._bonif_pct > 0){
+        it.descuento = Math.max(0, (it.descuento||0) - it._bonif_pct);
+        it._bonif_pct = 0; it._bonif_activa = null;
+      }
+      return;
+    }
+    const cod = it.codDisplay || it.codigo;
+    let bestPct = 0, bestOffer = null;
+    bonifs.forEach(o => {
+      const det = (o.product_details||[]).find(d => d.codigo_producto === cod);
+      if(det && (det.bonificacion_pct||0) > bestPct){
+        bestPct = det.bonificacion_pct;
+        bestOffer = o;
+      }
+    });
+    const prev = it._bonif_pct || 0;
+    if(bestPct !== prev){
+      // Quitar el % anterior, sumar el nuevo (delta)
+      it.descuento = Math.min(100, Math.max(0, (it.descuento||0) - prev + bestPct));
+      it._bonif_pct = bestPct;
+    }
+    it._bonif_activa = bestOffer ? {id: bestOffer.id, nombre: bestOffer.nombre, bonif_pct: bestPct} : null;
+  });
+}
+
+// Aplica la condición comercial de bonif al selector principal y al split pedido, y lo bloquea.
+function _applyBonifCondCom(cod, nombre){
+  if(window._nvPreventaActiva) return; // No sobreescribir lock de PREVENTA
+  const selM = document.getElementById('nv-multiplazo');
+  if(selM){
+    const codStr = String(cod);
+    if(![...selM.options].some(o => String(o.value)===codStr)){
+      const mp=(MULTIPLAZOS_ALL||[]).find(m=>String(m.codigo)===codStr)||(MULTIPLAZOS||[]).find(m=>String(m.codigo)===codStr);
+      const opt=document.createElement('option'); opt.value=codStr; opt.textContent=mp?mp.descripcion:codStr; selM.appendChild(opt);
+    }
+    nvMultiplazo = codStr;
+    selM.value = codStr;
+  }
+  if(_sp){ _sp.multiplazo = cod; }
+}
+
+// Desbloquea la condición comercial cuando el total cae bajo el umbral.
+function _clearBonifCondCom(){
+  if(!window._bonifCondComLocked) return;
+  window._bonifCondComLocked = false;
+  window._bonifCondCom = null; window._bonifCondComNombre = ''; window._bonifCondComPrev = null;
+}
+
+// Evalúa escalones de monto de bonificaciones activas (suma main + split pedido).
+// La aplicación es automática (sin botón). Soporta descuento% y/o condición comercial.
+function _checkBonifMonto(){
+  // Combinar items de ambos pedidos para chequear relevancia
+  const _allItems = [...nvItems, ...(_sp && _sp.items ? _sp.items : [])].filter(it => it.codigo);
+  // Solo evaluar bonificaciones cuyos productos/categorías estén en el pedido actual
+  const bonifs = _ofertasActivas.filter(o => {
+    if(o.tipo !== 'bonificacion' || !(o.amount_escalones||[]).length) return false;
+    const hasProd = (o.product_details||[]).some(d => d.codigo_producto);
+    const hasCat  = (o.category_filters||[]).length > 0;
+    if(!hasProd && !hasCat) return true; // sin restricción → aplica a todos
+    if(hasProd){
+      const prodSet = new Set((o.product_details||[]).map(d => d.codigo_producto));
+      if(_allItems.some(it => prodSet.has(it.codDisplay || it.codigo))) return true;
+    }
+    if(hasCat && _allItems.some(it => _articuloMatcheaFiltros(o, it))) return true;
+    return false;
+  });
+  if(!bonifs.length){
+    window._bonifMontoAplicado=false; window._bonifMontoPct=0; window._bonifMontoNombre='';
+    _clearBonifCondCom();
+    return;
+  }
+  const discIva = nvClienteSeleccionado ? nvClienteSeleccionado.discriminaIva : true;
+  // Subtotal pedido principal
+  let subtotal = nvItems.reduce((s,it) => {
+    if(!it.codigo) return s;
+    const sub = it.cantidad * it.precio * (1 - (it.descuento||0)/100);
+    return s + (discIva ? sub*(1+it.iva/100) : sub);
+  }, 0);
+  // Sumar pedido alternativo si existe (mismo cliente)
+  if(_sp && _sp.items && _sp.items.length){
+    _sp.items.forEach(it => {
+      if(!it.codigo) return;
+      const sub = it.cantidad * it.precio * (1 - (it.descuento||0)/100);
+      subtotal += discIva ? sub*(1+it.iva/100) : sub;
+    });
+  }
+  // Buscar mejor escalón: condición comercial tiene prioridad sobre descuento%
+  let bestPct=0, bestNombre='', bestCondCom=null;
+  bonifs.forEach(o => {
+    const sorted = (o.amount_escalones||[]).slice().sort((a,b) => b.monto_minimo - a.monto_minimo);
+    for(const esc of sorted){
+      if(subtotal >= (esc.monto_minimo||0)){
+        if(esc.condicion_comercial && !bestCondCom){ bestCondCom=String(esc.condicion_comercial); bestNombre=o.nombre; }
+        else if(!esc.condicion_comercial && (esc.descuento_pct||0)>bestPct){ bestPct=esc.descuento_pct; bestNombre=o.nombre; }
+        break;
+      }
+    }
+  });
+  if(bestCondCom){
+    if(!window._bonifCondComLocked){
+      // Guardar multiplazo actual antes de bloquear
+      window._bonifCondComPrev = nvMultiplazo || null;
+    }
+    window._bonifCondComLocked=true; window._bonifCondCom=bestCondCom; window._bonifCondComNombre=bestNombre;
+    window._bonifMontoAplicado=false; window._bonifMontoPct=0; window._bonifMontoNombre='';
+    _applyBonifCondCom(bestCondCom, bestNombre);
+  } else {
+    _clearBonifCondCom();
+    window._bonifMontoAplicado = bestPct > 0;
+    window._bonifMontoPct      = bestPct;
+    window._bonifMontoNombre   = bestNombre;
+  }
+}
 
 // Detecta promos vigentes que contienen el artículo (sin filtrar por condición/depósito —
 // esa info se muestra en el popup para que el corredor decida).
@@ -4291,32 +4607,150 @@ function _limpiarOfertaActivaSiVacia(tipo){
   }
 }
 
-// Descuento por monto mínimo: evalúa el total del pedido
+// Descuento por monto: evalúa escalones financieros (multi-escalón, auto-apply)
+let _checkDescuentoMontoRunning = false;
 function _checkDescuentoMonto(){
-  const oferta = _ofertasActivas.find(o=>
-    o.tipo==='financiero' && o.tipo_financiero==='descuento_monto' && (o.monto_minimo||0)>0
-  );
+  if(_checkDescuentoMontoRunning) return;
   const banner = document.getElementById('nv-oferta-monto-banner');
-  if(!oferta){ if(banner) banner.style.display='none'; return; }
-  // No mostrar el banner si hay otro tipo de oferta activa
-  const total = nvItems.reduce((s,it)=>{
-    if(!it.codigo) return s;
-    return s + it.cantidad * it.precio * (1 - (it.descuento||0)/100);
+
+  // Buscar oferta descuento_monto con escalones nuevos (financiero o bonificacion)
+  const oferta = _ofertasActivas.find(o =>
+    ((o.tipo==='financiero' && o.tipo_financiero==='descuento_monto') || o.tipo==='bonificacion')
+    && (o.financial_escalones||[]).length > 0
+  );
+  // Fallback: oferta legacy (escalón único con monto_minimo) — solo financiero
+  const ofertaLegacy = !oferta ? _ofertasActivas.find(o =>
+    o.tipo==='financiero' && o.tipo_financiero==='descuento_monto' && !(o.financial_escalones||[]).length && (o.monto_minimo||0)>0
+  ) : null;
+
+  if(!oferta && !ofertaLegacy){ if(banner) banner.style.display='none'; return; }
+
+  // Calcular total neto de artículos que matchean la oferta (por filtros de categoría/marca)
+  const ofertaRef = oferta || ofertaLegacy;
+  const hasFiltros = (ofertaRef.category_filters||[]).length > 0;
+  const _allItems = [...nvItems, ...(_sp && _sp.items ? _sp.items : [])].filter(it => it.codigo);
+
+  // Si no hay artículos cargados o ninguno matchea la oferta → ocultar banner
+  if(_allItems.length === 0){ if(banner) banner.style.display='none'; return; }
+  if(hasFiltros && !_allItems.some(it => _articuloMatcheaFiltros(ofertaRef, it))){ if(banner) banner.style.display='none'; return; }
+  const total = _allItems.reduce((s, it) => {
+    if(hasFiltros && !_articuloMatcheaFiltros(ofertaRef, it)) return s;
+    // Ignorar el descuento aplicado por la propia oferta para que el umbral no oscile
+    const baseDesc = it._fin_monto_oferta ? 0 : (it.descuento||0);
+    return s + it.cantidad * it.precio * (1 - baseDesc/100);
   }, 0);
 
-  if(!banner) return; // se crea más abajo en renderNuevoForm
-  if(total >= oferta.monto_minimo && !window._finMontoAplicado){
-    const pcts = (oferta.financial_details||[]).map(d=>d.porcentaje+'%').join(' + ');
-    banner.innerHTML = `💰 <strong>¡Calificás para un descuento por volumen!</strong> ${oferta.nombre} — Descuento ${pcts} sobre el total del pedido. <button onclick="_aplicarDescuentoMonto(${oferta.id})" class="btn btn-primary btn-sm" style="margin-left:8px">Aplicar ✓</button>`;
-    banner.style.display='block';
-  } else if(total < oferta.monto_minimo){
-    // No mostrar "te faltan X" — solo aparece cuando se alcanza el monto
-    banner.style.display='none';
-    window._finMontoAplicado = false;
+  // ── Auto-set multiplazo y depósito de la oferta en cuanto hay artículos matching ──
+  // Se aplica independientemente de si se alcanzó un escalón; queda editable
+  const _autoSetOferta = ofertaRef;
+  const _autoCondCod = (_autoSetOferta.conditions||[])[0]||null;
+  if(_autoCondCod){
+    const selM = document.getElementById('nv-multiplazo');
+    if(selM && String(selM.value) !== String(_autoCondCod)){
+      if(![...selM.options].some(o=>o.value===String(_autoCondCod))){
+        const mpAll = (MULTIPLAZOS_ALL||[]).find(m=>m.codigo===String(_autoCondCod))
+                   || (MULTIPLAZOS||[]).find(m=>m.codigo===String(_autoCondCod));
+        const opt = document.createElement('option');
+        opt.value = String(_autoCondCod);
+        opt.textContent = mpAll ? mpAll.descripcion : String(_autoCondCod);
+        selM.appendChild(opt);
+      }
+      selM.value = String(_autoCondCod);
+      nvMultiplazo = String(_autoCondCod);
+    }
+  }
+  if(_autoSetOferta.deposito){
+    const selD = document.getElementById('nv-deposito');
+    if(selD && selD.value !== _autoSetOferta.deposito){
+      selD.value = _autoSetOferta.deposito;
+      nvDeposito = _autoSetOferta.deposito;
+    }
+  }
+
+  if(!banner) return;
+
+  if(oferta) {
+    // ── Modo multi-escalón ──
+    const sorted = [...oferta.financial_escalones].sort((a,b) => b.monto_minimo - a.monto_minimo);
+    const matched = sorted.find(e => total >= (e.monto_minimo||0));
+
+    if(matched) {
+      let acum=1; (matched.porcentajes||[]).forEach(p=>acum*=(1-p/100));
+      const pct = parseFloat(((1-acum)*100).toFixed(2));
+      const escKey = oferta.id+'_'+matched.monto_minimo;
+      const _pctActual = nvItems.find(it=>it._fin_monto_oferta)?.descuento ?? null;
+      if(window._finMontoEscalonKey !== escKey || _pctActual !== pct){
+        window._finMontoAplicado = true;
+        window._finMontoEscalonKey = escKey;
+        window._ofertaActivaTipo = 'descuento_monto';
+        // Aplicar descuento por línea en Bon% a los artículos que matchean la oferta
+        nvItems.forEach(it => {
+          if(!it.codigo) return;
+          if(hasFiltros && !_articuloMatcheaFiltros(oferta, it)) return;
+          it.descuento = pct;
+          it._fin_monto_oferta = true;
+        });
+        _checkDescuentoMontoRunning = true;
+        renderItems(); // actualiza Bon% en cada línea
+        recalcTotal();
+        _checkDescuentoMontoRunning = false;
+      }
+      const pctStr = (matched.porcentajes||[]).map(p=>p+'%').join(' + ');
+      const sortedAsc = [...oferta.financial_escalones].sort((a,b)=>a.monto_minimo-b.monto_minimo);
+      const nextEsc = sortedAsc.find(e => (e.monto_minimo||0) > total);
+      let nextMsg = '';
+      if(nextEsc){
+        const falta = nextEsc.monto_minimo - total;
+        let acum2=1; (nextEsc.porcentajes||[]).forEach(p=>acum2*=(1-p/100));
+        const pct2 = parseFloat(((1-acum2)*100).toFixed(2));
+        const pctStr2 = (nextEsc.porcentajes||[]).map(p=>p+'%').join(' + ');
+        nextMsg = ` &nbsp;·&nbsp; <span style="color:#059669">Próximo escalón: <b>${pct2}%</b> (${pctStr2}) pedí $${falta.toLocaleString('es-AR',{minimumFractionDigits:0,maximumFractionDigits:0})} más</span>`;
+      }
+      banner.innerHTML = `✅ <strong>${oferta.nombre}</strong> — Descuento <strong>${pct}%</strong> (${pctStr}) aplicado al pedido${nextMsg}`;
+      banner.style.background='#dcfce7'; banner.style.borderColor='#86efac';
+      banner.style.display='block';
+    } else {
+      // Ningún escalón alcanzado
+      if(window._finMontoEscalonKey){
+        window._finMontoAplicado = false;
+        window._finMontoEscalonKey = null;
+        window._ofertaActivaTipo = null;
+        // Limpiar descuentos por línea aplicados por la oferta
+        nvItems.forEach(it => {
+          if(it._fin_monto_oferta){ it.descuento = 0; it._fin_monto_oferta = false; }
+        });
+        _checkDescuentoMontoRunning = true;
+        renderItems(); // limpia Bon% en cada línea
+        recalcTotal();
+        _checkDescuentoMontoRunning = false;
+      }
+      const sortedAsc = [...oferta.financial_escalones].sort((a,b)=>a.monto_minimo-b.monto_minimo);
+      const firstEsc = sortedAsc[0];
+      if(firstEsc){
+        const falta = firstEsc.monto_minimo - total;
+        let acum=1; (firstEsc.porcentajes||[]).forEach(p=>acum*=(1-p/100));
+        const pct = parseFloat(((1-acum)*100).toFixed(2));
+        const pctStr = (firstEsc.porcentajes||[]).map(p=>p+'%').join(' + ');
+        banner.innerHTML = `💰 <strong>${oferta.nombre}</strong> — Pedí $${falta.toLocaleString('es-AR',{minimumFractionDigits:0,maximumFractionDigits:0})} más para obtener un <strong>${pct}%</strong> de descuento (${pctStr})`;
+        banner.style.background='#fef3c7'; banner.style.borderColor='#fde68a';
+        banner.style.display='block';
+      } else { banner.style.display='none'; }
+    }
+  } else {
+    // ── Modo legacy (un solo umbral, botón manual) ──
+    if(total >= ofertaLegacy.monto_minimo && !window._finMontoAplicado){
+      const pcts = (ofertaLegacy.financial_details||[]).map(d=>d.porcentaje+'%').join(' + ');
+      banner.innerHTML = `💰 <strong>¡Calificás para un descuento!</strong> ${ofertaLegacy.nombre} — Descuento ${pcts}. <button onclick="_aplicarDescuentoMontoLegacy(${ofertaLegacy.id})" class="btn btn-primary btn-sm" style="margin-left:8px">Aplicar ✓</button>`;
+      banner.style.background='#fef3c7'; banner.style.borderColor='#fde68a';
+      banner.style.display='block';
+    } else if(total < ofertaLegacy.monto_minimo){
+      banner.style.display='none';
+      window._finMontoAplicado = false;
+    }
   }
 }
 
-function _aplicarDescuentoMonto(ofertaId){
+function _aplicarDescuentoMontoLegacy(ofertaId){
   const oferta = _ofertasActivas.find(o=>o.id===ofertaId);
   if(!oferta) return;
   let acum=1; (oferta.financial_details||[]).forEach(d=>acum*=(1-d.porcentaje/100));
@@ -4870,8 +5304,13 @@ async function guardarDoc(){
       linea_presupuesto: it.linea_presupuesto || null
     })),
     descuento_general: (esAdminActuando() && !nvItems.some(it=>it.descuento>0)) ? (nvDescuentoGeneral||0) : 0,
-    descuento_promo_pct: (!esAdminActuando() && window._ofertaActivaTipo==='producto') ? (window._promoComboDescuento||0) : 0,
-    descuento_promo_nombre: (!esAdminActuando() && window._ofertaActivaTipo==='producto') ? (window._promoComboNombre||'') : ''
+    // descuento_promo_pct = combo promo OR bonif monto (lo que aplique; ambos van al mismo campo del backend)
+    descuento_promo_pct: (!esAdminActuando() && window._ofertaActivaTipo==='producto')
+      ? (window._promoComboDescuento||0)
+      : (window._bonifMontoAplicado ? (window._bonifMontoPct||0) : 0),
+    descuento_promo_nombre: (!esAdminActuando() && window._ofertaActivaTipo==='producto')
+      ? (window._promoComboNombre||'')
+      : (window._bonifMontoAplicado ? (window._bonifMontoNombre||'Bonif. monto') : '')
   };
   const endpoint=nvTipo==='pedido'?'/pedidos':'/presupuestos';
   try{

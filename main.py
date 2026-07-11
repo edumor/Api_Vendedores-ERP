@@ -66,9 +66,9 @@ ONESIGNAL_APP_ID  = os.getenv('ONESIGNAL_APP_ID', '')
 ONESIGNAL_API_KEY = os.getenv('ONESIGNAL_API_KEY', '')
 
 # ── WhatsApp Business (Meta Cloud API) ────────────────────────────────────────
-WA_PHONE_NUMBER_ID = os.getenv('WA_PHONE_NUMBER_ID', '')
-WA_ACCESS_TOKEN    = os.getenv('WA_ACCESS_TOKEN', '')
-WA_WABA_ID         = os.getenv('WA_WABA_ID', '')        # para crear plantillas
+WA_PHONE_NUMBER_ID = os.getenv('WHATSAPP_PHONE_ID') or os.getenv('WA_PHONE_NUMBER_ID', '')
+WA_ACCESS_TOKEN    = os.getenv('WHATSAPP_TOKEN') or os.getenv('WA_ACCESS_TOKEN', '')
+WA_WABA_ID         = os.getenv('WHATSAPP_WABA_ID') or os.getenv('WA_WABA_ID', '')        # para crear plantillas
 WA_TEMPLATE_CAT    = os.getenv('WA_TEMPLATE_CAT', 'microbell_catalogo')   # nombre plantilla catálogo
 WA_TEMPLATE_SLIDE  = os.getenv('WA_TEMPLATE_SLIDE', 'microbell_catalogo') # nombre plantilla slide (puede ser la misma)
 
@@ -329,6 +329,16 @@ _QV_LAST_COUNTS: dict = {}
 
 app = FastAPI(title="API Vendedores Microbell")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+from meli import router as meli_router
+app.include_router(meli_router)
+
+from import_budget import router as import_budget_router
+app.include_router(import_budget_router)
+
+from import_research import router as import_research_router
+app.include_router(import_research_router)
 
 # ── JWT ───────────────────────────────────────────────────────────────────────
 JWT_SECRET = os.getenv('JWT_SECRET_KEY', 'dev-secret-CAMBIAR')
@@ -649,6 +659,19 @@ def _init_admin_db():
         FOREIGN KEY (offer_id) REFERENCES offers(id) ON DELETE CASCADE
     )""")
     cur.execute("""
+    CREATE TABLE IF NOT EXISTS offer_amount_escalones (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        offer_id INTEGER NOT NULL,
+        monto_minimo REAL NOT NULL,
+        descuento_pct REAL NOT NULL DEFAULT 0,
+        condicion_comercial TEXT,
+        FOREIGN KEY (offer_id) REFERENCES offers(id) ON DELETE CASCADE
+    )""")
+    try:
+        cur.execute("ALTER TABLE offer_amount_escalones ADD COLUMN condicion_comercial TEXT")
+    except Exception:
+        pass
+    cur.execute("""
     CREATE TABLE IF NOT EXISTS app_config (
         clave TEXT PRIMARY KEY,
         valor TEXT,
@@ -664,6 +687,8 @@ def _init_admin_db():
     try: cur.execute("ALTER TABLE offers ADD COLUMN tipo_financiero TEXT DEFAULT 'descuento_total'")
     except Exception: pass
     try: cur.execute("ALTER TABLE offers ADD COLUMN monto_minimo REAL DEFAULT 0")
+    except Exception: pass
+    try: cur.execute("ALTER TABLE offers ADD COLUMN financial_escalones TEXT")
     except Exception: pass
     try: cur.execute("ALTER TABLE offer_product_details ADD COLUMN descripcion TEXT DEFAULT ''")
     except Exception: pass
@@ -692,6 +717,33 @@ def _init_admin_db():
     except Exception: pass
     try: cur.execute("ALTER TABLE catalogos ADD COLUMN push_count INTEGER DEFAULT 0")
     except Exception: pass
+    # Transferencia entre depósitos
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS transferencia_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fecha TEXT DEFAULT (datetime('now','localtime')),
+        usuario TEXT NOT NULL,
+        deposito_origen TEXT NOT NULL,
+        deposito_origen_nombre TEXT,
+        deposito_destino TEXT NOT NULL,
+        deposito_destino_nombre TEXT,
+        total_articulos INTEGER DEFAULT 0,
+        estado TEXT DEFAULT 'ok',
+        detalle TEXT,
+        revertida INTEGER DEFAULT 0
+    )""")
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS transferencia_detalle (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        log_id INTEGER NOT NULL,
+        codigo_articulo TEXT NOT NULL,
+        codigo_particular TEXT NOT NULL,
+        descripcion TEXT,
+        cantidad REAL NOT NULL,
+        stock_origen_anterior REAL,
+        stock_destino_anterior REAL,
+        FOREIGN KEY (log_id) REFERENCES transferencia_log(id) ON DELETE CASCADE
+    )""")
     # Seed: depósitos exclusivos para ECOMMERCE (002 y 013)
     for _dep_seed in ('deposito_exclusivo_002', 'deposito_exclusivo_013'):
         try:
@@ -878,6 +930,37 @@ def admin_impersonate_token(codigousuario: str, _u=Depends(get_admin_user)):
                'exp': datetime.utcnow() + timedelta(hours=1)}
     token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGO)
     return {"token": token, "codigousuario": cod, "nombre": razon}
+
+# ─── Admin: buscar clientes con vendedor asignado (para Pedido/Ppto) ──────────
+@app.get("/admin/pedido/buscar-cliente")
+def admin_pedido_buscar_cliente(q: str = Query('', min_length=2), _u=Depends(get_admin_user)):
+    """Busca clientes activos en Firebird para autocompletar en sec-pedido admin.
+    Devuelve codigovendedor para rellenar el selector de vendedor automáticamente."""
+    try:
+        c = conn()
+        cur = c.cursor()
+        cur.execute("""
+            SELECT FIRST 30
+                CODIGOCLIENTE, RAZONSOCIAL, TRIM(CODIGOPARTICULAR),
+                UPPER(TRIM(CODIGOVENDEDOR))
+            FROM "CLIENTES"
+            WHERE ACTIVO = '1'
+              AND (UPPER(RAZONSOCIAL) CONTAINING UPPER(?) OR CODIGOCLIENTE CONTAINING ?)
+            ORDER BY RAZONSOCIAL
+        """, [q, q])
+        rows = cur.fetchall()
+        c.close()
+        return [
+            {
+                "codigocliente":    str(r[0] or '').strip(),
+                "razonsocial":      str(r[1] or '').strip(),
+                "codigoparticular": str(r[2] or '').strip(),
+                "codigovendedor":   str(r[3] or '').strip(),
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        raise HTTPException(500, detail=str(e))
 
 # ─── Admin: sirve admin.html ──────────────────────────────────────────────────
 @app.get("/admin", response_class=HTMLResponse)
@@ -1211,12 +1294,19 @@ def admin_get_multiplazos_fb(_u=Depends(get_admin_user)):
     try:
         c = conn('WIN1252')
         cur = c.cursor()
-        cur.execute('SELECT CODIGOMULTIPLAZO, DESCRIPCION FROM "MULTIPLAZOS" WHERE ACTIVO=? ORDER BY DESCRIPCION', ('1',))
-        rows = cur.fetchall()
+        try:
+            cur.execute('SELECT CODIGOMULTIPLAZO, DESCRIPCION, FACTURAPEDIDOSCTACTE FROM "MULTIPLAZOS" WHERE ACTIVO=? ORDER BY DESCRIPCION', ('1',))
+            rows = cur.fetchall()
+            result = [{"codigo": str(r[0] or '').strip(), "descripcion": str(r[1] or '').strip(), "cuentacorriente": bool(r[2])} for r in rows]
+        except Exception:
+            cur2 = c.cursor()
+            cur2.execute('SELECT CODIGOMULTIPLAZO, DESCRIPCION FROM "MULTIPLAZOS" WHERE ACTIVO=? ORDER BY DESCRIPCION', ('1',))
+            rows = cur2.fetchall()
+            result = [{"codigo": str(r[0] or '').strip(), "descripcion": str(r[1] or '').strip(), "cuentacorriente": False} for r in rows]
         c.close()
     except Exception as e:
         raise HTTPException(500, str(e))
-    return [{"codigo": str(r[0] or '').strip(), "descripcion": str(r[1] or '').strip()} for r in rows]
+    return result
 
 @app.get("/admin/vendor-multiplazos-fb")
 def admin_get_vendor_multiplazos_fb(_u=Depends(get_admin_user)):
@@ -1286,8 +1376,13 @@ def get_multiplazos_for_vendor(vendedor: Optional[str] = None):
         # Obtener todos los activos de Firebird
         fb = conn('WIN1252')
         cur = fb.cursor()
-        cur.execute('SELECT CODIGOMULTIPLAZO, DESCRIPCION FROM "MULTIPLAZOS" WHERE ACTIVO=? ORDER BY DESCRIPCION', ('1',))
-        todos = [{"codigo": ('' if r[0] is None else str(r[0]).strip()), "descripcion": str(r[1] or '').strip()} for r in cur.fetchall()]
+        try:
+            cur.execute('SELECT CODIGOMULTIPLAZO, DESCRIPCION, FACTURAPEDIDOSCTACTE FROM "MULTIPLAZOS" WHERE ACTIVO=? ORDER BY DESCRIPCION', ('1',))
+            todos = [{"codigo": ('' if r[0] is None else str(r[0]).strip()), "descripcion": str(r[1] or '').strip(), "cuentacorriente": bool(r[2])} for r in cur.fetchall()]
+        except Exception:
+            cur2 = fb.cursor()
+            cur2.execute('SELECT CODIGOMULTIPLAZO, DESCRIPCION FROM "MULTIPLAZOS" WHERE ACTIVO=? ORDER BY DESCRIPCION', ('1',))
+            todos = [{"codigo": ('' if r[0] is None else str(r[0]).strip()), "descripcion": str(r[1] or '').strip(), "cuentacorriente": False} for r in cur2.fetchall()]
         fb.close()
     except Exception:
         todos = []
@@ -1459,7 +1554,8 @@ def get_depositos_publico():
     ]
 
 # ─── Admin: Ajuste de Stock ───────────────────────────────────────────────────
-_PERFILES_GERENTES = {'GERENTES', 'GTES FE'}
+_PERFILES_GERENTES       = {'GERENTES', 'GTES FE'}
+_PERFILES_TRANSFERENCIA  = {'GERENTES', 'GTES FE', 'ADV', 'ADVJUAN'}
 
 def get_gerente_user(credentials: HTTPAuthorizationCredentials = Depends(_bearer)):
     if not credentials:
@@ -1798,6 +1894,454 @@ def ajuste_stock_limpiar_historial(_u=Depends(get_gerente_user)):
     db.close()
     return {"deleted": deleted}
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# ─── TRANSFERENCIA ENTRE DEPÓSITOS ───────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def get_transferencia_user(credentials: HTTPAuthorizationCredentials = Depends(_bearer)):
+    if not credentials:
+        raise HTTPException(401, "No autenticado")
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGO])
+        if payload.get('role') != 'admin':
+            raise HTTPException(403, "Acceso denegado")
+        perfil = str(payload.get('perfil') or '').strip().upper()
+        if perfil not in _PERFILES_TRANSFERENCIA:
+            raise HTTPException(403, f"Perfil '{perfil}' no tiene acceso a Transferencia")
+        return payload
+    except JWTError:
+        raise HTTPException(401, "Token inválido o expirado")
+
+@app.get("/admin/transferencia/buscar-articulo")
+def transferencia_buscar_articulo(q: str = Query(""), _u=Depends(get_transferencia_user)):
+    """Autocompletar artículo por SKU (codigoparticular) o descripción."""
+    q = q.strip()
+    if len(q) < 2:
+        return []
+    try:
+        c = conn('WIN1252'); cur = c.cursor()
+        cur.execute("""
+            SELECT FIRST 15 CODIGOARTICULO, CODIGOPARTICULAR, DESCRIPCION
+            FROM "ARTICULOS"
+            WHERE (UPPER(CODIGOPARTICULAR) STARTING WITH UPPER(?))
+               OR (UPPER(DESCRIPCION) CONTAINING UPPER(?))
+            ORDER BY CODIGOPARTICULAR
+        """, (q.upper(), q.upper()))
+        rows = cur.fetchall(); c.close()
+        return [{"codigo_articulo": str(r[0] or '').strip(),
+                 "codigo_particular": str(r[1] or '').strip(),
+                 "descripcion": str(r[2] or '').strip()} for r in rows]
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+@app.post("/admin/transferencia/preview")
+def transferencia_preview(body: dict, _u=Depends(get_transferencia_user)):
+    dep_origen  = str(body.get('deposito_origen')  or '').strip()
+    dep_destino = str(body.get('deposito_destino') or '').strip()
+    articulos   = body.get('articulos') or []  # [{sku, cantidad}]
+    if not dep_origen or not dep_destino:
+        raise HTTPException(400, "Seleccioná origen y destino")
+    if dep_origen == dep_destino:
+        raise HTTPException(400, "Origen y destino deben ser distintos")
+    if not articulos:
+        raise HTTPException(400, "Sin artículos")
+
+    skus     = [str(a['sku']).strip() for a in articulos if a.get('sku')]
+    qty_map  = {str(a['sku']).strip(): float(a.get('cantidad', 0)) for a in articulos if a.get('sku')}
+    if not skus:
+        raise HTTPException(400, "Sin SKUs válidos")
+    placeholders = ','.join(['?' for _ in skus])
+
+    try:
+        c = conn('WIN1252'); cur = c.cursor()
+        cur.execute(f'SELECT CODIGOARTICULO, CODIGOPARTICULAR, DESCRIPCION FROM "ARTICULOS" WHERE CODIGOPARTICULAR IN ({placeholders})', skus)
+        arts = {str(r[1] or '').strip(): {'codigo_articulo': str(r[0] or '').strip(), 'descripcion': str(r[2] or '').strip()} for r in cur.fetchall()}
+
+        cod_arts = [v['codigo_articulo'] for v in arts.values() if v['codigo_articulo']]
+        stock_origen = {}; stock_destino = {}
+        if cod_arts:
+            ph2 = ','.join(['?' for _ in cod_arts])
+            cur.execute(f"SELECT CODIGOARTICULO, STOCKACTUAL FROM \"CASILLEROS\" WHERE CODIGOARTICULO IN ({ph2}) AND CODIGODEPOSITO=? AND LOTE='000'", cod_arts + [dep_origen])
+            stock_origen = {str(r[0] or '').strip(): float(r[1] or 0) for r in cur.fetchall()}
+            cur.execute(f"SELECT CODIGOARTICULO, STOCKACTUAL FROM \"CASILLEROS\" WHERE CODIGOARTICULO IN ({ph2}) AND CODIGODEPOSITO=? AND LOTE='000'", cod_arts + [dep_destino])
+            stock_destino = {str(r[0] or '').strip(): float(r[1] or 0) for r in cur.fetchall()}
+
+        rem_origen = {}; rem_destino = {}
+        try:
+            cur.execute(f"SELECT ID_ARTICULO, STOCKREMANENTE FROM \"FMA_STOCK\"(NULL, NULL, '{dep_origen}', 1, 1)")
+            rem_origen = {str(r[0] or '').strip(): float(r[1] or 0) for r in cur.fetchall()}
+        except Exception: pass
+        try:
+            cur.execute(f"SELECT ID_ARTICULO, STOCKREMANENTE FROM \"FMA_STOCK\"(NULL, NULL, '{dep_destino}', 1, 1)")
+            rem_destino = {str(r[0] or '').strip(): float(r[1] or 0) for r in cur.fetchall()}
+        except Exception: pass
+        c.close()
+
+        no_encontrados = [s for s in skus if s not in arts]
+        resultado = []
+        for sku in skus:
+            if sku not in arts: continue
+            art = arts[sku]; cod = art['codigo_articulo']
+            cant = qty_map.get(sku, 0)
+            st_orig = stock_origen.get(cod, 0); st_dest = stock_destino.get(cod, 0)
+            rem_orig = rem_origen.get(cod, 0);  rem_dest = rem_destino.get(cod, 0)
+            resultado.append({
+                'codigo_articulo': cod, 'codigo_particular': sku,
+                'descripcion': art['descripcion'], 'cantidad': cant,
+                'stock_origen': st_orig,        'stock_origen_post': st_orig - cant,
+                'remanente_origen': rem_orig,   'remanente_origen_post': rem_orig - cant,
+                'stock_destino': st_dest,       'stock_destino_post': st_dest + cant,
+                'remanente_destino': rem_dest,  'remanente_destino_post': rem_dest + cant,
+                'alerta': st_orig < cant
+            })
+        return {'articulos': resultado, 'no_encontrados': no_encontrados}
+    except HTTPException: raise
+    except Exception as e: raise HTTPException(500, str(e))
+
+@app.post("/admin/transferencia/procesar")
+def transferencia_procesar(body: dict, _u=Depends(get_transferencia_user)):
+    dep_origen         = str(body.get('deposito_origen')         or '').strip()
+    dep_destino        = str(body.get('deposito_destino')        or '').strip()
+    dep_origen_nombre  = str(body.get('deposito_origen_nombre')  or dep_origen).strip()
+    dep_destino_nombre = str(body.get('deposito_destino_nombre') or dep_destino).strip()
+    articulos          = body.get('articulos') or []
+    usuario            = _u.get('sub', '?')
+
+    if not dep_origen or not dep_destino:
+        raise HTTPException(400, "Seleccioná origen y destino")
+    if dep_origen == dep_destino:
+        raise HTTPException(400, "Origen y destino deben ser distintos")
+    if not articulos:
+        raise HTTPException(400, "Sin artículos")
+
+    from datetime import date as _date, datetime as _dt
+    # Fecha de operación: la que manda el frontend (para registrar en Flexxus)
+    fecha_op_str = str(body.get('fecha_operacion') or '').strip()
+    try:
+        hoy_date = _date.fromisoformat(fecha_op_str) if fecha_op_str else _date.today()
+    except ValueError:
+        hoy_date = _date.today()
+    ahora = _dt.now()
+
+    db = _admin_db(); cur_db = db.cursor()
+    cur_db.execute(
+        "INSERT INTO transferencia_log (usuario, deposito_origen, deposito_origen_nombre, deposito_destino, deposito_destino_nombre, estado) VALUES (?,?,?,?,?,'pending')",
+        (usuario, dep_origen, dep_origen_nombre, dep_destino, dep_destino_nombre)
+    )
+    log_id = cur_db.lastrowid; db.commit()
+
+    procesados = 0; errores = []
+
+    try:
+        fb = conn('WIN1252'); fb_cur = fb.cursor()
+        fb_cur.execute('SELECT MAX(NUMEROMOVIMIENTO) FROM "CORRECCIONESSTOCKMANUALES"')
+        next_num = int(fb_cur.fetchone()[0] or 0) + 1
+
+        for a in articulos:
+            cod_art  = str(a.get('codigo_articulo') or '').strip()
+            sku      = str(a.get('codigo_particular') or '').strip()
+            desc     = str(a.get('descripcion') or '').strip()
+            cantidad = float(a.get('cantidad', 0))
+            if not cod_art or cantidad <= 0: continue
+            try:
+                # Leer stock actual de origen
+                fb_cur.execute("SELECT STOCKACTUAL FROM \"CASILLEROS\" WHERE CODIGOARTICULO=? AND CODIGODEPOSITO=? AND LOTE='000'", (cod_art, dep_origen))
+                row = fb_cur.fetchone(); st_orig = float(row[0] if row else 0)
+                # Leer stock actual de destino
+                fb_cur.execute("SELECT STOCKACTUAL FROM \"CASILLEROS\" WHERE CODIGOARTICULO=? AND CODIGODEPOSITO=? AND LOTE='000'", (cod_art, dep_destino))
+                row = fb_cur.fetchone(); st_dest = float(row[0] if row else 0)
+
+                # Guardar backup en SQLite
+                cur_db.execute(
+                    "INSERT INTO transferencia_detalle (log_id, codigo_articulo, codigo_particular, descripcion, cantidad, stock_origen_anterior, stock_destino_anterior) VALUES (?,?,?,?,?,?,?)",
+                    (log_id, cod_art, sku, desc, cantidad, st_orig, st_dest)
+                )
+
+                # Actualizar CASILLEROS origen (baja)
+                fb_cur.execute("UPDATE \"CASILLEROS\" SET STOCKACTUAL=? WHERE CODIGOARTICULO=? AND CODIGODEPOSITO=? AND LOTE='000'", (max(0.0, st_orig - cantidad), cod_art, dep_origen))
+                if fb_cur.rowcount == 0:
+                    fb_cur.execute("UPDATE \"CASILLEROS\" SET STOCKACTUAL=? WHERE CODIGOARTICULO=? AND CODIGODEPOSITO=?", (max(0.0, st_orig - cantidad), cod_art, dep_origen))
+
+                # Actualizar CASILLEROS destino (suba)
+                fb_cur.execute("UPDATE \"CASILLEROS\" SET STOCKACTUAL=? WHERE CODIGOARTICULO=? AND CODIGODEPOSITO=? AND LOTE='000'", (st_dest + cantidad, cod_art, dep_destino))
+                if fb_cur.rowcount == 0:
+                    fb_cur.execute("UPDATE \"CASILLEROS\" SET STOCKACTUAL=? WHERE CODIGOARTICULO=? AND CODIGODEPOSITO=?", (st_dest + cantidad, cod_art, dep_destino))
+
+                # Recalcular STOCK global
+                fb_cur.execute("UPDATE \"STOCK\" SET STOCKACTUAL=(SELECT SUM(STOCKACTUAL) FROM \"CASILLEROS\" WHERE CODIGOARTICULO=?),FECHAMODIFICACION=? WHERE CODIGOARTICULO=?", (cod_art, ahora, cod_art))
+
+                stock_desc = f'TRANSF API {hoy_date.isoformat()}'
+                # Auditoría — EGRESO de origen
+                fb_cur.execute("""
+                    INSERT INTO "CORRECCIONESSTOCKMANUALES"
+                    (NUMEROMOVIMIENTO,FECHA,CODIGOUSUARIO,INGRESO,EGRESO,
+                     CODIGOARTICULO,LOTE,STOCK,OBSERVACIONES,CODIGODEPOSITO,
+                     NUMEROTRANSACCION,COSTOUNITARIO,CODIGOMOTIVOAJUSTE,FECHAMODIFICACION,HORA)
+                    VALUES (?,?,?,0,?,?,?,?,?,?,0,0.0,1,?,?)
+                """, (next_num, hoy_date, usuario, cantidad, cod_art, '000', stock_desc,
+                      f'Transferencia a dep {dep_destino} | TRF-{log_id}', dep_origen, ahora, ahora))
+                next_num += 1
+                # Auditoría — INGRESO a destino
+                fb_cur.execute("""
+                    INSERT INTO "CORRECCIONESSTOCKMANUALES"
+                    (NUMEROMOVIMIENTO,FECHA,CODIGOUSUARIO,INGRESO,EGRESO,
+                     CODIGOARTICULO,LOTE,STOCK,OBSERVACIONES,CODIGODEPOSITO,
+                     NUMEROTRANSACCION,COSTOUNITARIO,CODIGOMOTIVOAJUSTE,FECHAMODIFICACION,HORA)
+                    VALUES (?,?,?,?,0,?,?,?,?,?,0,0.0,1,?,?)
+                """, (next_num, hoy_date, usuario, cantidad, cod_art, '000', stock_desc,
+                      f'Transferencia desde dep {dep_origen} | TRF-{log_id}', dep_destino, ahora, ahora))
+                next_num += 1
+                procesados += 1
+            except Exception as e_art:
+                errores.append(f"{sku}: {e_art}")
+        fb.commit(); fb.close()
+        db.commit()
+    except Exception as e:
+        errores.append(str(e))
+
+    estado = 'ok' if not errores else ('parcial' if procesados > 0 else 'error')
+    db.execute("UPDATE transferencia_log SET estado=?,detalle=?,total_articulos=? WHERE id=?",
+               (estado, '; '.join(errores)[:500] or None, procesados, log_id))
+    db.commit(); db.close()
+    if estado == 'error':
+        raise HTTPException(500, errores[0] if errores else 'Error')
+    return {"ok": True, "log_id": log_id, "procesados": procesados, "estado": estado, "errores": errores}
+
+@app.post("/admin/transferencia/revertir/{log_id}")
+def transferencia_revertir(log_id: int, _u=Depends(get_transferencia_user)):
+    db = _admin_db()
+    log = db.execute("SELECT * FROM transferencia_log WHERE id=?", (log_id,)).fetchone()
+    if not log:
+        db.close(); raise HTTPException(404, f"Log {log_id} no encontrado")
+    if log['revertida']:
+        db.close(); raise HTTPException(400, "Esta transferencia ya fue revertida")
+    detalles = db.execute("SELECT * FROM transferencia_detalle WHERE log_id=?", (log_id,)).fetchall()
+    if not detalles:
+        db.close(); raise HTTPException(404, "Sin detalle para esta transferencia")
+    dep_origen  = log['deposito_origen']
+    dep_destino = log['deposito_destino']
+    db.close()
+
+    from datetime import datetime as _dt
+    ahora = _dt.now()
+    revertidos = []; errores = []
+    try:
+        fb = conn('WIN1252'); fb_cur = fb.cursor()
+        for d in detalles:
+            cod_art    = d['codigo_articulo']
+            st_orig_ant = float(d['stock_origen_anterior'] or 0)
+            st_dest_ant = float(d['stock_destino_anterior'] or 0)
+            try:
+                fb_cur.execute("UPDATE \"CASILLEROS\" SET STOCKACTUAL=? WHERE CODIGOARTICULO=? AND CODIGODEPOSITO=? AND LOTE='000'", (st_orig_ant, cod_art, dep_origen))
+                fb_cur.execute("UPDATE \"CASILLEROS\" SET STOCKACTUAL=? WHERE CODIGOARTICULO=? AND CODIGODEPOSITO=? AND LOTE='000'", (st_dest_ant, cod_art, dep_destino))
+                fb_cur.execute("UPDATE \"STOCK\" SET STOCKACTUAL=(SELECT SUM(STOCKACTUAL) FROM \"CASILLEROS\" WHERE CODIGOARTICULO=?),FECHAMODIFICACION=? WHERE CODIGOARTICULO=?", (cod_art, ahora, cod_art))
+                revertidos.append(cod_art)
+            except Exception as e:
+                errores.append(f"{cod_art}: {e}")
+        fb.commit(); fb.close()
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+    db2 = _admin_db()
+    det = f"Revertida {ahora.strftime('%Y-%m-%d %H:%M')}" + (f" | Errores: {'; '.join(errores)}" if errores else '')
+    db2.execute("UPDATE transferencia_log SET revertida=1, detalle=? WHERE id=?", (det, log_id))
+    db2.commit(); db2.close()
+    return {"ok": True, "log_id": log_id, "revertidos": len(revertidos), "errores": errores}
+
+@app.get("/admin/transferencia/historial")
+def transferencia_historial(_u=Depends(get_transferencia_user)):
+    db = _admin_db()
+    rows = db.execute(
+        "SELECT id,fecha,usuario,deposito_origen,deposito_origen_nombre,deposito_destino,deposito_destino_nombre,"
+        "total_articulos,estado,detalle,revertida FROM transferencia_log ORDER BY fecha DESC LIMIT 50"
+    ).fetchall()
+    result = []
+    for r in rows:
+        row = dict(r)
+        detalles = db.execute(
+            "SELECT codigo_particular,descripcion,cantidad,stock_origen_anterior,stock_destino_anterior FROM transferencia_detalle WHERE log_id=?",
+            (r['id'],)
+        ).fetchall()
+        row['detalle_items'] = [dict(d) for d in detalles]
+        result.append(row)
+    db.close()
+    return result
+
+
+def _transferencia_get(log_id: int):
+    db = _admin_db()
+    log = db.execute(
+        "SELECT id,fecha,usuario,deposito_origen,deposito_origen_nombre,deposito_destino,deposito_destino_nombre,"
+        "total_articulos,estado,detalle,revertida FROM transferencia_log WHERE id=?", (log_id,)
+    ).fetchone()
+    if not log:
+        db.close()
+        raise HTTPException(404, f"Transferencia {log_id} no encontrada")
+    detalles = db.execute(
+        "SELECT codigo_articulo,codigo_particular,descripcion,cantidad,stock_origen_anterior,stock_destino_anterior "
+        "FROM transferencia_detalle WHERE log_id=? ORDER BY id", (log_id,)
+    ).fetchall()
+    db.close()
+    return dict(log), [dict(d) for d in detalles]
+
+
+@app.get("/admin/transferencia/{log_id}/excel")
+def transferencia_exportar_excel(log_id: int, _u=Depends(get_transferencia_user)):
+    log, detalles = _transferencia_get(log_id)
+    try:
+        import io
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Transferencia"
+
+        hdr_fill   = PatternFill("solid", fgColor="1A56DB")
+        hdr_font   = Font(bold=True, color="FFFFFFFF", size=10)
+        title_font = Font(bold=True, size=13, color="111827")
+        sub_font   = Font(size=9.5, color="374151")
+        err_font   = Font(size=8.5, italic=True, color="DC2626")
+        right_al   = Alignment(horizontal="right", vertical="center")
+        center_al  = Alignment(horizontal="center", vertical="center")
+        left_al    = Alignment(horizontal="left", vertical="center")
+        NUM_COLS   = 5
+
+        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=NUM_COLS)
+        c = ws.cell(1, 1, f"MICROBELL S.A. — Comprobante de Transferencia entre Depósitos  ·  TRF-{log['id']}")
+        c.font = title_font; c.alignment = left_al
+        ws.row_dimensions[1].height = 22
+
+        origen  = log.get('deposito_origen_nombre') or log.get('deposito_origen')
+        destino = log.get('deposito_destino_nombre') or log.get('deposito_destino')
+        estado  = 'Revertida' if log.get('revertida') else log.get('estado')
+        resumen = (f"Fecha: {log.get('fecha')}  ·  Usuario: {log.get('usuario')}  ·  "
+                   f"Origen: {origen}  →  Destino: {destino}  ·  "
+                   f"Artículos: {log.get('total_articulos')}  ·  Estado: {estado}")
+        ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=NUM_COLS)
+        c2 = ws.cell(2, 1, resumen)
+        c2.font = sub_font; c2.alignment = left_al
+        ws.row_dimensions[2].height = 18
+
+        next_row = 4
+        if log.get('detalle'):
+            ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=NUM_COLS)
+            c3 = ws.cell(3, 1, str(log['detalle'])[:300])
+            c3.font = err_font; c3.alignment = left_al
+            ws.row_dimensions[3].height = 16
+            next_row = 5
+        ws.row_dimensions[next_row - 1].height = 6
+
+        HEADERS = ["SKU", "Descripción", "Cantidad", "Stock Origen (antes)", "Stock Destino (antes)"]
+        for ci, h in enumerate(HEADERS, 1):
+            cell = ws.cell(next_row, ci, h)
+            cell.font = hdr_font; cell.fill = hdr_fill; cell.alignment = center_al
+        ws.row_dimensions[next_row].height = 20
+
+        for ri, d in enumerate(detalles, next_row + 1):
+            ws.cell(ri, 1, d.get('codigo_particular', ''))
+            wc2 = ws.cell(ri, 2, d.get('descripcion', '')); wc2.alignment = left_al
+            wc3 = ws.cell(ri, 3, d.get('cantidad', 0));     wc3.alignment = right_al
+            wc4 = ws.cell(ri, 4, d.get('stock_origen_anterior', 0));  wc4.alignment = right_al
+            wc5 = ws.cell(ri, 5, d.get('stock_destino_anterior', 0)); wc5.alignment = right_al
+
+        ws.column_dimensions['A'].width = 16
+        ws.column_dimensions['B'].width = 44
+        ws.column_dimensions['C'].width = 12
+        ws.column_dimensions['D'].width = 20
+        ws.column_dimensions['E'].width = 20
+
+        buf = io.BytesIO()
+        wb.save(buf); buf.seek(0)
+        fname = f"transferencia_TRF-{log_id}.xlsx"
+        return StreamingResponse(
+            buf,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{fname}"'}
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.get("/admin/transferencia/{log_id}/pdf")
+def transferencia_exportar_pdf(log_id: int, _u=Depends(get_transferencia_user)):
+    log, detalles = _transferencia_get(log_id)
+    try:
+        import io
+
+        buf = io.BytesIO()
+        doc = SimpleDocTemplate(buf, pagesize=A4,
+                                leftMargin=15*mm, rightMargin=15*mm,
+                                topMargin=14*mm, bottomMargin=14*mm)
+
+        st_title = ParagraphStyle('trf_title', fontName='Helvetica-Bold', fontSize=14,
+                                   textColor=colors.HexColor('#111827'), spaceAfter=4)
+        st_sub   = ParagraphStyle('trf_sub', fontName='Helvetica', fontSize=9.5,
+                                   textColor=colors.HexColor('#374151'), spaceAfter=2, leading=13)
+        st_err   = ParagraphStyle('trf_err', fontName='Helvetica-Oblique', fontSize=8.5,
+                                   textColor=colors.HexColor('#DC2626'), spaceAfter=8)
+        st_desc  = ParagraphStyle('trf_desc', fontName='Helvetica', fontSize=8.5,
+                                   textColor=colors.HexColor('#111827'), leading=10)
+
+        origen  = log.get('deposito_origen_nombre') or log.get('deposito_origen')
+        destino = log.get('deposito_destino_nombre') or log.get('deposito_destino')
+        estado  = 'Revertida' if log.get('revertida') else log.get('estado')
+
+        story = []
+        story.append(Paragraph(
+            f"MICROBELL S.A. — Comprobante de Transferencia entre Depósitos &nbsp;·&nbsp; TRF-{log['id']}",
+            st_title
+        ))
+        story.append(Paragraph(
+            f"Fecha: {log.get('fecha')} &nbsp;·&nbsp; Usuario: {log.get('usuario')} &nbsp;·&nbsp; "
+            f"Origen: <b>{origen}</b> &nbsp;→&nbsp; Destino: <b>{destino}</b> &nbsp;·&nbsp; "
+            f"Artículos: {log.get('total_articulos')} &nbsp;·&nbsp; Estado: {estado}", st_sub
+        ))
+        if log.get('detalle'):
+            story.append(Paragraph(str(log['detalle'])[:300], st_err))
+        story.append(Spacer(1, 8))
+
+        BLUE  = colors.HexColor('#1A56DB')
+        ALTBG = colors.HexColor('#EFF6FF')
+
+        tbl_data = [["SKU", "Descripción", "Cantidad", "Stock Origen\n(antes)", "Stock Destino\n(antes)"]]
+        for d in detalles:
+            tbl_data.append([
+                d.get('codigo_particular', ''),
+                Paragraph(d.get('descripcion', '') or '', st_desc),
+                str(d.get('cantidad', 0)),
+                str(d.get('stock_origen_anterior', 0)),
+                str(d.get('stock_destino_anterior', 0)),
+            ])
+
+        tbl = Table(tbl_data, colWidths=[28*mm, 82*mm, 22*mm, 30*mm, 30*mm], repeatRows=1)
+        tbl.setStyle(TableStyle([
+            ('BACKGROUND',    (0,0), (-1,0), BLUE),
+            ('TEXTCOLOR',     (0,0), (-1,0), colors.white),
+            ('FONTNAME',      (0,0), (-1,0), 'Helvetica-Bold'),
+            ('FONTSIZE',      (0,0), (-1,0), 8.5),
+            ('ALIGN',         (0,0), (-1,0), 'CENTER'),
+            ('VALIGN',        (0,0), (-1,-1), 'MIDDLE'),
+            ('FONTNAME',      (0,1), (-1,-1), 'Helvetica'),
+            ('FONTSIZE',      (0,1), (-1,-1), 8.5),
+            ('ROWBACKGROUND', (0,1), (-1,-1), [colors.white, ALTBG]),
+            ('GRID',          (0,0), (-1,-1), 0.3, colors.HexColor('#D1D5DB')),
+            ('ALIGN',         (2,1), (4,-1), 'RIGHT'),
+        ]))
+        story.append(tbl)
+        doc.build(story)
+        buf.seek(0)
+        fname = f"transferencia_TRF-{log_id}.pdf"
+        return StreamingResponse(buf, media_type="application/pdf",
+                                  headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
 @app.post("/admin/audit-event")
 def admin_audit_event(data: dict, request: Request, _u=Depends(get_admin_user)):
     """El frontend registra acciones con contexto semántico (navegación, creación, etc.)"""
@@ -1912,6 +2456,17 @@ def _send_push_catalogo(nombre_catalogo: str, url: str, descripcion: str = '') -
         print(f"[PUSH] Error: {e}")
     return 0
 
+def _normalizar_celular_ar(cel) -> str:
+    """Formato requerido por WhatsApp Cloud API para moviles argentinos: 54 9 <area><numero>.
+    Si falta el 9 despues del codigo de pais (54), lo inserta. Sin esto, Meta devuelve
+    error 133010 'Account not registered' aunque el numero sea correcto."""
+    import re
+    cel = re.sub(r'\D', '', str(cel or ''))
+    if cel.startswith('54') and not cel.startswith('549'):
+        cel = '549' + cel[2:]
+    return cel
+
+
 def _send_whatsapp_catalogo(celulares: list, nombre_catalogo: str, url: str, descripcion: str = '', template_name: str = None) -> int:
     """Envía WA vía Meta Cloud API con template aprobada. Retorna cantidad enviada OK."""
     if not WA_PHONE_NUMBER_ID or not WA_ACCESS_TOKEN:
@@ -1922,7 +2477,7 @@ def _send_whatsapp_catalogo(celulares: list, nombre_catalogo: str, url: str, des
     headers = {'Authorization': f'Bearer {WA_ACCESS_TOKEN}', 'Content-Type': 'application/json'}
     ok_count = 0
     for cel in celulares:
-        cel = str(cel).strip().replace(' ', '').replace('-', '').replace('+', '')
+        cel = _normalizar_celular_ar(cel)
         if not cel:
             continue
         payload = json.dumps({
@@ -1931,13 +2486,12 @@ def _send_whatsapp_catalogo(celulares: list, nombre_catalogo: str, url: str, des
             "type": "template",
             "template": {
                 "name": tpl,
-                "language": {"code": "es"},
+                "language": {"code": "es_AR"},
                 "components": [{
                     "type": "body",
                     "parameters": [
-                        {"type": "text", "text": nombre_catalogo},
-                        {"type": "text", "text": descripcion or '-'},
-                        {"type": "text", "text": url}
+                        {"type": "text", "parameter_name": "nombre_catalogo", "text": nombre_catalogo},
+                        {"type": "text", "parameter_name": "url_catalogo", "text": url}
                     ]
                 }]
             }
@@ -2117,6 +2671,8 @@ def admin_list_catalogos(
             "COALESCE(email_count,0)   AS email_count,"
             "COALESCE(push_enviado,0)  AS push_enviado,"
             "COALESCE(push_count,0)    AS push_count,"
+            "COALESCE(wa_enviado,0)    AS wa_enviado,"
+            "COALESCE(wa_count,0)      AS wa_count,"
             "COALESCE(perfiles_texto,'') AS perfiles_texto "
             "FROM catalogos WHERE activo=1 ORDER BY fecha DESC LIMIT ? OFFSET ?",
             (limit, offset)
@@ -2191,11 +2747,13 @@ async def reenviar_catalogo(cat_id: int, data: dict, background_tasks: Backgroun
     db2.close()
     base_url = str(request.base_url).rstrip('/')
     url = f"{base_url}/catalogo/{token}"
-    mails = [c['mail'] for c in contactos if (c['mail'] or '').strip()]
+    mails     = [c['mail']    for c in contactos if (c['mail']    or '').strip()]
+    celulares = [c['celular'] for c in contactos if (c['celular'] or '').strip()]
     background_tasks.add_task(_send_email_catalogo, mails, nombre, url)
     background_tasks.add_task(_send_push_catalogo, nombre, url)
+    background_tasks.add_task(_send_whatsapp_catalogo, celulares, nombre, url)
     _audit(_u.get('sub','?'), 'Reenvió catálogo', f'{nombre} → {len(contactos)} destinatarios', '', 'Catálogos')
-    return {"ok": True, "destinatarios": len(contactos), "emails": len(mails)}
+    return {"ok": True, "destinatarios": len(contactos), "emails": len(mails), "whatsapps": len(celulares)}
 
 # ── Servir catálogo por token (público) ───────────────────────────────────────
 @app.get("/catalogo/{token}")
@@ -2367,7 +2925,7 @@ def admin_test_email(req: _TestEmailReq, _u=Depends(get_admin_user)):
 @app.post("/admin/test-whatsapp")
 def admin_test_whatsapp(req: _TestWAReq, _u=Depends(get_admin_user)):
     """Envía un WhatsApp de prueba via Meta Cloud API y retorna diagnóstico detallado."""
-    cel = req.celular.strip().replace(' ', '').replace('-', '').replace('+', '')
+    cel = _normalizar_celular_ar(req.celular)
     resultado = {
         "config": {
             "WA_PHONE_NUMBER_ID": WA_PHONE_NUMBER_ID or "(vacío)",
@@ -2398,9 +2956,8 @@ def admin_test_whatsapp(req: _TestWAReq, _u=Depends(get_admin_user)):
                 "components": [{
                     "type": "body",
                     "parameters": [
-                        {"type": "text", "text": "Test Catálogo"},
-                        {"type": "text", "text": "Prueba de envío desde API"},
-                        {"type": "text", "text": "https://vendedores.microbellsa.com.ar"}
+                        {"type": "text", "parameter_name": "nombre_catalogo", "text": "Test Catálogo"},
+                        {"type": "text", "parameter_name": "url_catalogo", "text": "https://vendedores.microbellsa.com.ar"}
                     ]
                 }]
             }
@@ -3256,8 +3813,10 @@ def _load_offer_relations(c, o):
     o['profiles']           = [r[0] for r in c.execute("SELECT perfil_codigo FROM offer_profiles WHERE offer_id=?", (oid,)).fetchall()]
     o['category_filters']   = [dict(r) for r in c.execute("SELECT nivel, valor FROM offer_category_filters WHERE offer_id=?", (oid,)).fetchall()]
     o['combo_escalones']    = [dict(r) for r in c.execute("SELECT min_combos, descuento_pct FROM offer_combo_escalones WHERE offer_id=? ORDER BY min_combos", (oid,)).fetchall()]
+    o['amount_escalones']   = [dict(r) for r in c.execute("SELECT monto_minimo, descuento_pct, condicion_comercial FROM offer_amount_escalones WHERE offer_id=? ORDER BY monto_minimo", (oid,)).fetchall()]
     for k,d in [('deposito',''),('tipo_financiero','descuento_total'),('monto_minimo',0),('cupo',0),('usos',0)]:
         if k not in o: o[k] = d
+    o['financial_escalones'] = json.loads(o['financial_escalones']) if o.get('financial_escalones') else []
     return o
 
 @app.get("/admin/rotacion-filtros")
@@ -3282,6 +3841,30 @@ def admin_rotacion_filtros(_u=Depends(get_admin_user)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.get("/admin/debug-multiplazos-columns")
+def admin_debug_multiplazos_columns(_u=Depends(get_admin_user)):
+    """Debug: lista todas las columnas de la tabla MULTIPLAZOS en Firebird."""
+    try:
+        c = conn('WIN1252')
+        cur = c.cursor()
+        cur.execute("""
+            SELECT rf.RDB$FIELD_NAME, f.RDB$FIELD_TYPE, f.RDB$FIELD_LENGTH
+            FROM RDB$RELATION_FIELDS rf
+            JOIN RDB$FIELDS f ON f.RDB$FIELD_NAME = rf.RDB$FIELD_SOURCE
+            WHERE rf.RDB$RELATION_NAME = 'MULTIPLAZOS'
+            ORDER BY rf.RDB$FIELD_POSITION
+        """)
+        cols = [{"nombre": r[0].strip(), "tipo": r[1], "longitud": r[2]} for r in cur.fetchall()]
+        # También devolver la fila del multiplazo 36 (PREVENTA) para ver valores
+        cur2 = c.cursor()
+        cur2.execute('SELECT * FROM "MULTIPLAZOS" WHERE CODIGOMULTIPLAZO=?', ('36',))
+        row = cur2.fetchone()
+        row_dict = {cols[i]['nombre']: row[i] for i in range(len(cols))} if row else {}
+        c.close()
+        return {"columnas": cols, "ejemplo_multiplazo_36": row_dict}
+    except Exception as e:
+        raise HTTPException(500, str(e))
 
 @app.get("/admin/debug-tipos-comprobante")
 def admin_debug_tipos_comprobante(_u=Depends(get_admin_user)):
@@ -3620,6 +4203,19 @@ def admin_analisis_rotacion(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+_PACK_QTYS = [10, 20, 30, 40]
+
+
+def _rotacion_precio_pack(r: dict, qty: int):
+    """Replica el cálculo del frontend (admin.html): precio unitario de pack
+    usa precio_bulto_mayorista/bulto_sugerido si hay bulto calculado, sino
+    cae a precio_mayorista. Devuelve None si no hay precio unitario."""
+    bulto = r.get('bulto_sugerido')
+    pbm = r.get('precio_bulto_mayorista')
+    precio_unit = (pbm / bulto) if (pbm and bulto) else (r.get('precio_mayorista') or 0)
+    return round(precio_unit * qty) if precio_unit > 0 else None
+
+
 @app.get("/admin/rotacion/exportar-excel")
 def admin_rotacion_exportar_excel(
     meses: int = 12,
@@ -3699,7 +4295,7 @@ def admin_rotacion_exportar_excel(
         right_al  = Alignment(horizontal="right", vertical="center")
         center_al = Alignment(horizontal="center", vertical="center")
         left_al   = Alignment(horizontal="left", vertical="center", wrap_text=True)
-        NUM_COLS  = 14
+        NUM_COLS  = 16
 
         # Fila 1: Título
         ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=NUM_COLS)
@@ -3725,7 +4321,8 @@ def admin_rotacion_exportar_excel(
         # Fila 5: Encabezados de tabla
         HEADERS = ["Código", "Descripción", "Stock", "Costo ARS", "Últ. Compra",
                    "Lista1 ARS", "Mayorista", "Pub. ML", "Margen May.%",
-                   "Bulto", "Pack May.", "Vendido (u.)", "Rotación %", "Última venta"]
+                   "Pack ×10", "Pack ×20", "Pack ×30", "Pack ×40",
+                   "Vendido (u.)", "Rotación %", "Última venta"]
         for ci, h in enumerate(HEADERS, 1):
             cell = ws.cell(5, ci, h)
             cell.font = hdr_font; cell.fill = hdr_fill; cell.alignment = center_al
@@ -3758,13 +4355,12 @@ def admin_rotacion_exportar_excel(
                 if mg < 0:        c_mg.font = Font(color="DC2626", bold=True)
                 elif mg < pct_ut: c_mg.font = Font(color="D97706")
                 else:             c_mg.font = Font(color="15803D", bold=True)
-            bulto = r.get('bulto_sugerido')
-            wc(10, f"×{bulto}" if bulto else '—',   center_al)
-            pbm = r.get('precio_bulto_mayorista')
-            wc(11, round(pbm) if pbm else '—',       right_al, '#,##0' if pbm else None)
-            wc(12, round(r.get('cantidad_vendida_periodo', 0) or 0), right_al)
-            wc(13, str(r.get('pct_venta', 0) or 0)+'%', center_al)
-            wc(14, r.get('ultimo_movimiento') or '—')
+            for pi, qty in enumerate(_PACK_QTYS):
+                pv = _rotacion_precio_pack(r, qty)
+                wc(10 + pi, pv if pv else '—', right_al, '#,##0' if pv else None)
+            wc(14, round(r.get('cantidad_vendida_periodo', 0) or 0), right_al)
+            wc(15, str(r.get('pct_venta', 0) or 0)+'%', center_al)
+            wc(16, r.get('ultimo_movimiento') or '—')
 
         # Anchos de columna
         ws.column_dimensions['A'].width = 11   # Código
@@ -3776,11 +4372,13 @@ def admin_rotacion_exportar_excel(
         ws.column_dimensions['G'].width = 13   # Mayorista
         ws.column_dimensions['H'].width = 13   # Pub. ML
         ws.column_dimensions['I'].width = 13   # Margen May.%
-        ws.column_dimensions['J'].width = 9    # Bulto
-        ws.column_dimensions['K'].width = 13   # Pack May.
-        ws.column_dimensions['L'].width = 13   # Vendido (u.)
-        ws.column_dimensions['M'].width = 12   # Rotación %
-        ws.column_dimensions['N'].width = 16   # Última venta
+        ws.column_dimensions['J'].width = 11   # Pack ×10
+        ws.column_dimensions['K'].width = 11   # Pack ×20
+        ws.column_dimensions['L'].width = 11   # Pack ×30
+        ws.column_dimensions['M'].width = 11   # Pack ×40
+        ws.column_dimensions['N'].width = 13   # Vendido (u.)
+        ws.column_dimensions['O'].width = 12   # Rotación %
+        ws.column_dimensions['P'].width = 16   # Última venta
 
         buf = io.BytesIO()
         wb.save(buf); buf.seek(0)
@@ -3897,15 +4495,15 @@ def admin_rotacion_exportar_pdf(
 
         col_headers = ["Código", "Descripción", "Stock", "Costo ARS", "Últ.\nCompra",
                        "Lista1", "Mayorista", "Pub. ML", "Margen\nMay.%",
-                       "Bulto", "Pack\nMay.", "Vendido\n(u.)", "Rot.%", "Última\nventa"]
-        col_widths  = [20*mm, 52*mm, 13*mm, 18*mm, 18*mm, 18*mm, 18*mm, 18*mm, 14*mm, 12*mm, 18*mm, 13*mm, 12*mm, 18*mm]
+                       "Pack\n×10", "Pack\n×20", "Pack\n×30", "Pack\n×40",
+                       "Vendido\n(u.)", "Rot.%", "Última\nventa"]
+        col_widths  = [18*mm, 46*mm, 11*mm, 15*mm, 15*mm, 15*mm, 15*mm, 15*mm, 12*mm,
+                       12*mm, 12*mm, 12*mm, 12*mm, 13*mm, 10*mm, 15*mm]
 
         tbl_data = [col_headers]
         row_colors = []  # (row_idx, color) for margen color
         for ri, r in enumerate(rows, 1):
             mg   = r.get('margen_mayorista_pct')
-            bulto = r.get('bulto_sugerido')
-            pbm   = r.get('precio_bulto_mayorista')
             if mg is not None:
                 if mg < 0:        row_colors.append((ri, RED, 8))
                 elif mg < pct_ut: row_colors.append((ri, ORANGE, 8))
@@ -3920,8 +4518,10 @@ def admin_rotacion_exportar_pdf(
                 fmt_ars(r.get('precio_mayorista')),
                 fmt_ars(r.get('precio_meli_pub')),
                 fmt_pct(mg),
-                f"×{bulto}" if bulto else '—',
-                fmt_ars(pbm),
+                fmt_ars(_rotacion_precio_pack(r, 10)),
+                fmt_ars(_rotacion_precio_pack(r, 20)),
+                fmt_ars(_rotacion_precio_pack(r, 30)),
+                fmt_ars(_rotacion_precio_pack(r, 40)),
                 str(round(r.get('cantidad_vendida_periodo', 0) or 0)),
                 fmt_pct(r.get('pct_venta')),
                 r.get('ultimo_movimiento') or '—',
@@ -3941,10 +4541,10 @@ def admin_rotacion_exportar_pdf(
             ('ALIGN',       (2,1), (3,-1), 'RIGHT'),   # Stock, Costo ARS
             ('ALIGN',       (4,1), (4,-1), 'CENTER'),  # Últ. Compra
             ('ALIGN',       (5,1), (7,-1), 'RIGHT'),   # Lista1, Mayorista, Pub. ML
-            ('ALIGN',       (8,1), (9,-1), 'CENTER'),  # Margen, Bulto
-            ('ALIGN',       (10,1), (10,-1), 'RIGHT'), # Pack May.
-            ('ALIGN',       (11,1), (11,-1), 'RIGHT'), # Vendido
-            ('ALIGN',       (12,1), (13,-1), 'CENTER'),# Rot%, Última venta
+            ('ALIGN',       (8,1), (8,-1), 'CENTER'),  # Margen
+            ('ALIGN',       (9,1), (12,-1), 'RIGHT'),  # Pack ×10..×40
+            ('ALIGN',       (13,1), (13,-1), 'RIGHT'), # Vendido
+            ('ALIGN',       (14,1), (15,-1), 'CENTER'),# Rot%, Última venta
         ]
         for (ri, clr, ci) in row_colors:
             base_style.append(('TEXTCOLOR', (ci, ri), (ci, ri), clr))
@@ -4346,7 +4946,8 @@ def admin_get_ofertas(_u=Depends(get_admin_user)):
         o['vendors']          = []
         o['profiles']         = []
         o['category_filters'] = []
-        o['combo_escalones']  = []
+        o['combo_escalones']   = []
+        o['amount_escalones']  = []
         for k, d in [('deposito',''),('tipo_financiero','descuento_total'),('monto_minimo',0),('cupo',0),('usos',0)]:
             if k not in o: o[k] = d
     ph = ','.join('?' * len(ids))
@@ -4366,6 +4967,8 @@ def admin_get_ofertas(_u=Depends(get_admin_user)):
         if r[0] in idx: idx[r[0]]['category_filters'].append({'nivel': r[1], 'valor': r[2]})
     for r in c.execute(f"SELECT offer_id, min_combos, descuento_pct FROM offer_combo_escalones WHERE offer_id IN ({ph}) ORDER BY min_combos", ids):
         if r[0] in idx: idx[r[0]]['combo_escalones'].append({'min_combos': r[1], 'descuento_pct': r[2]})
+    for r in c.execute(f"SELECT offer_id, monto_minimo, descuento_pct, condicion_comercial FROM offer_amount_escalones WHERE offer_id IN ({ph}) ORDER BY monto_minimo", ids):
+        if r[0] in idx: idx[r[0]]['amount_escalones'].append({'monto_minimo': r[1], 'descuento_pct': r[2], 'condicion_comercial': r[3]})
     c.close()
     return offers
 
@@ -4375,11 +4978,19 @@ def _save_offer_relations(c, id_, data):
         dp = float(e.get('descuento_pct') or 0)
         if mc >= 1 and dp > 0:
             c.execute("INSERT INTO offer_combo_escalones (offer_id, min_combos, descuento_pct) VALUES (?,?,?)", (id_, mc, dp))
+    for e in (data.get('amount_escalones') or []):
+        mm = float(e.get('monto_minimo') or 0)
+        dp = float(e.get('descuento_pct') or 0)
+        cc = str(e.get('condicion_comercial') or '').strip() or None
+        if (dp > 0 or cc):  # mm=0 válido: condición se aplica sin mínimo de compra
+            c.execute("INSERT INTO offer_amount_escalones (offer_id, monto_minimo, descuento_pct, condicion_comercial) VALUES (?,?,?,?)", (id_, mm, dp, cc))
     for d in (data.get('product_details') or []):
         c.execute("INSERT INTO offer_product_details (offer_id, codigo_producto, descripcion, cantidad, bonificacion_pct) VALUES (?,?,?,?,?)",
                   (id_, d.get('codigo_producto'), d.get('descripcion',''), d.get('cantidad',1), d.get('bonificacion_pct',0)))
     for i, d in enumerate(data.get('financial_details') or []):
         c.execute("INSERT INTO offer_financial_details (offer_id, porcentaje, orden) VALUES (?,?,?)", (id_, d.get('porcentaje',0), i))
+    fe = data.get('financial_escalones') or []
+    c.execute("UPDATE offers SET financial_escalones=? WHERE id=?", (json.dumps(fe) if fe else None, id_))
     for cond in (data.get('conditions') or []):
         try: c.execute("INSERT OR IGNORE INTO offer_conditions (offer_id, condicion_comercial) VALUES (?,?)", (id_, cond))
         except: pass
@@ -4441,7 +5052,7 @@ def admin_update_oferta(id: int, data: dict, _u=Depends(get_admin_user)):
                activo_nuevo, data.get('deposito','').strip(),
                data.get('tipo_financiero','descuento_total'), data.get('monto_minimo',0), nuevo_cupo, id))
     for tbl in ('offer_product_details','offer_financial_details','offer_conditions',
-                'offer_vendors','offer_profiles','offer_category_filters','offer_combo_escalones'):
+                'offer_vendors','offer_profiles','offer_category_filters','offer_combo_escalones','offer_amount_escalones'):
         c.execute(f"DELETE FROM {tbl} WHERE offer_id=?", (id,))
     _save_offer_relations(c, id, data)
     c.close()
@@ -4542,6 +5153,9 @@ def get_ofertas_for_vendor(vendedor: Optional[str] = None, perfil: Optional[str]
     esc_by_offer  = {}
     for row in c.execute(f"SELECT offer_id, min_combos, descuento_pct FROM offer_combo_escalones WHERE offer_id IN ({ph}) ORDER BY min_combos", ids):
         esc_by_offer.setdefault(row[0], []).append({'min_combos': row[1], 'descuento_pct': row[2]})
+    amt_esc_by_offer = {}
+    for row in c.execute(f"SELECT offer_id, monto_minimo, descuento_pct, condicion_comercial FROM offer_amount_escalones WHERE offer_id IN ({ph}) ORDER BY monto_minimo", ids):
+        amt_esc_by_offer.setdefault(row[0], []).append({'monto_minimo': row[1], 'descuento_pct': row[2], 'condicion_comercial': row[3]})
 
     result = []
     for o in offers:
@@ -4552,8 +5166,12 @@ def get_ofertas_for_vendor(vendedor: Optional[str] = None, perfil: Optional[str]
         od['conditions']        = conds_by_offer.get(oid, [])
         od['category_filters']  = cat_by_offer.get(oid, [])
         od['combo_escalones']   = esc_by_offer.get(oid, [])
+        od['amount_escalones']  = amt_esc_by_offer.get(oid, [])
         for k, d in [('deposito',''),('tipo_financiero','descuento_total'),('monto_minimo',0),('cupo',0),('usos',0)]:
             if k not in od: od[k] = d
+        # Parsear financial_escalones de JSON string a lista
+        fe_raw = od.get('financial_escalones')
+        od['financial_escalones'] = json.loads(fe_raw) if fe_raw else []
         result.append(od)
     c.close()
     return result
@@ -6553,8 +7171,15 @@ def ventas_clientes(vendedor: Optional[str] = None, buscar: Optional[str] = None
 
 
 def _ventas_query(vendedor: Optional[str], cliente: Optional[str],
-                  desde: Optional[str], hasta: Optional[str], limit: int = 2000):
+                  desde: Optional[str], hasta: Optional[str], limit: int = 2000,
+                  grupo: Optional[str] = None, superrubro: Optional[str] = None,
+                  rubro: Optional[str] = None, marca: Optional[str] = None,
+                  articulo: Optional[str] = None):
     """Core query reutilizable por /ventas, /ventas/pdf y /ventas/excel."""
+    # Cuando hay filtros de categoría el límite se aplica ANTES de filtrar
+    # por catálogo, por lo que se necesita traer TODOS los registros del período.
+    if grupo or superrubro or rubro or marca or articulo:
+        limit = 100_000
     from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
     DB_PROD     = 'c:/flexxus/DB/DB-Microbell.gdb'
     DB_MLT_PROD = 'c:/flexxus/DB/DB-MLT-Microbell.gdb'
@@ -6803,30 +7428,65 @@ def _ventas_query(vendedor: Optional[str], cliente: Optional[str],
             r.setdefault('comision', 0)
             r.setdefault('vendedor_nombre', '')
 
+    # ── Filtro por categoría (post-enriquecimiento) ──────────────────────────
+    if grupo or superrubro or rubro or marca or articulo:
+        try:
+            cat_filt, _ = _get_catalog()
+            articulo_norm = articulo.upper().strip() if articulo else None
+            matching_ids: set = set()
+            for art_id, art in cat_filt.items():
+                if grupo      and art.get('codigo_gruposuperrubro', '') != grupo:      continue
+                if superrubro and art.get('codigo_superrubro',      '') != superrubro: continue
+                if rubro      and art.get('codigo_rubro',           '') != rubro:      continue
+                if marca      and art.get('codigomarca',            '') != marca:      continue
+                if articulo_norm:
+                    cp   = art.get('codigoparticular', '').upper()
+                    desc = art.get('descripcion',      '').upper()
+                    if articulo_norm not in cp and articulo_norm not in desc:
+                        continue
+                matching_ids.add(str(art_id).strip())
+            antes = len(result)
+            result = [r for r in result if r['cod_articulo'] in matching_ids]
+            print(f"[VENTAS CATFILT] matching_ids={len(matching_ids)} antes={antes} despues={len(result)}")
+        except Exception as e:
+            print(f"[VENTAS CATFILT ERROR] {e}")
+
     return result
 
 
 @app.get("/ventas")
 def ventas(
-    vendedor: Optional[str] = None,
-    cliente:  Optional[str] = None,
-    desde:    Optional[str] = None,
-    hasta:    Optional[str] = None,
+    vendedor:    Optional[str] = None,
+    cliente:     Optional[str] = None,
+    desde:       Optional[str] = None,
+    hasta:       Optional[str] = None,
+    grupo:       Optional[str] = None,
+    superrubro:  Optional[str] = None,
+    rubro:       Optional[str] = None,
+    marca:       Optional[str] = None,
+    articulo:    Optional[str] = None,
     _u=Depends(get_admin_user)
 ):
     """Análisis de ventas para el panel admin. vendedor y cliente son opcionales."""
-    if not vendedor and not cliente and not desde and not hasta:
+    if not vendedor and not cliente and not desde and not hasta \
+       and not grupo and not superrubro and not rubro and not marca and not articulo:
         raise HTTPException(status_code=400, detail="Especificá al menos un filtro (vendedor, cliente o período).")
-    return _ventas_query(vendedor=vendedor, cliente=cliente, desde=desde, hasta=hasta)
+    return _ventas_query(vendedor=vendedor, cliente=cliente, desde=desde, hasta=hasta,
+                         grupo=grupo, superrubro=superrubro, rubro=rubro, marca=marca, articulo=articulo)
 
 
 @app.get("/ventas/pdf")
 def ventas_pdf(
-    vendedor: Optional[str] = None,
-    cliente:  Optional[str] = None,
-    desde:    Optional[str] = None,
-    hasta:    Optional[str] = None,
-    titulo:   Optional[str] = None,
+    vendedor:   Optional[str] = None,
+    cliente:    Optional[str] = None,
+    desde:      Optional[str] = None,
+    hasta:      Optional[str] = None,
+    titulo:     Optional[str] = None,
+    grupo:      Optional[str] = None,
+    superrubro: Optional[str] = None,
+    rubro:      Optional[str] = None,
+    marca:      Optional[str] = None,
+    articulo:   Optional[str] = None,
     _u=Depends(get_admin_user)
 ):
     from reportlab.lib.pagesizes import landscape, A4
@@ -6837,7 +7497,8 @@ def ventas_pdf(
     from io import BytesIO
     from datetime import datetime
 
-    rows = _ventas_query(vendedor=vendedor, cliente=cliente, desde=desde, hasta=hasta)
+    rows = _ventas_query(vendedor=vendedor, cliente=cliente, desde=desde, hasta=hasta,
+                         grupo=grupo, superrubro=superrubro, rubro=rubro, marca=marca, articulo=articulo)
 
     buf = BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=landscape(A4),
@@ -6930,10 +7591,15 @@ def ventas_pdf(
 
 @app.get("/ventas/excel")
 def ventas_excel(
-    vendedor: Optional[str] = None,
-    cliente:  Optional[str] = None,
-    desde:    Optional[str] = None,
-    hasta:    Optional[str] = None,
+    vendedor:   Optional[str] = None,
+    cliente:    Optional[str] = None,
+    desde:      Optional[str] = None,
+    hasta:      Optional[str] = None,
+    grupo:      Optional[str] = None,
+    superrubro: Optional[str] = None,
+    rubro:      Optional[str] = None,
+    marca:      Optional[str] = None,
+    articulo:   Optional[str] = None,
     _u=Depends(get_admin_user)
 ):
     import openpyxl
@@ -6941,7 +7607,8 @@ def ventas_excel(
     from openpyxl.utils import get_column_letter
     from io import BytesIO
 
-    rows = _ventas_query(vendedor=vendedor, cliente=cliente, desde=desde, hasta=hasta)
+    rows = _ventas_query(vendedor=vendedor, cliente=cliente, desde=desde, hasta=hasta,
+                         grupo=grupo, superrubro=superrubro, rubro=rubro, marca=marca, articulo=articulo)
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -8833,7 +9500,7 @@ def get_presupuestos_pendientes(codigocliente: str, db: str = Query("oficial")):
     # Cabezas: aprobadas (FECHAAPROBADO IS NOT NULL), no anuladas, con items pendientes
     cur.execute("""
         SELECT DISTINCT cp.NUMEROCOMPROBANTE, cp.FECHACOMPROBANTE, cp.TOTAL, cp.COMENTARIOS,
-               cp.CODIGOMULTIPLAZO, cp.CODIGOTRANSPORTE, cp.DIRECCION, cp.CODIGODEPOSITO
+               cp.CODIGOMULTIPLAZO, cp.CODIGOTRANSPORTE, cp.DIRECCION
         FROM "CABEZAPRESUPUESTOS" cp
         JOIN "CUERPOPRESUPUESTOS" cu ON cu.NUMEROCOMPROBANTE = cp.NUMEROCOMPROBANTE
         WHERE cp.CODIGOCLIENTE = ?
@@ -8880,7 +9547,7 @@ def get_presupuestos_pendientes(codigocliente: str, db: str = Query("oficial")):
             "codigomultiplazo": str(cab[4] or '0'),
             "codigotransporte": str(cab[5] or '0'),
             "direccion": cab[6] or "",
-            "codigodeposito": str(cab[7] or '001').strip() or '001',
+            "codigodeposito": "001",
             "items": items
         })
     c.close()
@@ -13240,27 +13907,5 @@ def debug_pagos_estructura(vendedor: str = 'RBOCHOR', _u=Depends(get_admin_user)
             result[f"sample_{tabla}_count"] = len(rows2)
         except Exception as e:
             result[f"error_{tabla}"] = str(e)
-
-    return result
-
-    # 3. Suma SIN filtro de ANULADA (solo CUENTACORRIENTE='1', debe>0)
-    # 3. Suma bruta de clientes activos AKRAFFT (sin conversión de moneda)
-    try:
-        rows = _fresh('SELECT CODIGOCLIENTE FROM "CLIENTES" WHERE ACTIVO=? AND UPPER(CODIGOVENDEDOR)=?',
-                      ('1', 'AKRAFFT'))
-        codigos_activos = [str(r[0]).strip() for r in rows if (r[0] or '').strip()]
-        ph = ', '.join(['?'] * len(codigos_activos))
-        rows = _fresh(
-            f'SELECT COUNT(*), SUM(TOTAL+IVA1+IVA2-PAGADO) FROM "CABEZACOMPROBANTES" '
-            f"WHERE CODIGOCLIENTE IN ({ph}) AND CUENTACORRIENTE='1' AND ANULADA='0' "
-            f"AND TIPOCOMPROBANTE NOT IN ('RE','RI','INA') AND (TOTAL+IVA1+IVA2-PAGADO)>0",
-            tuple(codigos_activos)
-        )
-        result["activos_count_con_debe"] = rows[0][0]
-        result["activos_suma_debe_bruta_sin_conversion"] = float(rows[0][1] or 0)
-    except Exception as e:
-        result["error_activos_debe"] = str(e)
-
-
 
     return result

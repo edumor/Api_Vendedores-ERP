@@ -2,9 +2,14 @@
 <html lang="es">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Microbell · Panel de Control</title>
 <link rel="icon" href="/favicon.ico">
+<!-- PWA / iOS home screen -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="C.Panel">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Segoe UI',sans-serif;background:#f0f2f5;color:#1a1a2e}
@@ -67,7 +72,7 @@ tr:hover td{background:#f9fafb}
 /* ─── BADGES ─────────────────────────────────────── */
 .badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:.72rem;font-weight:600}
 .badge-green{background:#d1fae5;color:#065f46}.badge-red{background:#fee2e2;color:#991b1b}
-.badge-blue{background:#dbeafe;color:#1e40af}
+.badge-blue{background:#dbeafe;color:#1e40af}.badge-gray{background:#f3f4f6;color:#6b7280}
 /* ─── TOGGLE ─────────────────────────────────────── */
 .toggle{position:relative;width:44px;height:24px}
 .toggle input{opacity:0;width:0;height:0}
@@ -192,6 +197,32 @@ input:checked + .slider:before{transform:translateX(20px)}
   #hdr-user{max-width:70px}
   .card-title{font-size:.85rem}
 }
+/* ── Transferencia: stack vertical en móvil ── */
+@media (max-width: 768px) {
+  #tr-dep-row{flex-direction:column!important}
+  .tr-dep-sep{display:none!important}
+  #tr-fecha{max-width:100%!important;width:100%!important}
+  #sec-transferencia .form-group{max-width:100%!important}
+  #tr-tbl{font-size:.7rem}
+  #tr-tbl th,#tr-tbl td{padding:3px 5px;white-space:nowrap}
+  /* Manual entry: una sola línea por fila en móvil */
+  #tr-manual-wrap{overflow-x:visible!important}
+  #tr-tbl-manual{display:block;font-size:.78rem;width:100%!important}
+  #tr-tbl-manual thead{display:none}
+  #tr-tbl-manual tbody{display:block}
+  #tr-tbl-manual tr{display:flex!important;flex-wrap:nowrap;align-items:center;gap:5px;padding:5px 0;border-bottom:1px solid #f3f4f6}
+  /* Col 1: SKU input */
+  #tr-tbl-manual tr>td:nth-child(1){flex:0 0 110px;position:relative}
+  #tr-tbl-manual tr>td:nth-child(1) input{width:100%!important;font-size:.76rem;padding:4px 6px}
+  /* Col 2: Descripción truncada */
+  #tr-tbl-manual tr>td:nth-child(2){flex:1 1 0;overflow:hidden;min-width:0}
+  #tr-tbl-manual tr>td:nth-child(2) span{display:block;font-size:.72rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  /* Col 3: Cantidad */
+  #tr-tbl-manual tr>td:nth-child(3){flex:0 0 56px}
+  #tr-tbl-manual tr>td:nth-child(3) input{width:56px!important;padding:4px 4px;font-size:.76rem}
+  /* Col 4: × */
+  #tr-tbl-manual tr>td:nth-child(4){flex:0 0 30px;text-align:center;padding:0}
+}
 </style>
 </head>
 <body>
@@ -202,7 +233,7 @@ input:checked + .slider:before{transform:translateX(20px)}
     <img src="/logo" alt="Microbell">
     <h2>Panel de Control</h2>
     <label>Usuario</label>
-    <input id="l-user" type="text" placeholder="Usuario Flexxus" autocomplete="username">
+    <input id="l-user" type="text" placeholder="Usuario" autocomplete="username">
     <label>Contraseña</label>
     <div class="pass-wrap">
       <input id="l-pass" type="password" placeholder="Contraseña" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()">
@@ -238,6 +269,7 @@ input:checked + .slider:before{transform:translateX(20px)}
     <div class="nav-item" data-sec="pedido" onclick="nav(this)"><span class="icon">📝</span>Pedido/Ppto</div>
     <div class="nav-item gerentes-only" id="nav-ajuste-stock" data-sec="ajuste-stock" onclick="nav(this)" style="display:none"><span class="icon">📊</span>Ajuste Stock</div>
     <div class="nav-item gerentes-only" id="nav-auditoria" data-sec="auditoria" onclick="nav(this)" style="display:none"><span class="icon">🔍</span>Auditoría</div>
+    <div class="nav-item gerentes-only" id="nav-presupuesto" data-sec="presupuesto" onclick="nav(this)" style="display:none"><span class="icon">🧮</span>Presupuesto Imp.</div>
   </nav>
 
   <main id="main">
@@ -339,6 +371,7 @@ input:checked + .slider:before{transform:translateX(20px)}
               <button class="btn btn-success btn-sm" onclick="exportarStock('excel')">📥 Excel</button>
               <button class="btn btn-ghost btn-sm" onclick="exportarStock('pdf')">📄 PDF</button>
               <button class="btn btn-warning btn-sm" onclick="openReservasPanel()" style="background:#fff7ed;color:#c2410c;border:1px solid #fed7aa">📌 Reservas de Stock</button>
+              <button id="btn-sk-transferencia" class="btn btn-ghost btn-sm" onclick="navToTransferencia()" style="display:none;background:#eff6ff;color:#1a56db;border:1px solid #bfdbfe">🔄 Transferencia entre Depósitos</button>
               <span id="sk-export-msg" style="font-size:.78rem;color:#6b7280"></span>
             </div>
             <!-- Tabla -->
@@ -496,7 +529,7 @@ input:checked + .slider:before{transform:translateX(20px)}
           <div class="card-title">📚 Catálogos publicados
             <button class="btn btn-primary btn-sm" style="margin-left:auto" onclick="openModalCatalogo()">+ Subir catálogo</button>
           </div>
-          <p style="color:#6b7280;font-size:.82rem;margin-bottom:12px">30 registros por página — los vendedores asociados reciben email y Push al subir.</p>
+          <p style="color:#6b7280;font-size:.82rem;margin-bottom:12px">30 registros por página — los vendedores asociados reciben email y WhatsApp al subir.</p>
           <div id="cat-lista">Cargando...</div>
         </div>
       </div>
@@ -532,37 +565,75 @@ input:checked + .slider:before{transform:translateX(20px)}
         <h2>📊 Análisis de Ventas</h2>
         <p style="color:#6b7280;font-size:.87rem">Consultá ventas por vendedor y/o cliente con detalle de comprobantes, exportación y dashboard interactivo.</p>
 
-        <!-- FILTROS -->
-        <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin-bottom:14px">
-          <div style="display:flex;flex-direction:column;gap:4px;min-width:180px">
-            <label style="font-size:.8rem;font-weight:600;color:#374151">Vendedor</label>
-            <select id="vta-vend-sel" style="border:1px solid #d1d5db;border-radius:6px;padding:6px 10px;font-size:.88rem"
+        <!-- FILTROS FILA 1: Vendedor / Cliente / Desde / Hasta -->
+        <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;margin-bottom:8px">
+          <div style="display:flex;flex-direction:column;gap:3px;min-width:160px">
+            <label style="font-size:.76rem;font-weight:600;color:#374151">Vendedor</label>
+            <select id="vta-vend-sel" style="border:1px solid #d1d5db;border-radius:6px;padding:5px 8px;font-size:.8rem"
               onchange="vtaOnVendedorChange()">
               <option value="">— Todos —</option>
             </select>
-            <span id="vta-vend-msg" style="font-size:.75rem;color:#dc2626"></span>
+            <span id="vta-vend-msg" style="font-size:.72rem;color:#dc2626"></span>
           </div>
-          <div style="display:flex;flex-direction:column;gap:4px;min-width:260px;position:relative">
-            <label style="font-size:.8rem;font-weight:600;color:#374151">Cliente</label>
+          <div style="display:flex;flex-direction:column;gap:3px;min-width:200px;position:relative">
+            <label style="font-size:.76rem;font-weight:600;color:#374151">Cliente</label>
             <input id="vta-cli-inp" type="text" placeholder="Buscar cliente..." autocomplete="off"
-              style="border:1px solid #d1d5db;border-radius:6px;padding:6px 10px;font-size:.88rem"
+              style="border:1px solid #d1d5db;border-radius:6px;padding:5px 8px;font-size:.8rem"
               oninput="vtaBuscarCliente(this.value)">
             <div id="vta-cli-drop" style="display:none;position:absolute;top:100%;left:0;right:0;background:#fff;
-              border:1px solid #d1d5db;border-radius:6px;z-index:50;max-height:220px;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,.1)"></div>
+              border:1px solid #d1d5db;border-radius:6px;z-index:50;max-height:200px;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,.1)"></div>
             <input type="hidden" id="vta-cli-cod" value="">
           </div>
-          <div style="display:flex;flex-direction:column;gap:4px">
-            <label style="font-size:.8rem;font-weight:600;color:#374151">Desde</label>
-            <input id="vta-desde" type="date" style="border:1px solid #d1d5db;border-radius:6px;padding:6px 10px;font-size:.88rem">
+          <div style="display:flex;flex-direction:column;gap:3px">
+            <label style="font-size:.76rem;font-weight:600;color:#374151">Desde</label>
+            <input id="vta-desde" type="date" style="border:1px solid #d1d5db;border-radius:6px;padding:5px 8px;font-size:.8rem">
           </div>
-          <div style="display:flex;flex-direction:column;gap:4px">
-            <label style="font-size:.8rem;font-weight:600;color:#374151">Hasta</label>
-            <input id="vta-hasta" type="date" style="border:1px solid #d1d5db;border-radius:6px;padding:6px 10px;font-size:.88rem">
+          <div style="display:flex;flex-direction:column;gap:3px">
+            <label style="font-size:.76rem;font-weight:600;color:#374151">Hasta</label>
+            <input id="vta-hasta" type="date" style="border:1px solid #d1d5db;border-radius:6px;padding:5px 8px;font-size:.8rem">
           </div>
-          <button onclick="vtaBuscar()" style="background:#1e429f;color:#fff;border:none;border-radius:6px;
-            padding:8px 22px;font-size:.9rem;font-weight:600;cursor:pointer">🔍 Buscar</button>
-          <button onclick="vtaLimpiar()" style="background:#6b7280;color:#fff;border:none;border-radius:6px;
-            padding:8px 14px;font-size:.9rem;cursor:pointer">✕ Limpiar</button>
+        </div>
+        <!-- FILTROS FILA 2: Categorías + Artículo -->
+        <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;margin-bottom:10px">
+          <div style="display:flex;flex-direction:column;gap:3px;min-width:140px">
+            <label style="font-size:.76rem;font-weight:600;color:#374151">Grupo Super Rubro</label>
+            <select id="vta-gsr" style="border:1px solid #d1d5db;border-radius:6px;padding:5px 8px;font-size:.78rem" onchange="vtaFiltroGSRChange()">
+              <option value="">Todos</option>
+            </select>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:3px;min-width:140px">
+            <label style="font-size:.76rem;font-weight:600;color:#374151">Super Rubro</label>
+            <select id="vta-sr" style="border:1px solid #d1d5db;border-radius:6px;padding:5px 8px;font-size:.78rem" onchange="vtaFiltroSRChange()">
+              <option value="">Todos</option>
+            </select>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:3px;min-width:140px">
+            <label style="font-size:.76rem;font-weight:600;color:#374151">Rubro</label>
+            <select id="vta-rubro" style="border:1px solid #d1d5db;border-radius:6px;padding:5px 8px;font-size:.78rem">
+              <option value="">Todos</option>
+            </select>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:3px;min-width:120px">
+            <label style="font-size:.76rem;font-weight:600;color:#374151">Marca</label>
+            <select id="vta-marca" style="border:1px solid #d1d5db;border-radius:6px;padding:5px 8px;font-size:.78rem">
+              <option value="">Todas</option>
+            </select>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:3px;min-width:180px;position:relative">
+            <label style="font-size:.76rem;font-weight:600;color:#374151">Artículo (código o descripción)</label>
+            <input id="vta-art-inp" type="text" placeholder="Escribí para buscar…" autocomplete="off"
+              style="border:1px solid #d1d5db;border-radius:6px;padding:5px 8px;font-size:.78rem"
+              oninput="vtaBuscarArticulo(this.value)">
+            <div id="vta-art-drop" style="display:none;position:absolute;top:100%;left:0;right:0;background:#fff;
+              border:1px solid #d1d5db;border-radius:6px;z-index:50;max-height:200px;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,.1)"></div>
+            <input type="hidden" id="vta-art-cod" value="">
+          </div>
+          <div style="display:flex;gap:6px;align-items:flex-end;padding-bottom:1px">
+            <button onclick="vtaBuscar()" style="background:#1e429f;color:#fff;border:none;border-radius:6px;
+              padding:7px 18px;font-size:.82rem;font-weight:600;cursor:pointer">🔍 Buscar</button>
+            <button onclick="vtaLimpiar()" style="background:#6b7280;color:#fff;border:none;border-radius:6px;
+              padding:7px 12px;font-size:.82rem;cursor:pointer">✕ Limpiar</button>
+          </div>
         </div>
 
         <!-- RESUMEN + BOTONES EXPORT -->
@@ -613,37 +684,45 @@ input:checked + .slider:before{transform:translateX(20px)}
 
           <!-- KPIs TOTALES -->
           <div id="vta-totales" style="display:none;margin-bottom:18px">
-            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px">
-              <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:12px 16px">
-                <div style="font-size:.7rem;font-weight:700;color:#3b82f6;letter-spacing:.04em;margin-bottom:4px">FACTURACIÓN NETA (sin IVA)</div>
-                <div id="vta-kpi-neto" style="font-size:1.15rem;font-weight:700;color:#1e3a8a">$0</div>
+            <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-bottom:8px">
+              <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:10px 14px">
+                <div style="font-size:.68rem;font-weight:700;color:#3b82f6;letter-spacing:.04em;margin-bottom:3px">FACTURACIÓN NETA (sin IVA) ← coincide con dashboard</div>
+                <div id="vta-kpi-neto" style="font-size:1.1rem;font-weight:700;color:#1e3a8a">$0</div>
               </div>
-              <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:12px 16px">
-                <div style="font-size:.7rem;font-weight:700;color:#16a34a;letter-spacing:.04em;margin-bottom:4px">COSTO MERCADERÍA</div>
-                <div id="vta-kpi-costo" style="font-size:1.15rem;font-weight:700;color:#14532d">$0</div>
+              <div style="background:#dbeafe;border:1px solid #93c5fd;border-radius:8px;padding:10px 14px">
+                <div style="font-size:.68rem;font-weight:700;color:#1d4ed8;letter-spacing:.04em;margin-bottom:3px">TOTAL CON IVA ← coincide con tabla/resumen</div>
+                <div id="vta-kpi-coniva" style="font-size:1.1rem;font-weight:700;color:#1e3a8a">$0</div>
               </div>
-              <div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:12px 16px">
-                <div style="font-size:.7rem;font-weight:700;color:#ea580c;letter-spacing:.04em;margin-bottom:4px">COMISIONES LIQUIDADAS</div>
-                <div id="vta-kpi-comision" style="font-size:1.15rem;font-weight:700;color:#7c2d12">$0</div>
+            </div>
+            <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px">
+              <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:10px 14px">
+                <div style="font-size:.68rem;font-weight:700;color:#16a34a;letter-spacing:.04em;margin-bottom:3px">COSTO MERCADERÍA</div>
+                <div id="vta-kpi-costo" style="font-size:1.1rem;font-weight:700;color:#14532d">$0</div>
+              </div>
+              <div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:10px 14px">
+                <div style="font-size:.68rem;font-weight:700;color:#ea580c;letter-spacing:.04em;margin-bottom:3px">COMISIONES LIQUIDADAS</div>
+                <div id="vta-kpi-comision" style="font-size:1.1rem;font-weight:700;color:#7c2d12">$0</div>
               </div>
             </div>
           </div>
 
-          <p style="font-size:.8rem;color:#6b7280;margin-bottom:12px">Hacé click en una barra para filtrar el otro gráfico.</p>
+          <p style="font-size:.78rem;color:#6b7280;margin-bottom:12px">Hacé click en una barra para cruzar datos.</p>
 
-          <div id="vta-dash-clientes" style="display:none;margin-bottom:28px">
-            <h4 style="font-size:.9rem;font-weight:600;color:#374151;margin-bottom:10px">Top 15 clientes (cantidad + facturación)</h4>
-            <div style="position:relative;height:320px"><canvas id="chartVtaClientes"></canvas></div>
+          <!-- VENDEDORES: siempre visible -->
+          <div id="vta-dash-vendedores" style="margin-bottom:28px">
+            <h4 id="vta-dash-vend-titulo" style="font-size:.88rem;font-weight:600;color:#374151;margin-bottom:8px">📊 Facturación por Vendedor</h4>
+            <div style="position:relative;height:280px"><canvas id="chartVtaVendedores"></canvas></div>
           </div>
 
-          <div id="vta-dash-articulos" style="margin-bottom:28px">
-            <h4 id="vta-dash-art-titulo" style="font-size:.9rem;font-weight:600;color:#374151;margin-bottom:10px">Top 15 artículos más vendidos</h4>
-            <div style="position:relative;height:420px"><canvas id="chartVtaArticulos"></canvas></div>
+          <!-- BARRAS CONDICIONALES: clientes (si filtro artículo) o artículos (si categoría) -->
+          <div id="vta-dash-barras" style="margin-bottom:28px">
+            <h4 id="vta-dash-barras-titulo" style="font-size:.88rem;font-weight:600;color:#374151;margin-bottom:8px">🏆 Top 15 artículos más vendidos</h4>
+            <div style="position:relative;height:380px"><canvas id="chartVtaBarras"></canvas></div>
           </div>
 
           <div id="vta-dash-linea" style="display:none;margin-bottom:28px">
-            <h4 style="font-size:.9rem;font-weight:600;color:#374151;margin-bottom:10px">Evolución mensual de artículos vendidos</h4>
-            <div style="position:relative;height:320px"><canvas id="chartVtaLinea"></canvas></div>
+            <h4 style="font-size:.88rem;font-weight:600;color:#374151;margin-bottom:8px">📈 Evolución mensual</h4>
+            <div style="position:relative;height:280px"><canvas id="chartVtaLinea"></canvas></div>
           </div>
         </div>
 
@@ -690,6 +769,25 @@ input:checked + .slider:before{transform:translateX(20px)}
           Sí — inmediato. El pedido/presupuesto queda guardado con el código del vendedor seleccionado.
           Cuando ese corredor abra su portal, lo verá en su lista de pedidos/presupuestos.
         </div>
+        <!-- Búsqueda por cliente (autocompleta el vendedor automáticamente) -->
+        <div style="margin-top:18px;padding-top:16px;border-top:1px solid #e5e7eb">
+          <label style="font-size:.82rem;font-weight:600;color:#374151">— O buscá directamente por cliente —</label>
+          <div style="margin-top:10px;position:relative" id="ped-cli-wrap">
+            <div style="position:relative">
+              <input type="text" id="ped-cli-input" placeholder="Nombre o código de cliente..." autocomplete="off"
+                style="width:100%;padding:8px 12px;border:1px solid #d1d5db;border-radius:8px;font-size:.88rem;box-sizing:border-box"
+                oninput="pedBuscarCliente(this.value)"
+                onblur="setTimeout(()=>{document.getElementById('ped-cli-lista').style.display='none'},200)">
+              <div id="ped-cli-lista" style="display:none;position:absolute;top:100%;left:0;right:0;z-index:500;
+                background:#fff;border:1px solid #d1d5db;border-radius:8px;
+                box-shadow:0 4px 16px rgba(0,0,0,.12);max-height:220px;overflow-y:auto;margin-top:2px"></div>
+            </div>
+            <div id="ped-cli-sel" style="display:none;margin-top:8px;padding:8px 12px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;font-size:.84rem;color:#166534;align-items:center;gap:8px">
+              ✓ <span id="ped-cli-sel-txt"></span>
+              <button onclick="pedCliLimpiar()" style="margin-left:auto;background:none;border:none;color:#dc2626;cursor:pointer;font-size:.85rem;padding:0">✕</button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   <!-- AUDITORÍA -->
@@ -709,6 +807,145 @@ input:checked + .slider:before{transform:translateX(20px)}
       </div>
       <p style="color:#6b7280;font-size:.82rem;margin-bottom:12px">Registro de acciones del panel — 30 registros por página, paginación completa.</p>
       <div id="audit-table">Cargando...</div>
+    </div>
+  </div>
+
+  <!-- PRESUPUESTO DE IMPORTACION -->
+  <div class="section" id="sec-presupuesto">
+    <div class="card">
+      <h2>🧮 Presupuesto de Importación</h2>
+      <p style="color:#6b7280;font-size:.87rem">Solo visible para perfiles GERENTES y GTES FE. Costeo FOB → CIF → Val.Depósito → Costo Merc. → P.Mayorista → Precio MeLi, con semáforos de competitividad.</p>
+
+      <!-- Listado / selector de presupuestos -->
+      <div id="pi-lista" style="margin-top:16px">
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+          <select id="pi-select" style="border:1px solid #d1d5db;border-radius:6px;padding:6px 10px;font-size:.85rem;min-width:220px">
+            <option value="">Cargando presupuestos...</option>
+          </select>
+          <button class="btn btn-primary btn-sm" onclick="piAbrir()">Abrir</button>
+          <button class="btn btn-ghost btn-sm" onclick="piNuevo()">+ Nuevo presupuesto</button>
+          <button class="btn btn-ghost btn-sm" style="color:#dc2626" onclick="piBorrar()">🗑 Borrar</button>
+        </div>
+      </div>
+
+      <!-- Presupuesto abierto -->
+      <div id="pi-detalle" style="display:none;margin-top:10px">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+          <h3 id="pi-titulo" style="margin:0"></h3>
+          <div id="pi-resumen" style="font-size:.85rem;color:#374151"></div>
+        </div>
+
+        <div class="form-row" style="margin-top:12px;flex-wrap:wrap;gap:10px">
+          <div class="form-group" style="max-width:260px">
+            <label>Rubro / Producto a investigar</label>
+            <input type="text" id="pi-rubro" placeholder="Ej: Carpas y Gazebos" style="width:100%">
+            <span style="font-size:.72rem;color:#9ca3af">Le decís a Claude qué mercadería es para que busque la posición NCM y el arancel en ARCA.</span>
+          </div>
+          <div class="form-group" style="max-width:110px"><label>TC (U$S)</label><input type="number" step="0.01" id="pi-tc"></div>
+          <div class="form-group" style="max-width:110px"><label>C.Dex %</label><input type="number" step="0.1" id="pi-cdex"></div>
+          <div class="form-group" style="max-width:100px"><label>Flete %</label><input type="number" step="0.1" id="pi-flete"></div>
+          <div class="form-group" style="max-width:100px"><label>Seguro %</label><input type="number" step="0.1" id="pi-seguro"></div>
+          <div class="form-group" style="max-width:150px">
+            <label>Arancel DIE % <span title="Derecho de Importación Extrazona, por posición NCM — buscalo en ARCA" style="cursor:help">ⓘ</span></label>
+            <input type="number" step="0.1" id="pi-die">
+            <span id="pi-valdep-calc" style="font-size:.72rem;color:#9ca3af">Val.Dep resultante: -</span>
+            <label style="font-size:.72rem;font-weight:400;display:block;margin-top:4px">
+              <input type="checkbox" id="pi-die-verificado" style="width:auto;vertical-align:middle">
+              Confirmado con despachante
+            </label>
+          </div>
+          <div class="form-group" style="max-width:110px"><label>Costo Merc. %</label><input type="number" step="0.1" id="pi-costomerc"></div>
+          <div class="form-group" style="max-width:110px"><label>P.Mayorista %</label><input type="number" step="0.1" id="pi-pmayorista"></div>
+          <div class="form-group" style="max-width:110px"><label>Meli %</label><input type="number" step="0.1" id="pi-meli"></div>
+          <div class="form-group" style="align-self:flex-end">
+            <button class="btn btn-primary btn-sm" onclick="piGuardarVariables()">Guardar variables</button>
+          </div>
+        </div>
+
+        <!-- Desglose del costeo de nacionalización (recuadro tipo informe) -->
+        <div class="card" style="background:#f8fafc;margin-top:14px;padding:14px">
+          <h4 style="margin:0 0 8px">📋 Desglose del costeo de nacionalización</h4>
+          <div style="overflow-x:auto">
+            <table class="table" style="font-size:.78rem">
+              <thead>
+                <tr><th>Componente</th><th>Base</th><th>%</th><th>Tipo</th><th>Norma</th></tr>
+              </thead>
+              <tbody id="pi-desglose-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Investigación automática en Meli -->
+        <div class="card" style="background:#f8fafc;margin-top:14px;padding:14px">
+          <h4 style="margin:0 0 8px">🔎 Investigar en Meli (automático)</h4>
+          <p style="font-size:.76rem;color:#9ca3af;margin:0 0 10px">
+            Busca en Meli los artículos más relevantes del rubro cargado arriba y arma las filas solo.
+            Aviso: la API pública de Meli no filtra ventas por período histórico — el período queda
+            como dato informativo, el ranking es de relevancia/ventas actuales.
+          </p>
+          <div class="form-row" style="flex-wrap:wrap;gap:10px;align-items:flex-end">
+            <div class="form-group" style="max-width:90px"><label>Cantidad (N)</label><input type="number" id="pi-inv-n" value="10" min="1" max="50"></div>
+            <div class="form-group" style="max-width:150px"><label>Período desde</label><input type="date" id="pi-inv-desde"></div>
+            <div class="form-group" style="max-width:150px"><label>Período hasta</label><input type="date" id="pi-inv-hasta"></div>
+            <div class="form-group"><button class="btn btn-primary btn-sm" onclick="piInvestigar()">Investigar</button></div>
+          </div>
+          <div id="pi-inv-estado" style="font-size:.82rem;color:#374151;margin-top:8px"></div>
+        </div>
+
+        <!-- Pegar en bloque (mientras no hay OAuth de Meli, se investiga a mano) -->
+        <div class="card" style="background:#f8fafc;margin-top:14px;padding:14px">
+          <h4 style="margin:0 0 8px">📋 Pegar en bloque</h4>
+          <p style="font-size:.76rem;color:#9ca3af;margin:0 0 10px">
+            Una fila por artículo, columnas separadas por TAB (pegado directo desde Excel/Sheets):
+            Artículo &#9;Precio mercado $ &#9;Link Meli &#9;Reputación &#9;Vendidos
+          </p>
+          <textarea id="pi-paste-area" rows="6" style="width:100%;font-size:.78rem;font-family:monospace" placeholder="Carpa Dakota 4 personas	46704	https://articulo.mercadolibre.com.ar/...	4.4★ (1000)	1000"></textarea>
+          <div style="margin-top:8px">
+            <button class="btn btn-primary btn-sm" onclick="piPegarBloque()">Importar filas</button>
+          </div>
+        </div>
+
+        <div style="margin:14px 0 8px">
+          <button class="btn btn-ghost btn-sm" onclick="piAgregarFila()">+ Agregar artículo</button>
+        </div>
+
+        <div style="overflow-x:auto">
+          <table class="table" id="pi-tabla" style="font-size:.78rem;white-space:nowrap">
+            <thead>
+              <tr>
+                <th>Artículo</th><th>Categoría</th><th>Reputación</th><th>MOQ</th><th>FOB U$S</th>
+                <th>FOB Act.</th><th>CIF</th><th>Val.Dep</th><th>Costo Merc.</th>
+                <th>P.Mayorista</th><th>Precio Meli U$S</th><th>Precio Meli $</th>
+                <th>Mercado $</th><th>Dif.%</th><th>Semáforo</th><th>Links</th><th></th>
+              </tr>
+            </thead>
+            <tbody id="pi-tbody"><tr><td colspan="17" class="empty">Sin artículos todavía.</td></tr></tbody>
+          </table>
+        </div>
+
+        <!-- Cruce con Firebird (stock propio + Lista 1) -->
+        <div class="card" style="background:#f8fafc;margin-top:14px;padding:14px">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <h4 style="margin:0">📦 ¿Ya vendemos algo parecido? (cruce con Firebird)</h4>
+            <button class="btn btn-ghost btn-sm" onclick="piCruzarFirebird()">Cruzar con Firebird</button>
+          </div>
+          <p style="font-size:.76rem;color:#9ca3af;margin:6px 0 10px">
+            Compara cada artículo contra tu catálogo propio por similitud de descripción (aproximado, no exacto).
+            Si hay coincidencia, muestra stock remanente y Lista 1 + IVA para comparar contra el precio de mercado.
+          </p>
+          <div style="overflow-x:auto">
+            <table class="table" id="pi-tabla-firebird" style="font-size:.78rem;white-space:nowrap">
+              <thead>
+                <tr>
+                  <th>Artículo (Meli)</th><th>¿Tenemos?</th><th>Similitud</th><th>Artículo propio</th>
+                  <th>Stock remanente</th><th>Lista 1</th><th>Lista 1 + IVA</th><th>Mercado $</th><th>Semáforo</th>
+                </tr>
+              </thead>
+              <tbody id="pi-tbody-firebird"><tr><td colspan="9" class="empty">Tocá "Cruzar con Firebird" para comparar.</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -777,6 +1014,115 @@ input:checked + .slider:before{transform:translateX(20px)}
         </div>
       </div>
       <div id="aj-historial" style="margin-top:12px;font-size:.84rem">Cargando...</div>
+    </div>
+  </div>
+
+  <!-- TRANSFERENCIA ENTRE DEPÓSITOS -->
+  <div class="section" id="sec-transferencia">
+    <div class="card">
+      <h2>🔄 Transferencia entre Depósitos</h2>
+      <p style="color:#6b7280;font-size:.87rem">Movimiento de stock entre depósitos del sistema. Descuenta del origen y acredita en el destino con registro en Flexxus.</p>
+
+      <!-- Depósitos -->
+      <div id="tr-dep-row" class="form-row" style="margin-top:16px;gap:12px;flex-wrap:wrap">
+        <div class="form-group" style="min-width:220px;flex:1">
+          <label>Depósito Origen <span style="color:#dc2626">*</span></label>
+          <select id="tr-dep-origen" onchange="trValidarDepositos()"><option value="">Cargando...</option></select>
+        </div>
+        <div class="tr-dep-sep" style="display:flex;align-items:flex-end;padding-bottom:6px;font-size:1.4rem;color:#6b7280">→</div>
+        <div class="form-group" style="min-width:220px;flex:1">
+          <label>Depósito Destino <span style="color:#dc2626">*</span></label>
+          <select id="tr-dep-destino" onchange="trValidarDepositos()"><option value="">Cargando...</option></select>
+        </div>
+      </div>
+      <div id="tr-dep-error" style="color:#dc2626;font-size:.82rem;display:none;margin-top:-8px;margin-bottom:8px">⚠️ Origen y destino deben ser distintos</div>
+
+      <!-- Fecha de operación -->
+      <div class="form-group" style="margin-top:12px;max-width:220px">
+        <label>Fecha de operación <span style="color:#dc2626">*</span></label>
+        <input type="date" id="tr-fecha" style="width:100%;padding:6px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:.88rem;box-sizing:border-box">
+      </div>
+
+      <!-- Tabs CSV / Manual -->
+      <div style="display:flex;gap:0;margin-top:20px;border-bottom:2px solid #e5e7eb">
+        <button id="tr-tab-csv"    onclick="trTabSwitch('csv')"    class="btn btn-ghost btn-sm" style="border-radius:6px 6px 0 0;border-bottom:none;padding:8px 18px;font-weight:600;color:#1a56db;border-bottom:2px solid #1a56db">📄 Importar CSV</button>
+        <button id="tr-tab-manual" onclick="trTabSwitch('manual')" class="btn btn-ghost btn-sm" style="border-radius:6px 6px 0 0;border-bottom:none;padding:8px 18px;color:#6b7280">✍️ Entrada manual</button>
+      </div>
+
+      <!-- Panel CSV -->
+      <div id="tr-panel-csv" style="margin-top:14px">
+        <p style="font-size:.82rem;color:#6b7280">CSV con encabezado <code>SKU,CANTIDAD</code>. Separador: coma o punto y coma.</p>
+        <div style="display:flex;gap:10px;align-items:center;margin-top:8px">
+          <input type="file" id="tr-file" accept=".csv" onchange="trCSVCargar()">
+          <button class="btn btn-secondary btn-sm" onclick="trCSVCargar()">Vista previa</button>
+        </div>
+      </div>
+
+      <!-- Panel Manual -->
+      <div id="tr-panel-manual" style="margin-top:14px;display:none">
+        <p style="font-size:.82rem;color:#6b7280">Ingresá SKU y cantidad para cada artículo. Escribí en el campo SKU para buscar.</p>
+        <div id="tr-manual-wrap" style="overflow-x:auto">
+          <table id="tr-tbl-manual" style="font-size:.83rem;width:100%">
+            <thead><tr>
+              <th style="width:180px">SKU (Cód. Particular)</th>
+              <th style="width:280px">Descripción</th>
+              <th style="width:90px;text-align:right">Cantidad</th>
+              <th style="width:40px"></th>
+            </tr></thead>
+            <tbody id="tr-manual-tbody"></tbody>
+          </table>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:10px">
+          <button class="btn btn-ghost btn-sm" onclick="trManualAddRow()">+ Agregar fila</button>
+          <button class="btn btn-secondary btn-sm" onclick="trPreviewManual()">Vista previa</button>
+        </div>
+      </div>
+
+      <!-- Preview table -->
+      <div id="tr-paso3" style="margin-top:20px;display:none">
+        <h3 style="margin-bottom:8px">Confirmar transferencia</h3>
+        <div id="tr-resumen" style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:12px;margin-bottom:12px;font-size:.85rem"></div>
+        <div style="overflow-x:auto;overflow-y:auto;max-height:50vh">
+          <table id="tr-tbl" style="font-size:.82rem">
+            <thead><tr>
+              <th>SKU</th><th>Descripción</th>
+              <th style="text-align:right">Cant.</th>
+              <th style="text-align:right">St. Origen</th>
+              <th style="text-align:right">St. Orig. Post</th>
+              <th style="text-align:right">Rem. Origen</th>
+              <th style="text-align:right">Rem. Orig. Post</th>
+              <th style="text-align:right">St. Destino</th>
+              <th style="text-align:right">St. Dest. Post</th>
+              <th style="text-align:right">Rem. Dest. Post</th>
+              <th>Alerta</th>
+            </tr></thead>
+            <tbody id="tr-tbody"></tbody>
+          </table>
+        </div>
+        <div style="margin-top:16px;display:flex;gap:10px">
+          <button class="btn btn-primary" id="tr-btn-transferir" onclick="trConfirmar()">🔄 Transferir</button>
+          <button class="btn btn-ghost" onclick="trReset()">Cancelar</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Resultado de la última transferencia realizada -->
+    <div class="card" id="tr-resultado" style="margin-top:20px;display:none;background:#f0fdf4;border:1px solid #bbf7d0">
+      <h3 style="margin:0 0 6px">✅ Transferencia realizada</h3>
+      <div id="tr-resultado-texto" style="font-size:.87rem;color:#374151"></div>
+      <div style="margin-top:12px;display:flex;gap:10px">
+        <button class="btn btn-primary btn-sm" id="tr-resultado-pdf">📄 Descargar PDF</button>
+        <button class="btn btn-secondary btn-sm" id="tr-resultado-excel">📊 Descargar Excel</button>
+      </div>
+    </div>
+
+    <!-- HISTORIAL -->
+    <div class="card" style="margin-top:20px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h3>🕐 Historial de transferencias</h3>
+        <button class="btn btn-ghost btn-sm" onclick="trLoadHistorial()">Actualizar</button>
+      </div>
+      <div id="tr-historial" style="margin-top:12px;font-size:.84rem">Cargando...</div>
     </div>
   </div>
 
@@ -892,19 +1238,18 @@ input:checked + .slider:before{transform:translateX(20px)}
         <table id="tbl-rotacion" style="width:100%;display:none;font-size:.75rem;border-collapse:collapse">
           <thead style="position:sticky;top:0;z-index:2;background:#f9fafb">
             <tr>
-              <th style="white-space:nowrap;padding:6px 8px;border-bottom:2px solid #e5e7eb">Código</th>
-              <th style="padding:6px 8px;border-bottom:2px solid #e5e7eb;min-width:160px;max-width:200px">Descripción</th>
-              <th style="text-align:right;padding:6px 8px;border-bottom:2px solid #e5e7eb;white-space:nowrap">Stock</th>
-              <th style="text-align:right;color:#92400e;padding:6px 8px;border-bottom:2px solid #e5e7eb;white-space:nowrap" title="Costo de reposición en ARS (ya convertido al tipo de cambio vigente)">Costo ARS</th>
-              <th style="text-align:center;white-space:nowrap;padding:6px 8px;border-bottom:2px solid #e5e7eb" title="Fecha del último Remito de Compra (RC) registrado en el sistema">Últ. Compra</th>
-              <th style="text-align:right;padding:6px 8px;border-bottom:2px solid #e5e7eb;white-space:nowrap" title="Lista 1 en ARS (convertido al tipo de cambio)">Lista1 ARS</th>
-              <th style="text-align:right;color:#15803d;padding:6px 8px;border-bottom:2px solid #e5e7eb;white-space:nowrap" title="Precio oferta para canal mayorista">Mayorista</th>
-              <th style="text-align:right;color:#1d4ed8;padding:6px 8px;border-bottom:2px solid #e5e7eb;white-space:nowrap" title="Precio sugerido de publicación en MercadoLibre">Pub. ML</th>
-              <th style="text-align:right;padding:6px 8px;border-bottom:2px solid #e5e7eb;white-space:nowrap" title="Margen sobre costo al precio mayorista">Margen</th>
-              <th style="text-align:center;padding:6px 8px;border-bottom:2px solid #e5e7eb" title="Cantidad sugerida de venta por bulto">Bulto</th>
-              <th style="text-align:right;color:#7c3aed;padding:6px 8px;border-bottom:2px solid #e5e7eb;white-space:nowrap" title="Precio total del pack">Pack May.</th>
-              <th style="text-align:right;padding:6px 8px;border-bottom:2px solid #e5e7eb;white-space:nowrap" title="Cantidad vendida (NV) en el período ÷ stock actual">Ventas</th>
-              <th style="padding:6px 4px;border-bottom:2px solid #e5e7eb"></th>
+              <th style="white-space:nowrap;padding:4px 5px;border-bottom:2px solid #e5e7eb;font-size:.7rem">Código</th>
+              <th style="padding:4px 5px;border-bottom:2px solid #e5e7eb;min-width:110px;max-width:160px;font-size:.7rem">Descripción</th>
+              <th style="text-align:right;padding:4px 5px;border-bottom:2px solid #e5e7eb;white-space:nowrap;font-size:.7rem">Stock</th>
+              <th style="text-align:right;color:#92400e;padding:4px 5px;border-bottom:2px solid #e5e7eb;white-space:nowrap;font-size:.7rem" title="Costo de reposición en ARS">Costo</th>
+              <th style="text-align:center;white-space:nowrap;padding:4px 5px;border-bottom:2px solid #e5e7eb;font-size:.7rem" title="Fecha del último Remito de Compra">Últ.Compra</th>
+              <th style="text-align:right;padding:4px 5px;border-bottom:2px solid #e5e7eb;white-space:nowrap;font-size:.7rem" title="Lista 1 en ARS">Lista1</th>
+              <th style="text-align:right;color:#15803d;padding:4px 5px;border-bottom:2px solid #e5e7eb;white-space:nowrap;font-size:.7rem" title="Precio oferta para canal mayorista">Mayorista</th>
+              <th style="text-align:right;color:#1d4ed8;padding:4px 5px;border-bottom:2px solid #e5e7eb;white-space:nowrap;font-size:.7rem" title="Precio sugerido de publicación en MercadoLibre">Pub.ML</th>
+              <th style="text-align:right;padding:4px 5px;border-bottom:2px solid #e5e7eb;white-space:nowrap;font-size:.7rem" title="Margen sobre costo al precio mayorista">Margen</th>
+              <th style="text-align:right;color:#7c3aed;padding:4px 5px;border-bottom:2px solid #e5e7eb;white-space:nowrap;font-size:.7rem" title="Packs por bulto con precio mayorista total">Packs</th>
+              <th style="text-align:right;padding:4px 5px;border-bottom:2px solid #e5e7eb;white-space:nowrap;font-size:.7rem" title="Cantidad vendida (NV) en el período ÷ stock actual">Ventas</th>
+              <th style="padding:4px 3px;border-bottom:2px solid #e5e7eb"></th>
             </tr>
           </thead>
           <tbody id="rot-tbody"></tbody>
@@ -1095,6 +1440,7 @@ input:checked + .slider:before{transform:translateX(20px)}
         <select id="mo-tipo" onchange="toggleOfertaTipo()">
           <option value="producto">Promoción de productos</option>
           <option value="financiero">Descuento financiero</option>
+          <option value="bonificacion">Bonificación</option>
         </select>
       </div>
     </div>
@@ -1203,10 +1549,14 @@ input:checked + .slider:before{transform:translateX(20px)}
           <input type="radio" name="mo-tipo-fin" value="descuento_monto" onchange="toggleFinanciero()"> Descuento por monto mínimo
         </label>
       </div>
-      <div id="mo-fin-monto-sec" style="display:none;margin-bottom:12px">
-        <label style="font-size:.83rem;font-weight:600;color:#374151">Monto mínimo neto del pedido ($)</label>
-        <input type="number" id="mo-monto-minimo" min="0" step="0.01" placeholder="Ej: 50000"
-          style="width:180px;border:1.5px solid #e5e7eb;border-radius:7px;padding:7px 10px;font-size:.87rem;outline:none;display:block;margin-top:4px">
+      <!-- Escalones financieros por monto -->
+      <div id="mo-fin-esc-sec" style="display:none;margin-bottom:14px;padding:12px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px">
+        <div style="font-weight:600;font-size:.85rem;color:#1e40af;margin-bottom:8px">📊 Escalones por facturación neta <span style="font-weight:400;font-size:.78rem;color:#3b82f6">(acumulativo compuesto)</span></div>
+        <div style="display:grid;grid-template-columns:160px 1fr 28px;gap:6px;font-size:.75rem;font-weight:600;color:#6b7280;margin-bottom:4px;padding:0 2px">
+          <span>Monto mínimo ($)</span><span>Porcentajes de descuento</span><span></span>
+        </div>
+        <div id="mo-fin-esc-rows"></div>
+        <button class="btn btn-ghost btn-sm" style="margin-top:6px;border-color:#2563eb;color:#1d4ed8" onclick="addFinEscalonRow()">+ Agregar escalón</button>
       </div>
       <div style="font-weight:600;font-size:.85rem;margin-bottom:8px;color:#374151">Porcentajes de descuento / bonificación</div>
       <div id="mo-fin-rows" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px"></div>
@@ -1215,6 +1565,52 @@ input:checked + .slider:before{transform:translateX(20px)}
         <button class="btn btn-ghost btn-sm" onclick="addFinPct()">+ Agregar %</button>
       </div>
       <div style="margin-top:8px;font-size:.82rem;color:#6b7280" id="mo-fin-total"></div>
+      <!-- Depósito para oferta financiera -->
+      <div style="margin-top:12px">
+        <label style="font-size:.83rem;font-weight:600;color:#374151">Depósito asociado <span style="font-weight:400;color:#9ca3af">(opcional — auto-selecciona en el pedido cuando aplica el escalón)</span></label>
+        <select id="mo-fin-deposito" style="width:100%;border:1.5px solid #e5e7eb;border-radius:7px;padding:7px 10px;font-size:.87rem;outline:none;margin-top:4px">
+          <option value="">— Sin depósito específico —</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Bonificación -->
+    <div id="mo-bonif-sec" style="display:none">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap">
+        <div style="font-weight:600;font-size:.85rem;color:#374151">Artículos con bonificación <span style="font-weight:400;color:#9ca3af">(SKU + %)</span></div>
+        <span id="mo-bonif-prod-count" style="font-size:.75rem;color:#6b7280"></span>
+        <label class="btn btn-ghost btn-sm" style="border-color:#059669;color:#065f46;cursor:pointer;display:flex;align-items:center;gap:4px">
+          📥 Importar CSV
+          <input type="file" accept=".csv,.txt" style="display:none" onchange="parseBonifCSV(this)">
+        </label>
+        <span style="font-size:.75rem;color:#9ca3af">Columnas: SKU, Bonif%</span>
+      </div>
+      <!-- Cabecera columnas artículos -->
+      <div style="display:grid;grid-template-columns:130px 1fr 80px 30px;gap:6px;align-items:center;font-size:.75rem;font-weight:600;color:#6b7280;padding:0 4px;margin-bottom:4px">
+        <span>Código</span>
+        <span>Descripción</span>
+        <span style="text-align:center">Bonif %</span>
+        <span></span>
+      </div>
+      <div id="mo-bonif-rows"></div>
+      <button class="btn btn-ghost btn-sm" style="margin-top:6px" onclick="addBonifProdRow()">+ Agregar artículo</button>
+
+      <!-- Escalones por facturación neta (acumulativo compuesto) — igual que financiero -->
+      <div style="margin-top:16px;padding:12px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px">
+        <div style="font-weight:600;font-size:.85rem;color:#1e40af;margin-bottom:8px">📊 Escalones por facturación neta <span style="font-weight:400;font-size:.78rem;color:#3b82f6">(acumulativo compuesto)</span></div>
+        <div style="display:grid;grid-template-columns:160px 1fr 28px;gap:6px;font-size:.75rem;font-weight:600;color:#6b7280;margin-bottom:4px;padding:0 2px">
+          <span>Monto mínimo ($)</span><span>Porcentajes de bonificación</span><span></span>
+        </div>
+        <div id="mo-bonif-fin-esc-rows"></div>
+        <button class="btn btn-ghost btn-sm" style="margin-top:6px;border-color:#2563eb;color:#1d4ed8" onclick="addFinEscalonRow()">+ Agregar escalón</button>
+      </div>
+      <!-- Depósito para bonificación con escalones -->
+      <div style="margin-top:12px">
+        <label style="font-size:.83rem;font-weight:600;color:#374151">Depósito asociado <span style="font-weight:400;color:#9ca3af">(opcional — auto-selecciona en el pedido cuando aplica el escalón)</span></label>
+        <select id="mo-bonif-deposito" style="width:100%;border:1.5px solid #e5e7eb;border-radius:7px;padding:7px 10px;font-size:.87rem;outline:none;margin-top:4px">
+          <option value="">— Sin depósito específico —</option>
+        </select>
+      </div>
     </div>
 
     <!-- Condiciones comerciales desde Firebird -->
@@ -1495,7 +1891,7 @@ input:checked + .slider:before{transform:translateX(20px)}
 <script>
 const BASE = '';
 let TOKEN = localStorage.getItem('admin_token') || '';
-let VENDEDORES = [], PERFILES = [], MULTIPLAZOS = [], _ofertas_fin_pcts = [], _oferta_vends = [];
+let VENDEDORES = [], PERFILES = [], MULTIPLAZOS = [], _ofertas_fin_pcts = [], _oferta_vends = [], _oferta_fin_escalones = [];
 let _oferta_conds = [], _oferta_profiles = [], _oferta_cat_filters = {};
 // _oferta_cat_filters = { gruposuperrubro: [], superrubro: [], rubro: [], marca: [] }
 let ADMIN_PERFIL = '';
@@ -1624,9 +2020,31 @@ function _ldShow(){
   if(!el){
     el=document.createElement('div');
     el.id='_mb-loading';
-    el.style.cssText='position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(15,23,42,.92);color:#fff;border-radius:14px;padding:1.5rem 2.2rem;z-index:99999;text-align:center;min-width:230px;box-shadow:0 10px 40px rgba(0,0,0,.55);pointer-events:none';
-    el.innerHTML='<div style="font-size:2rem;margin-bottom:.5rem">⏳</div><div style="font-weight:700;font-size:.95rem;margin-bottom:.35rem;letter-spacing:.01em">Consultando base de datos...</div><div id="_mb-ld-sec" style="font-size:.83rem;opacity:.7">Aguarde un momento</div>';
+    el.style.cssText='position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(15,23,42,.92);color:#fff;border-radius:14px;padding:1.5rem 2.2rem;z-index:99999;text-align:center;min-width:230px;box-shadow:0 10px 40px rgba(0,0,0,.55);cursor:grab;touch-action:none;user-select:none';
+    el.innerHTML='<div style="font-size:.68rem;opacity:.45;letter-spacing:.04em;margin-bottom:.4rem">✥ MOVER</div><div style="font-size:2rem;margin-bottom:.5rem">⏳</div><div style="font-weight:700;font-size:.95rem;margin-bottom:.35rem;letter-spacing:.01em">Consultando base de datos...</div><div id="_mb-ld-sec" style="font-size:.83rem;opacity:.7">Aguarde un momento</div>';
     document.body.appendChild(el);
+    // Drag: mouse + touch
+    let _dx=0,_dy=0,_ox=0,_oy=0,_ld_drag=false;
+    function _ldDragStart(cx,cy){
+      _ld_drag=true; el.style.cursor='grabbing';
+      const r=el.getBoundingClientRect();
+      el.style.transform='none';
+      el.style.left=r.left+'px'; el.style.top=r.top+'px';
+      _ox=r.left; _oy=r.top; _dx=cx; _dy=cy;
+    }
+    function _ldDragMove(cx,cy){
+      if(!_ld_drag) return;
+      const vw=window.innerWidth,vh=window.innerHeight;
+      el.style.left=Math.max(0,Math.min(vw-el.offsetWidth, _ox+(cx-_dx)))+'px';
+      el.style.top =Math.max(0,Math.min(vh-el.offsetHeight,_oy+(cy-_dy)))+'px';
+    }
+    function _ldDragEnd(){ _ld_drag=false; el.style.cursor='grab'; }
+    el.addEventListener('mousedown',e=>{ _ldDragStart(e.clientX,e.clientY); e.preventDefault(); });
+    document.addEventListener('mousemove',e=>_ldDragMove(e.clientX,e.clientY));
+    document.addEventListener('mouseup',_ldDragEnd);
+    el.addEventListener('touchstart',e=>{ const t=e.touches[0]; _ldDragStart(t.clientX,t.clientY); e.preventDefault(); },{passive:false});
+    document.addEventListener('touchmove',e=>{ if(_ld_drag){const t=e.touches[0]; _ldDragMove(t.clientX,t.clientY); e.preventDefault();} },{passive:false});
+    document.addEventListener('touchend',_ldDragEnd);
   }
   _ldSec=0; el.style.display='block';
   clearInterval(_ldSecTmr);
@@ -1671,20 +2089,60 @@ async function apiStrict(method, url, body){
 }
 
 // ─── BOTÓN ATRÁS ANDROID ────────────────────────────────────────────────────
-// Centinela: siempre hay una entrada en el historial para que el botón Atrás
-// nunca salga del sistema — cierra el modal visible en su lugar.
+// Centinela: siempre hay una entrada en el historial. El botón Atrás cierra
+// el modal visible o navega a la sección anterior sin salir del panel.
 (function _initAndroidBack(){
+  let _navStack = ['dashboard'];
+
+  // Mapa sección → función de inicio (resueltas en tiempo de llamada)
+  const _secInit = {
+    'dashboard':    ()=>loadDashboard(),
+    'stock':        ()=>initStock(),
+    'perfiles':     ()=>loadPerfiles(),
+    'asignaciones': ()=>loadAsignacionesPage(),
+    'flags':        ()=>loadFlags(),
+    'multiplazos':  ()=>loadMultiplazos(),
+    'catalogos':    ()=>loadCatalogos(),
+    'ofertas':      ()=>{},
+    'pedido':       ()=>loadPedidoPage(),
+    'ajuste-stock': ()=>ajInit(),
+    'transferencia':()=>trInit(),
+    'auditoria':    ()=>auditLoad(),
+    'rotacion':     ()=>rotCargarFiltros(),
+    'ventas':       ()=>{ vtaCargarVendedores(); vtaCargarFiltros(); },
+    'presupuesto':  ()=>piInit(),
+  };
+
+  function _goBack(sec){
+    document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
+    document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));
+    document.getElementById('topnav').classList.remove('nav-open');
+    const secEl = document.getElementById('sec-'+sec);
+    if(secEl) secEl.classList.add('active');
+    const navEl = document.querySelector(`#topnav .nav-item[data-sec="${sec}"]`);
+    if(navEl) navEl.classList.add('active');
+    _currentSection = sec;
+    if(_secInit[sec]) try{ _secInit[sec](); }catch(e){}
+  }
+
   history.pushState({admin:'sentinel'}, '');
 
   window.addEventListener('popstate', function(){
-    // Cerrar el modal-backdrop abierto de mayor prioridad
+    // 1. Cerrar modal abierto de mayor prioridad
     const abiertos = [...document.querySelectorAll('.modal-backdrop.open')];
     if(abiertos.length){
       closeModal(abiertos[abiertos.length - 1].id);
+    } else if(_navStack.length > 1){
+      // 2. Volver a sección anterior
+      _navStack.pop();
+      _goBack(_navStack[_navStack.length - 1]);
     }
     // Siempre reponer el centinela para el próximo back
     history.pushState({admin:'sentinel'}, '');
   });
+
+  // Expuesto para que nav() y navToTransferencia() registren la navegación
+  window._navPush = function(sec){ _navStack.push(sec); };
 })();
 
 // ─── NAV ───────────────────────────────────────────────────────────────────
@@ -1700,6 +2158,7 @@ function nav(el){
   const sec = el.dataset.sec;
   const _secNombre = el.textContent.trim().replace(/^[\p{Emoji}\s]+/u,'').trim();
   _currentSection = _secNombre;
+  if(window._navPush) window._navPush(sec);
   auditLog('Ingresó al menú', '', _secNombre);
   if(sec==='stock'){ initStock(); }
   else if(sec==='perfiles') loadPerfiles();
@@ -1715,9 +2174,11 @@ function nav(el){
   else if(sec==='pedido') loadPedidoPage();
   else if(sec==='dashboard') loadDashboard();
   else if(sec==='ajuste-stock') ajInit();
+  else if(sec==='transferencia') trInit();
   else if(sec==='auditoria') auditLoad();
   else if(sec==='rotacion') { rotCargarFiltros(); }
-  else if(sec==='ventas') { vtaCargarVendedores(); }
+  else if(sec==='ventas') { vtaCargarVendedores(); vtaCargarFiltros(); }
+  else if(sec==='presupuesto') piInit();
 }
 
 async function initApp(){
@@ -3681,7 +4142,7 @@ async function loadCatalogos(offset){
         <th style="padding:8px 10px">Perfiles / Vendedores</th>
         <th style="padding:8px 10px;white-space:nowrap">Fecha subida</th>
         <th style="padding:8px 10px;text-align:center">📧 Email</th>
-        <th style="padding:8px 10px;text-align:center">🔔 Push</th>
+        <th style="padding:8px 10px;text-align:center">💬 WhatsApp</th>
         <th style="padding:8px 10px">Link</th>
         <th style="padding:8px 10px"></th>
       </tr></thead>
@@ -3698,11 +4159,11 @@ async function loadCatalogos(offset){
         const masV  = c.vendedores&&c.vendedores.length>4?`<span style="color:#9ca3af;font-size:.74rem">+${c.vendedores.length-4}</span>`:'';
         const alcance = perfilesChips || (vends + masV) || '<span style="color:#9ca3af">Todos</span>';
         // Estado notificaciones
-        const emailBadge = c.email_enviado
+        const emailBadge = (c.email_enviado || c.email_count > 0)
           ? `<span style="background:#dcfce7;color:#15803d;padding:2px 8px;border-radius:999px;font-size:.76rem;font-weight:600">✓ ${c.email_count||''}</span>`
-          : (c.email_count===0&&c.wa_count===0&&!c.email_enviado?'<span style="color:#9ca3af;font-size:.76rem">—</span>':'<span style="background:#fee2e2;color:#b91c1c;padding:2px 8px;border-radius:999px;font-size:.76rem">✗</span>');
-        const pushBadge = c.push_enviado
-          ? `<span style="background:#dcfce7;color:#15803d;padding:2px 8px;border-radius:999px;font-size:.76rem;font-weight:600">✓ ${c.push_count||''}</span>`
+          : '<span style="color:#9ca3af;font-size:.76rem">—</span>';
+        const waBadge = (c.wa_enviado || c.wa_count > 0)
+          ? `<span style="background:#dcfce7;color:#15803d;padding:2px 8px;border-radius:999px;font-size:.76rem;font-weight:600">✓ ${c.wa_count||''}</span>`
           : '<span style="color:#9ca3af;font-size:.76rem">—</span>';
         return `<tr style="border-bottom:1px solid #f3f4f6">
           <td style="padding:8px 10px"><strong>${c.nombre}</strong><br><span style="color:#9ca3af;font-size:.74rem">${icon} ${ext.toUpperCase()} · por ${c.subido_por}</span></td>
@@ -3710,7 +4171,7 @@ async function loadCatalogos(offset){
           <td style="padding:8px 10px">${alcance}</td>
           <td style="padding:8px 10px;color:#6b7280;font-size:.79rem;white-space:nowrap">${fecha}</td>
           <td style="padding:8px 10px;text-align:center">${emailBadge}</td>
-          <td style="padding:8px 10px;text-align:center">${pushBadge}</td>
+          <td style="padding:8px 10px;text-align:center">${waBadge}</td>
           <td style="padding:8px 10px;white-space:nowrap">
             <a href="${url}" target="_blank" style="color:#1a56db;font-size:.82rem">🔗 Abrir</a>
             <button onclick="navigator.clipboard.writeText('${url}').then(()=>toast('URL copiada'))" style="background:none;border:none;cursor:pointer;font-size:.78rem;color:#6b7280" title="Copiar URL">📋</button>
@@ -4187,12 +4648,87 @@ async function openModalOfertaById(id){
 
 function toggleOfertaTipo(){
   const t = document.getElementById('mo-tipo').value;
-  document.getElementById('mo-prod-sec').style.display = t==='producto'?'':'none';
-  document.getElementById('mo-fin-sec').style.display  = t==='financiero'?'':'none';
+  document.getElementById('mo-prod-sec').style.display   = t==='producto'?'':'none';
+  document.getElementById('mo-fin-sec').style.display    = t==='financiero'?'':'none';
+  document.getElementById('mo-bonif-sec').style.display  = t==='bonificacion'?'':'none';
+  // Bonificación no requiere depósito ni cupo
+  const depRow = document.getElementById('mo-deposito')?.closest('.form-row');
+  if(depRow) depRow.style.display = t==='bonificacion'?'none':'';
+  // Re-renderizar escalones en el contenedor activo (evita IDs duplicados)
+  renderFinEscalones();
 }
 function toggleFinanciero(){
   const v = document.querySelector('input[name="mo-tipo-fin"]:checked')?.value||'descuento_total';
-  document.getElementById('mo-fin-monto-sec').style.display = v==='descuento_monto'?'':'none';
+  document.getElementById('mo-fin-esc-sec').style.display = v==='descuento_monto'?'':'none';
+}
+
+async function poblarFinDeposito(valorActual, valorBonif){
+  const sel = document.getElementById('mo-fin-deposito');
+  const selB = document.getElementById('mo-bonif-deposito');
+  const base = '<option value="">— Sin depósito específico —</option>';
+  try {
+    const deps = await api('GET','/admin/depositos');
+    const opts = base + deps.map(d=>`<option value="${d.codigo}">${d.codigo} - ${d.nombre}</option>`).join('');
+    if(sel) sel.innerHTML = opts;
+    if(selB) selB.innerHTML = opts;
+  } catch(e){
+    const opts = base + ['001 - DEPOSITO VAC-LOG','002 - DEPOSITO MARKET PLACE','003 - DEPOSITO PACHECO','005 - DEPOSITO OUTLET','013 - DEPOSITO FULL ML','016 - DEPOSITO EXPO']
+      .map(s=>{ const [c,...r]=s.split(' - '); return `<option value="${c}">${s}</option>`; }).join('');
+    if(sel) sel.innerHTML = opts;
+    if(selB) selB.innerHTML = opts;
+  }
+  if(valorActual && sel) sel.value = valorActual;
+  if(valorBonif && selB) selB.value = valorBonif;
+}
+
+function addFinEscalonRow(data){
+  _oferta_fin_escalones.push({monto_minimo: data?.monto_minimo||0, porcentajes: data?.porcentajes||[]});
+  renderFinEscalones();
+}
+
+function renderFinEscalones(){
+  const tipo = document.getElementById('mo-tipo')?.value;
+  const activeId = tipo === 'bonificacion' ? 'mo-bonif-fin-esc-rows' : 'mo-fin-esc-rows';
+  const wrap = document.getElementById(activeId);
+  // Limpiar el otro contenedor para evitar IDs duplicados
+  const otherId = tipo === 'bonificacion' ? 'mo-fin-esc-rows' : 'mo-bonif-fin-esc-rows';
+  const otherWrap = document.getElementById(otherId);
+  if(otherWrap) otherWrap.innerHTML = '';
+  if(!wrap) return;
+  const html = _oferta_fin_escalones.map((e,i)=>{
+    let acum=1; (e.porcentajes||[]).forEach(p=>acum*=(1-p/100));
+    const total = parseFloat(((1-acum)*100).toFixed(2));
+    const pctChips = (e.porcentajes||[]).map((p,j)=>
+      `<span class="chip" style="font-size:.75rem;padding:2px 7px">${p}% <button onclick="_oferta_fin_escalones[${i}].porcentajes.splice(${j},1);renderFinEscalones()">×</button></span>`
+    ).join('');
+    const totalLabel = (e.porcentajes||[]).length>1
+      ? `<span style="font-size:.75rem;color:#1e40af;font-weight:600;margin-left:4px">= ${total}% total</span>` : '';
+    return `<div style="display:grid;grid-template-columns:160px 1fr 28px;gap:6px;align-items:start;margin-bottom:8px;padding:8px 10px;background:#fff;border:1px solid #dbeafe;border-radius:6px">
+      <input type="number" min="0" step="50000" placeholder="Ej: 1500000" value="${e.monto_minimo||''}"
+        style="border:1.5px solid #e5e7eb;border-radius:6px;padding:5px 8px;font-size:.84rem;outline:none;width:100%"
+        oninput="_oferta_fin_escalones[${i}].monto_minimo=parseFloat(this.value)||0">
+      <div>
+        <div style="display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin-bottom:5px;min-height:22px">${pctChips}${totalLabel}</div>
+        <div style="display:flex;gap:6px;align-items:center">
+          <input type="number" step="0.01" min="0.01" placeholder="% ej: 5" id="fin-esc-new-${i}"
+            style="width:90px;border:1.5px solid #e5e7eb;border-radius:6px;padding:4px 7px;font-size:.82rem;outline:none"
+            onkeydown="if(event.key==='Enter'){event.preventDefault();_addFinEscalonPct(${i})}">
+          <button class="btn btn-ghost btn-sm" style="font-size:.78rem;border-color:#2563eb;color:#1d4ed8" onclick="_addFinEscalonPct(${i})">+ %</button>
+        </div>
+      </div>
+      <button onclick="_oferta_fin_escalones.splice(${i},1);renderFinEscalones()"
+        style="background:none;border:none;cursor:pointer;color:#ef4444;font-size:1.1rem;padding:2px;line-height:1">×</button>
+    </div>`;
+  }).join('');
+  wrap.innerHTML = html;
+}
+
+function _addFinEscalonPct(i){
+  const inp = document.getElementById(`fin-esc-new-${i}`); if(!inp) return;
+  const v = parseFloat(inp.value); if(!v||v<=0) return;
+  _oferta_fin_escalones[i].porcentajes.push(v);
+  inp.value = '';
+  renderFinEscalones();
 }
 
 // ── Condiciones comerciales (Firebird multiplazos) ──────────────────────────
@@ -4292,6 +4828,8 @@ async function poblarOfertaSelects(){
 }
 // ─── Escalones de combos ────────────────────────────────────────────────────
 let _oferta_escalones = [];
+// ─── Escalones de monto (bonificación) ──────────────────────────────────────
+let _oferta_amount_escalones = [];
 
 function renderEscalones(){
   const cont = document.getElementById('mo-escalones-rows');
@@ -4317,6 +4855,155 @@ function renderEscalones(){
 function addEscalonRow(){
   _oferta_escalones.push({min_combos: 2, descuento_pct: 0});
   renderEscalones();
+}
+
+// ─── Amount escalones (bonificación por monto) ───────────────────────────────
+function renderAmountEscalones(){
+  const cont = document.getElementById('mo-amount-escalones-rows');
+  if(!cont) return;
+  cont.innerHTML = '';
+  _oferta_amount_escalones.forEach((e, i) => {
+    const tipo = e.tipo || (e.condicion_comercial ? 'condicion' : 'descuento');
+    const mpOpts = MPFB_TODOS.map(m =>
+      `<option value="${m.codigo}" ${m.codigo===e.condicion_comercial?'selected':''}>${m.descripcion}</option>`
+    ).join('');
+    const row = document.createElement('div');
+    row.style.cssText = 'background:#f0fdf4;border:1px solid #bbf7d0;border-radius:7px;padding:8px 10px;margin-bottom:6px';
+    row.innerHTML = `
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <div style="display:flex;align-items:center;gap:6px">
+          <span style="font-size:.78rem;color:#065f46;font-weight:600" title="0 = sin mínimo de compra (aplica a cualquier pedido con estos artículos)">Monto&nbsp;mín.&nbsp;$ <span style="font-size:.7rem;color:#6b7280;font-weight:400">(0=sin mín.)</span></span>
+          <input type="number" min="0" step="0.01" value="${e.monto_minimo||0}"
+            style="border:1.5px solid #6ee7b7;border-radius:6px;padding:4px 7px;font-size:.85rem;outline:none;width:120px"
+            onchange="_oferta_amount_escalones[${i}].monto_minimo=parseFloat(this.value)||0">
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;padding:3px 8px;background:#fff;border:1px solid #bbf7d0;border-radius:6px">
+          <label style="display:flex;align-items:center;gap:4px;cursor:pointer;font-size:.8rem;color:#374151">
+            <input type="radio" name="esc-tipo-${i}" value="descuento" ${tipo!=='condicion'?'checked':''}
+              onchange="_oferta_amount_escalones[${i}].tipo='descuento';renderAmountEscalones()"> Desc%
+          </label>
+          <label style="display:flex;align-items:center;gap:4px;cursor:pointer;font-size:.8rem;color:#374151">
+            <input type="radio" name="esc-tipo-${i}" value="condicion" ${tipo==='condicion'?'checked':''}
+              onchange="_oferta_amount_escalones[${i}].tipo='condicion';renderAmountEscalones()"> Cond. Com.
+          </label>
+        </div>
+        ${tipo==='condicion' ? `
+          <select style="flex:1;min-width:180px;border:1.5px solid #6ee7b7;border-radius:6px;padding:4px 7px;font-size:.82rem;outline:none"
+            onchange="_oferta_amount_escalones[${i}].condicion_comercial=this.value;_oferta_amount_escalones[${i}].descuento_pct=0">
+            <option value="">— Elegir condición —</option>${mpOpts}
+          </select>` : `
+          <input type="number" min="0.01" max="100" step="0.01" value="${e.descuento_pct||0}"
+            style="width:80px;border:1.5px solid #6ee7b7;border-radius:6px;padding:4px 7px;font-size:.85rem;outline:none"
+            placeholder="%" onchange="_oferta_amount_escalones[${i}].descuento_pct=parseFloat(this.value)||0;_oferta_amount_escalones[${i}].condicion_comercial=null">
+          <span style="font-size:.78rem;color:#059669">% sobre total</span>`}
+        <button onclick="_oferta_amount_escalones.splice(${i},1);renderAmountEscalones()"
+          style="margin-left:auto;background:#fef2f2;border:1px solid #fecaca;border-radius:5px;padding:3px 8px;cursor:pointer;color:#dc2626;font-size:.8rem">✕</button>
+      </div>`;
+    cont.appendChild(row);
+  });
+}
+function addAmountEscalonRow(){
+  _oferta_amount_escalones.push({monto_minimo: 0, descuento_pct: 0, condicion_comercial: null, tipo: 'descuento'});
+  renderAmountEscalones();
+}
+
+// ─── Artículos de bonificación ───────────────────────────────────────────────
+function addBonifProdRow(d=null){
+  const cont = document.getElementById('mo-bonif-rows');
+  if(!cont) return;
+  const row = document.createElement('div');
+  row.className = 'bonif-prod-row';
+  row.style.cssText = 'display:grid;grid-template-columns:130px 1fr 80px 30px;gap:6px;align-items:center;margin-bottom:6px';
+  const cod   = d?.codigo_producto||'';
+  const desc  = d?._desc||'';
+  const bonif = d?.bonificacion_pct||0;
+  row.innerHTML = `
+    <input type="text" class="bonif-prod-search" value="${cod}" placeholder="Código SKU"
+      style="border:1.5px solid #e5e7eb;border-radius:6px;padding:5px 8px;font-size:.85rem;outline:none;width:100%;box-sizing:border-box"
+      onblur="_fetchBonifDesc(this)">
+    <div class="bonif-prod-desc" style="font-size:.78rem;color:#374151;background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:5px 8px;min-height:28px;line-height:1.3;overflow:hidden;white-space:nowrap;text-overflow:ellipsis" title="${desc}">${desc||'<span style="color:#9ca3af;font-style:italic">—</span>'}</div>
+    <input type="number" class="bonif-prod-bonif" min="0" max="100" step="0.01" value="${bonif}"
+      placeholder="%" style="border:1.5px solid #e5e7eb;border-radius:6px;padding:5px 8px;font-size:.85rem;outline:none;width:100%;box-sizing:border-box">
+    <button onclick="this.closest('.bonif-prod-row').remove();_updateBonifProdCount()"
+      style="background:#fef2f2;border:1px solid #fecaca;border-radius:5px;padding:3px 7px;cursor:pointer;color:#dc2626;font-size:.8rem">✕</button>`;
+  cont.appendChild(row);
+  _updateBonifProdCount();
+}
+
+// Busca la descripción del SKU en Firebird y la muestra en el campo desc de la fila
+async function _fetchBonifDesc(inputEl){
+  const cod = inputEl.value.trim();
+  const descEl = inputEl.closest('.bonif-prod-row')?.querySelector('.bonif-prod-desc');
+  if(!descEl) return;
+  if(!cod){ descEl.innerHTML='<span style="color:#9ca3af;font-style:italic">—</span>'; return; }
+  descEl.innerHTML = '<span style="color:#9ca3af">Buscando…</span>';
+  try{
+    const res = await api('GET', `/admin/articulos-buscar?q=${encodeURIComponent(cod)}`);
+    const arr = Array.isArray(res) ? res : [];
+    // Preferir coincidencia exacta de codigoparticular
+    const exact = arr.find(a => (a.codigoparticular||a.codigo||'').toUpperCase() === cod.toUpperCase());
+    const art = exact || arr[0] || null;
+    if(art && art.descripcion){
+      descEl.textContent = art.descripcion;
+      descEl.title = art.descripcion;
+    } else {
+      descEl.innerHTML = '<span style="color:#ef4444;font-style:italic">No encontrado</span>';
+    }
+  }catch(_){
+    descEl.innerHTML = '<span style="color:#ef4444;font-style:italic">Error al buscar</span>';
+  }
+}
+
+// Refresca todas las descripciones vacías (usada después de importar CSV)
+async function _refreshAllBonifDescs(){
+  const rows = document.querySelectorAll('.bonif-prod-row');
+  for(const row of rows){
+    const inp = row.querySelector('.bonif-prod-search');
+    const descEl = row.querySelector('.bonif-prod-desc');
+    // Solo actualizar si la descripción aún no fue cargada
+    if(inp && descEl && (!descEl.textContent.trim() || descEl.querySelector('span'))){
+      await _fetchBonifDesc(inp);
+    }
+  }
+}
+function _updateBonifProdCount(){
+  const rows = document.querySelectorAll('.bonif-prod-row');
+  const el = document.getElementById('mo-bonif-prod-count');
+  if(el) el.textContent = rows.length ? `${rows.length} artículo(s)` : '⚠️ Sin artículos';
+}
+function _getBonifProdDetails(){
+  return [...document.querySelectorAll('.bonif-prod-row')].map(r=>{
+    const cod = r.querySelector('.bonif-prod-search')?.value?.trim()||'';
+    const pct = parseFloat(r.querySelector('.bonif-prod-bonif')?.value)||0;
+    return cod ? {codigo_producto: cod, bonificacion_pct: pct} : null;
+  }).filter(Boolean);
+}
+
+// ─── CSV Import para Bonificación ────────────────────────────────────────────
+function parseBonifCSV(input){
+  const file = input.files[0];
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    const text = e.target.result;
+    const lines = text.split(/\r?\n/).filter(l=>l.trim());
+    const cont = document.getElementById('mo-bonif-rows');
+    if(cont) cont.innerHTML = '';
+    let imported = 0;
+    lines.forEach((line, idx) => {
+      const cols = line.split(/[,;|\t]/);
+      const sku = (cols[0]||'').trim();
+      const pct = parseFloat((cols[1]||'').trim().replace(',','.'));
+      if(!sku || isNaN(pct)) return; // salta encabezado o líneas inválidas
+      if(idx === 0 && isNaN(pct)) return; // encabezado
+      addBonifProdRow({codigo_producto: sku, bonificacion_pct: pct});
+      imported++;
+    });
+    input.value='';
+    toast(`✅ ${imported} artículo(s) importado(s) desde CSV — cargando descripciones…`);
+    _refreshAllBonifDescs().then(()=>toast(`✅ Descripciones cargadas`));
+  };
+  reader.readAsText(file, 'UTF-8');
 }
 
 function addProdRow(d=null){
@@ -4520,7 +5207,26 @@ async function openModalOferta(o=null){
     if(prodRows) prodRows.innerHTML = '';
     _oferta_escalones = o ? (o.combo_escalones||[]).map(e=>({min_combos:e.min_combos||2, descuento_pct:e.descuento_pct||0})) : [];
     renderEscalones();
+    _oferta_amount_escalones = o ? (o.amount_escalones||[]).map(e=>({
+    monto_minimo: e.monto_minimo||0,
+    descuento_pct: e.descuento_pct||0,
+    condicion_comercial: e.condicion_comercial||null,
+    tipo: e.condicion_comercial ? 'condicion' : 'descuento'
+  })) : [];
+    renderAmountEscalones();
+    // Artículos de bonificación
+    const bonifRows = document.getElementById('mo-bonif-rows');
+    if(bonifRows) bonifRows.innerHTML = '';
+    if(o && o.tipo === 'bonificacion'){
+      (o.product_details||[]).forEach(d=>addBonifProdRow(d));
+      // Cargar descripciones desde Firebird después de renderizar
+      if((o.product_details||[]).length) _refreshAllBonifDescs();
+    }
+    _updateBonifProdCount();
     _ofertas_fin_pcts = o ? (o.financial_details||[]).map(d=>d.porcentaje) : [];
+    _oferta_fin_escalones = o ? (o.financial_escalones||[]).map(e=>({monto_minimo:e.monto_minimo||0,porcentajes:[...(e.porcentajes||[])]})) : [];
+    renderFinEscalones();
+    poblarFinDeposito(o?.tipo==='financiero' ? (o?.deposito||'') : '', o?.tipo==='bonificacion' ? (o?.deposito||'') : '');
     _oferta_vends = o ? (o.vendors||[]).filter(Boolean) : [];
     const _prods = o ? (o.product_details||[]) : [];
     // Indicador diagnóstico (visible si hay 0 artículos cargados)
@@ -4566,7 +5272,10 @@ async function saveOferta(){
 
   const finDetails = _ofertas_fin_pcts.map((p,i)=>({porcentaje:p, orden:i}));
   const tipo_financiero = document.querySelector('input[name="mo-tipo-fin"]:checked')?.value||'descuento_total';
-  const monto_minimo = parseFloat(document.getElementById('mo-monto-minimo')?.value)||0;
+  const monto_minimo = 0; // legacy; escalones financieros ahora usan financial_escalones
+  const financial_escalones = (tipo_financiero==='descuento_monto' || tipo==='bonificacion')
+    ? _oferta_fin_escalones.filter(e=>(e.porcentajes||[]).length>0).sort((a,b)=>a.monto_minimo-b.monto_minimo)
+    : [];
   // Construir category_filters como array de {nivel, valor}
   const category_filters = [];
   ['gruposuperrubro','superrubro','rubro','marca'].forEach(n=>{
@@ -4575,21 +5284,29 @@ async function saveOferta(){
   const combo_escalones = _oferta_escalones
     .filter(e => e.min_combos >= 2 && e.descuento_pct > 0)
     .sort((a,b) => a.min_combos - b.min_combos);
+  const amount_escalones = _oferta_amount_escalones
+    .filter(e => ((e.descuento_pct||0) > 0 || e.condicion_comercial))  // mm=0 válido: sin mínimo
+    .sort((a,b) => a.monto_minimo - b.monto_minimo)
+    .map(e => ({monto_minimo: e.monto_minimo, descuento_pct: e.descuento_pct||0, condicion_comercial: e.condicion_comercial||null}));
+  // Para bonificación, los artículos vienen del formulario propio
+  const finalProdDetails = tipo === 'bonificacion' ? _getBonifProdDetails() : prodDetails;
   const data = {
     nombre, tipo, tipo_financiero, monto_minimo,
     descripcion: document.getElementById('mo-desc').value,
     fecha_desde: document.getElementById('mo-desde').value||null,
     fecha_hasta: document.getElementById('mo-hasta').value||null,
-    deposito: document.getElementById('mo-deposito').value||'',
-    cupo: parseInt(document.getElementById('mo-cupo').value)||0,
+    deposito: tipo === 'bonificacion' ? (document.getElementById('mo-bonif-deposito')?.value||'') : tipo === 'financiero' ? (document.getElementById('mo-fin-deposito')?.value||'') : (document.getElementById('mo-deposito').value||''),
+    cupo: tipo === 'bonificacion' ? 0 : (parseInt(document.getElementById('mo-cupo').value)||0),
     activo:1,
-    product_details: prodDetails,
+    product_details: finalProdDetails,
     financial_details: finDetails,
     conditions: _oferta_conds.map(c=>c.cod),
     vendors: _oferta_vends.filter(Boolean),
     profiles: _oferta_profiles.filter(Boolean),
     category_filters,
-    combo_escalones
+    combo_escalones,
+    amount_escalones,
+    financial_escalones
   };
   if(id){ await api('PUT','/admin/ofertas/'+id, data); auditLog('Modificó oferta', `${nombre} (tipo: ${tipo})`); }
   else { await api('POST','/admin/ofertas', data); auditLog('Creó oferta', `${nombre} (tipo: ${tipo})`); }
@@ -4603,7 +5320,65 @@ function loadPedidoPage(){
   if(!sel) return;
   sel.innerHTML = '<option value="">— Seleccionar vendedor —</option>';
   VENDEDORES.forEach(v=>{ const o=document.createElement('option'); o.value=v.codigo; o.textContent=`${v.nombre} (${v.codigo})`; sel.appendChild(o); });
-  sel.onchange = () => { document.getElementById('ped-info').style.display = sel.value ? 'block' : 'none'; };
+  sel.onchange = () => {
+    document.getElementById('ped-info').style.display = sel.value ? 'block' : 'none';
+    // Limpiar cliente si el operador cambia el vendedor manualmente
+    _pedCliSel = null;
+    document.getElementById('ped-cli-sel').style.display = 'none';
+    document.getElementById('ped-cli-input').value = '';
+  };
+  pedCliLimpiar();
+}
+
+let _pedCliSel = null, _pedCliTimer = null;
+
+async function pedBuscarCliente(q){
+  clearTimeout(_pedCliTimer);
+  const lista = document.getElementById('ped-cli-lista');
+  if(q.length < 2){ lista.style.display='none'; return; }
+  _pedCliTimer = setTimeout(async()=>{
+    try{
+      const res = await api('GET', `/admin/pedido/buscar-cliente?q=${encodeURIComponent(q)}`);
+      if(!res || !res.length){ lista.style.display='none'; return; }
+      lista._data = res;
+      lista.innerHTML = res.map((c,i)=>`
+        <div data-i="${i}" onmousedown="pedCliSeleccionar(${i})"
+          style="padding:8px 12px;cursor:pointer;font-size:.83rem;border-bottom:1px solid #f3f4f6"
+          onmouseover="this.style.background='#f0fdf4'" onmouseout="this.style.background=''">
+          <span style="font-weight:600;color:#111827">${c.codigocliente}</span>
+          <span style="margin-left:6px;color:#374151">${c.razonsocial}</span>
+          ${c.codigovendedor ? `<span style="margin-left:8px;font-size:.76rem;color:#6b7280">Vend: ${c.codigovendedor}</span>` : ''}
+        </div>`).join('');
+      lista.style.display = '';
+    }catch(e){ lista.style.display='none'; }
+  }, 280);
+}
+
+function pedCliSeleccionar(idx){
+  const lista = document.getElementById('ped-cli-lista');
+  const c = (lista._data || [])[idx];
+  if(!c) return;
+  _pedCliSel = c;
+  lista.style.display = 'none';
+  document.getElementById('ped-cli-input').value = `${c.codigocliente} — ${c.razonsocial}`;
+  document.getElementById('ped-cli-sel-txt').textContent = `${c.razonsocial} (${c.codigocliente})`;
+  document.getElementById('ped-cli-sel').style.display = 'flex';
+  if(c.codigovendedor){
+    const sel = document.getElementById('ped-vend-sel');
+    sel.value = c.codigovendedor;
+    document.getElementById('ped-info').style.display = sel.value ? 'block' : 'none';
+    if(!sel.value) toast(`Vendedor ${c.codigovendedor} no está en la lista activa`, true);
+  }
+}
+
+function pedCliLimpiar(){
+  _pedCliSel = null;
+  const inp = document.getElementById('ped-cli-input');
+  const lista = document.getElementById('ped-cli-lista');
+  const sel = document.getElementById('ped-cli-sel');
+  if(inp) inp.value = '';
+  if(lista) lista.style.display = 'none';
+  if(sel) sel.style.display = 'none';
 }
 
 function pedTipoChange(){
@@ -4619,7 +5394,8 @@ async function abrirFormularioVendedor(){
   // Obtener token de impersonación
   const res = await api('GET', `/admin/impersonate-token?codigousuario=${encodeURIComponent(cod)}`);
   if(!res || !res.token){ toast('No se pudo obtener token del vendedor', true); return; }
-  const url = `/?__admin_token=${encodeURIComponent(res.token)}&__goto=${tipo}&__db=${db}`;
+  const url = `/?__admin_token=${encodeURIComponent(res.token)}&__goto=${tipo}&__db=${db}` +
+              (_pedCliSel ? `&__cliente=${encodeURIComponent(_pedCliSel.codigocliente)}` : '');
   window.open(url, '_blank', 'width=1100,height=800,scrollbars=yes,resizable=yes');
   const tipoLabel = tipo === 'pedido' ? 'Pedido' : 'Presupuesto';
   auditLog(`Abrió formulario de ${tipoLabel}`, `Vendedor: ${res.nombre} (${cod}) db=${db}`);
@@ -4673,14 +5449,18 @@ async function doCambiarPass(){
 // ─── VISIBILIDAD POR PERFIL ──────────────────────────────────────────
 function aplicarVisibilidadPerfil(perfil){
   const p = (perfil||'').trim().toUpperCase();
-  const esGerente = p === 'GERENTES' || p === 'GTES FE';
-  const esDiseno  = p === 'DISENO';
+  const esGerente      = p === 'GERENTES' || p === 'GTES FE';
+  const esAdminVentas  = esGerente || p === 'ADV' || p === 'ADVJUAN';
+  const esDiseno       = p === 'DISENO';
 
-  // Ventas, Ajuste Stock y Auditoría: solo gerentes
-  ['nav-ventas','nav-ajuste-stock','nav-auditoria'].forEach(id => {
+  // Ventas, Ajuste Stock, Auditoría y Presupuesto Importación: solo gerentes
+  ['nav-ventas','nav-ajuste-stock','nav-auditoria','nav-presupuesto'].forEach(id => {
     const el = document.getElementById(id);
     if(el) el.style.display = esGerente ? '' : 'none';
   });
+  // Botón Transferencia en sección Stock: visible para todos los perfiles de administración
+  const _btnTrf = document.getElementById('btn-sk-transferencia');
+  if(_btnTrf) _btnTrf.style.display = esAdminVentas ? '' : 'none';
 
   // DISENO: ocultar todos los nav-items excepto Catálogos
   if(esDiseno){
@@ -4696,6 +5476,351 @@ function aplicarVisibilidadPerfil(perfil){
     if(secCat){ secCat.classList.add('active'); loadCatalogos(); }
     _currentSection = 'Catálogos';
   }
+}
+
+// ─── PRESUPUESTO DE IMPORTACIÓN ──────────────────────────────────────────────
+let _piState = { budgetId: null, presupuesto: null, items: [] };
+
+// Componentes estandar del costeo de nacionalizacion (no varian por rubro).
+// Solo el Arancel DIE cambia segun la posicion NCM de la mercaderia.
+const _PI_TASA_ESTADISTICA = 3.0, _PI_ADUANA = 1.5, _PI_IVA = 21.0,
+      _PI_IVA_ADIC = 10.5, _PI_GANANCIAS = 6.0, _PI_IIBB = 3.0,
+      _PI_DEP_FISCAL = 2.5, _PI_FLETE_DEP = 2.0;
+
+function piValDepPct(diePct){
+  const d = parseFloat(diePct) || 0;
+  const baseIva = 1 + (d + _PI_TASA_ESTADISTICA) / 100;
+  return d + _PI_TASA_ESTADISTICA + _PI_ADUANA
+       + (_PI_IVA + _PI_IVA_ADIC + _PI_GANANCIAS + _PI_IIBB) * baseIva
+       + _PI_DEP_FISCAL + _PI_FLETE_DEP;
+}
+
+function piCalc(item, p){
+  const fob = parseFloat(item.fob_usd) || 0;
+  const tc  = parseFloat(p.tc) || 0;
+  const valDepPct = piValDepPct(p.arancel_die_pct);
+  const fleteSeguroPct = (parseFloat(p.flete_pct)||0) + (parseFloat(p.seguro_pct)||0);
+  const fobAct    = fob     * (1 + (parseFloat(p.c_dex_pct)||0)/100);
+  const cif       = fobAct  * (1 + fleteSeguroPct/100);
+  const valDep    = cif     * (1 + valDepPct/100);
+  const costoMerc = valDep  * (1 + (parseFloat(p.costo_merc_pct)||0)/100);
+  const pMayor    = costoMerc * (1 + (parseFloat(p.p_mayorista_pct)||0)/100);
+  const meliUsd   = pMayor  * (1 + (parseFloat(p.meli_pct)||0)/100);
+  const meliArs   = meliUsd * tc;
+  const mercado   = parseFloat(item.precio_mercado_ars) || 0;
+  let dif = null, semaforo = null;
+  if(mercado > 0){
+    dif = ((meliArs - mercado) / mercado) * 100;
+    semaforo = dif <= 0 ? 'verde' : (dif <= 25 ? 'amarillo' : 'rojo');
+  }
+  return { fobAct, cif, valDep, costoMerc, pMayor, meliUsd, meliArs, dif, semaforo };
+}
+
+const _PI_SEM = { verde:'🎲 Verde', amarillo:'🎱 Amarillo', rojo:'🔴 Rojo' };
+
+async function piInit(){
+  try{
+    const lista = await apiStrict('GET', '/admin/presupuesto-importacion');
+    const sel = document.getElementById('pi-select');
+    sel.innerHTML = lista.length
+      ? lista.map(b => `<option value="${b.id}">${b.nombre}</option>`).join('')
+      : '<option value="">Sin presupuestos — creá uno nuevo</option>';
+    if(lista.length && !_piState.budgetId){
+      sel.value = lista[0].id;
+      piAbrir(lista[0].id);
+    }
+  }catch(e){ toast('Error al cargar presupuestos: ' + e.message); }
+}
+
+async function piNuevo(){
+  const nombre = prompt('Nombre del presupuesto (ej: Día del Niño 2026):');
+  if(!nombre) return;
+  try{
+    const r = await apiStrict('POST', '/admin/presupuesto-importacion', { nombre });
+    await piInit();
+    document.getElementById('pi-select').value = r.id;
+    piAbrir(r.id);
+  }catch(e){ toast('Error al crear: ' + e.message); }
+}
+
+async function piAbrir(id){
+  const budgetId = id || document.getElementById('pi-select').value;
+  if(!budgetId){ toast('Elegí un presupuesto'); return; }
+  try{
+    const d = await apiStrict('GET', `/admin/presupuesto-importacion/${budgetId}`);
+    _piState = { budgetId: Number(budgetId), presupuesto: d.presupuesto, items: d.items };
+    document.getElementById('pi-detalle').style.display = '';
+    document.getElementById('pi-titulo').textContent = '📋 ' + d.presupuesto.nombre;
+    document.getElementById('pi-resumen').textContent =
+      `${d.resumen.total} artículos · 🎲 ${d.resumen.verde} verde · 🎱 ${d.resumen.amarillo} amarillo · 🔴 ${d.resumen.rojo} rojo`;
+    document.getElementById('pi-rubro').value       = d.presupuesto.rubro || '';
+    document.getElementById('pi-tc').value          = d.presupuesto.tc;
+    document.getElementById('pi-cdex').value        = d.presupuesto.c_dex_pct;
+    document.getElementById('pi-flete').value       = d.presupuesto.flete_pct;
+    document.getElementById('pi-seguro').value      = d.presupuesto.seguro_pct;
+    document.getElementById('pi-die').value         = d.presupuesto.arancel_die_pct;
+    document.getElementById('pi-die-verificado').checked = !!d.presupuesto.arancel_verificado;
+    document.getElementById('pi-costomerc').value   = d.presupuesto.costo_merc_pct;
+    document.getElementById('pi-pmayorista').value  = d.presupuesto.p_mayorista_pct;
+    document.getElementById('pi-meli').value        = d.presupuesto.meli_pct;
+    document.getElementById('pi-tbody-firebird').innerHTML =
+      '<tr><td colspan="9" class="empty">Tocá "Cruzar con Firebird" para comparar.</td></tr>';
+    piActualizarValDepCalc();
+    piRenderTabla();
+  }catch(e){ toast('Error al abrir presupuesto: ' + e.message); }
+}
+
+async function piBorrar(){
+  const id = document.getElementById('pi-select').value;
+  if(!id){ toast('Elegí un presupuesto'); return; }
+  if(!confirm('¿Borrar este presupuesto y todos sus artículos?')) return;
+  try{
+    await apiStrict('DELETE', `/admin/presupuesto-importacion/${id}`);
+    _piState = { budgetId: null, presupuesto: null, items: [] };
+    document.getElementById('pi-detalle').style.display = 'none';
+    await piInit();
+  }catch(e){ toast('Error al borrar: ' + e.message); }
+}
+
+async function piGuardarVariables(){
+  if(!_piState.budgetId) return;
+  const body = {
+    rubro:           document.getElementById('pi-rubro').value.trim(),
+    tc:              parseFloat(document.getElementById('pi-tc').value) || 0,
+    c_dex_pct:       parseFloat(document.getElementById('pi-cdex').value) || 0,
+    flete_pct:       parseFloat(document.getElementById('pi-flete').value) || 0,
+    seguro_pct:      parseFloat(document.getElementById('pi-seguro').value) || 0,
+    arancel_die_pct: parseFloat(document.getElementById('pi-die').value) || 0,
+    arancel_verificado: document.getElementById('pi-die-verificado').checked ? 1 : 0,
+    costo_merc_pct:  parseFloat(document.getElementById('pi-costomerc').value) || 0,
+    p_mayorista_pct: parseFloat(document.getElementById('pi-pmayorista').value) || 0,
+    meli_pct:        parseFloat(document.getElementById('pi-meli').value) || 0,
+  };
+  try{
+    await apiStrict('PUT', `/admin/presupuesto-importacion/${_piState.budgetId}`, body);
+    Object.assign(_piState.presupuesto, body);
+    piActualizarValDepCalc();
+    piRenderTabla();
+    toast('Variables guardadas');
+  }catch(e){ toast('Error al guardar: ' + e.message); }
+}
+
+function piActualizarValDepCalc(){
+  const die = document.getElementById('pi-die').value;
+  const valDepPct = piValDepPct(die);
+  document.getElementById('pi-valdep-calc').textContent =
+    `Val.Dep resultante: ${valDepPct.toFixed(1)}%`;
+  piRenderDesglose();
+}
+document.addEventListener('input', e => {
+  if(e.target && (e.target.id === 'pi-die' || e.target.id === 'pi-flete' || e.target.id === 'pi-seguro')){
+    piActualizarValDepCalc();
+  }
+});
+
+// ─── Desglose del costeo de nacionalización (recuadro tipo informe) ────────
+function piRenderDesglose(){
+  const flete = parseFloat(document.getElementById('pi-flete').value) || 0;
+  const seguro = parseFloat(document.getElementById('pi-seguro').value) || 0;
+  const die = parseFloat(document.getElementById('pi-die').value) || 0;
+  const valDepPct = piValDepPct(die);
+  const fmt = n => n.toLocaleString('es-AR', {maximumFractionDigits:1});
+  const filas = [
+    ['Flete Marítimo China-ARG', 'FOB Actualizado', fmt(flete)+'%', 'No recuperable', 'Tarifa naviera por ruta'],
+    ['Seguro Marítimo', 'FOB Actualizado', fmt(seguro)+'%', 'No recuperable', 'Póliza de carga'],
+    ['Derecho Importación (DIE)', 'CIF', fmt(die)+'%', 'No recuperable', '⚠ Confirmar NCM en ARCA/despachante'],
+    ['Tasa Estadística', 'CIF', fmt(_PI_TASA_ESTADISTICA)+'%', 'No recuperable', 'Decreto 108/2023'],
+    ['Gastos Aduana/Despachante', 'CIF', fmt(_PI_ADUANA)+'%', 'No recuperable', 'Honorarios profesionales'],
+    ['IVA Importación', 'CIF x 1,23*', fmt(_PI_IVA)+'%', 'Recuperable', 'AFIP Res. 549/2000'],
+    ['IVA Adicional', 'CIF x 1,23*', fmt(_PI_IVA_ADIC)+'%', 'Recuperable', 'AFIP'],
+    ['Percepción Ganancias', 'CIF x 1,23*', fmt(_PI_GANANCIAS)+'%', 'Recuperable', 'RG AFIP 2281'],
+    ['Percepción IIBB', 'CIF x 1,23*', fmt(_PI_IIBB)+'%', 'P. Recuperable', 'Agente perc. provincial'],
+    ['Depósito Fiscal', 'CIF', fmt(_PI_DEP_FISCAL)+'%', 'No recuperable', 'Tarifa depósito aduanero'],
+    ['Flete a Depósito Microbell', 'CIF', fmt(_PI_FLETE_DEP)+'%', 'No recuperable', 'Logística terrestre'],
+  ];
+  const tbody = document.getElementById('pi-desglose-tbody');
+  tbody.innerHTML = filas.map(f => `<tr><td>${f[0]}</td><td>${f[1]}</td><td>${f[2]}</td><td>${f[3]}</td><td style="font-size:.72rem">${f[4]}</td></tr>`).join('')
+    + `<tr style="font-weight:700;background:#eef2ff"><td colspan="2">TOTAL SOBRE CIF (Val.Dep)</td><td>${fmt(valDepPct)}%</td><td colspan="2">* base = CIF × (1 + DIE% + Tasa Estadística%)</td></tr>`;
+}
+
+async function piAgregarFila(){
+  if(!_piState.budgetId) return;
+  try{
+    const r = await apiStrict('POST', `/admin/presupuesto-importacion/${_piState.budgetId}/items`, {});
+    _piState.items.push({ id: r.id, articulo:'', categoria:'', moq:0, fob_usd:0,
+                           link_alibaba:'', link_meli:'', precio_mercado_ars:0 });
+    piRenderTabla();
+  }catch(e){ toast('Error al agregar fila: ' + e.message); }
+}
+
+function piCampo(itemId, campo, valor){
+  const item = _piState.items.find(i => i.id === itemId);
+  if(!item) return;
+  item[campo] = valor;
+  apiStrict('PUT', `/admin/presupuesto-importacion/${_piState.budgetId}/items/${itemId}`,
+      { [campo]: valor }).catch(e => toast('Error al guardar: ' + e.message));
+  piRenderTabla();
+}
+
+async function piBorrarFila(itemId){
+  if(!confirm('¿Borrar este artículo?')) return;
+  try{
+    await apiStrict('DELETE', `/admin/presupuesto-importacion/${_piState.budgetId}/items/${itemId}`);
+    _piState.items = _piState.items.filter(i => i.id !== itemId);
+    piRenderTabla();
+  }catch(e){ toast('Error al borrar: ' + e.message); }
+}
+
+function piRenderTabla(){
+  const p = _piState.presupuesto;
+  const tbody = document.getElementById('pi-tbody');
+  if(!_piState.items.length){
+    tbody.innerHTML = '<tr><td colspan="17" class="empty">Sin artículos todavía. Usá "+ Agregar artículo" o "Investigar".</td></tr>';
+    return;
+  }
+  const fmt = n => isFinite(n) ? n.toLocaleString('es-AR', {maximumFractionDigits:2}) : '-';
+  let verde=0, amarillo=0, rojo=0;
+  tbody.innerHTML = _piState.items.map(it => {
+    const c = piCalc(it, p);
+    if(c.semaforo === 'verde') verde++; else if(c.semaforo === 'amarillo') amarillo++; else if(c.semaforo === 'rojo') rojo++;
+    const semColor = c.semaforo === 'verde' ? '#16a34a' : c.semaforo === 'amarillo' ? '#ca8a04' : c.semaforo === 'rojo' ? '#dc2626' : '#9ca3af';
+    return `<tr>
+      <td><input value="${it.articulo||''}" style="width:140px" onchange="piCampo(${it.id},'articulo',this.value)"></td>
+      <td><input value="${it.categoria||''}" style="width:100px" onchange="piCampo(${it.id},'categoria',this.value)"></td>
+      <td style="font-size:.72rem">${it.reputacion || '-'}${it.sold_quantity ? '<br>'+it.sold_quantity+' vendidos' : ''}</td>
+      <td><input type="number" value="${it.moq||0}" style="width:60px" onchange="piCampo(${it.id},'moq',this.value)"></td>
+      <td><input type="number" step="0.01" value="${it.fob_usd||0}" style="width:75px" onchange="piCampo(${it.id},'fob_usd',this.value)"></td>
+      <td>U$S ${fmt(c.fobAct)}</td>
+      <td>U$S ${fmt(c.cif)}</td>
+      <td>U$S ${fmt(c.valDep)}</td>
+      <td>U$S ${fmt(c.costoMerc)}</td>
+      <td>U$S ${fmt(c.pMayor)}</td>
+      <td>U$S ${fmt(c.meliUsd)}</td>
+      <td>$ ${fmt(c.meliArs)}</td>
+      <td><input type="number" step="1" value="${it.precio_mercado_ars||0}" style="width:85px" onchange="piCampo(${it.id},'precio_mercado_ars',this.value)"></td>
+      <td>${c.dif===null?'-':fmt(c.dif)+'%'}</td>
+      <td style="color:${semColor};font-weight:700">${c.semaforo?_PI_SEM[c.semaforo]:'-'}</td>
+      <td>
+        <input placeholder="Alibaba" value="${it.link_alibaba||''}" style="width:90px;font-size:.72rem" onchange="piCampo(${it.id},'link_alibaba',this.value)"><br>
+        <input placeholder="MeLi" value="${it.link_meli||''}" style="width:90px;font-size:.72rem" onchange="piCampo(${it.id},'link_meli',this.value)">
+        ${it.link_alibaba ? `<br><a href="${it.link_alibaba}" target="_blank">🔗Alibaba</a>` : ''}
+        ${it.link_meli ? `<br><a href="${it.link_meli}" target="_blank">🔗MeLi</a>` : ''}
+      </td>
+      <td><button class="btn btn-ghost btn-sm" style="color:#dc2626" onclick="piBorrarFila(${it.id})">🗑</button></td>
+    </tr>`;
+  }).join('');
+  document.getElementById('pi-resumen').textContent =
+    `${_piState.items.length} artículos · 🎲 ${verde} verde · 🎱 ${amarillo} amarillo · 🔴 ${rojo} rojo`;
+}
+
+// ─── Investigación automática en Meli (job en background) ──────────────────
+async function piInvestigar(){
+  if(!_piState.budgetId){ toast('Abrí un presupuesto primero'); return; }
+  const rubro = document.getElementById('pi-rubro').value.trim();
+  if(!rubro){ toast('Completá el Rubro / Producto a investigar arriba'); return; }
+  const n = parseInt(document.getElementById('pi-inv-n').value) || 10;
+  const periodo_desde = document.getElementById('pi-inv-desde').value;
+  const periodo_hasta = document.getElementById('pi-inv-hasta').value;
+  const estadoEl = document.getElementById('pi-inv-estado');
+  try{
+    const r = await apiStrict('POST', `/admin/presupuesto-importacion/${_piState.budgetId}/investigar`,
+      { rubro, n, periodo_desde, periodo_hasta });
+    estadoEl.textContent = '⏳ Buscando en Meli... (esto puede tardar unos minutos por las pausas anti-baneo)';
+    piPollInvestigar(r.job_id);
+  }catch(e){ toast('Error al iniciar la investigación: ' + e.message); }
+}
+
+async function piPollInvestigar(jobId){
+  const estadoEl = document.getElementById('pi-inv-estado');
+  try{
+    const job = await apiStrict('GET', `/admin/presupuesto-importacion/${_piState.budgetId}/investigar/${jobId}`);
+    if(job.status === 'running'){
+      estadoEl.textContent = `⏳ Buscando en Meli... (${job.progress || ''})`;
+      setTimeout(() => piPollInvestigar(jobId), 3000);
+      return;
+    }
+    if(job.status === 'error'){
+      estadoEl.textContent = '❌ ' + job.error;
+      return;
+    }
+    // done
+    if(job.error){
+      estadoEl.textContent = '⚠ ' + job.error;
+    } else {
+      const nota = job.result?.nota_periodo ? ` — ${job.result.nota_periodo}` : '';
+      estadoEl.textContent = `✅ Se agregaron ${job.result?.items?.length || 0} artículos.${nota}`;
+    }
+    await piAbrir(_piState.budgetId);  // recarga la tabla con las filas nuevas
+  }catch(e){ estadoEl.textContent = 'Error consultando el estado: ' + e.message; }
+}
+
+async function piPegarBloque(){
+  if(!_piState.budgetId){ toast('Abrí un presupuesto primero'); return; }
+  const raw = document.getElementById('pi-paste-area').value.trim();
+  if(!raw){ toast('Pegá al menos una fila'); return; }
+  const categoria = document.getElementById('pi-rubro').value.trim();
+  const items = raw.split('\n').map(l => l.trim()).filter(Boolean).map(linea => {
+    const cols = linea.split('\t');
+    return {
+      articulo: (cols[0] || '').trim(),
+      precio_mercado_ars: parseFloat((cols[1] || '0').replace(/[^\d.,-]/g,'').replace(',', '.')) || 0,
+      link_meli: (cols[2] || '').trim(),
+      reputacion: (cols[3] || '').trim(),
+      sold_quantity: parseInt((cols[4] || '0').replace(/\D/g,'')) || 0,
+      categoria,
+    };
+  }).filter(it => it.articulo);
+  if(!items.length){ toast('No se pudo interpretar ninguna fila (revisá que estén separadas por TAB)'); return; }
+  try{
+    const r = await apiStrict('POST', `/admin/presupuesto-importacion/${_piState.budgetId}/items/bulk`, { items });
+    toast(`Se importaron ${r.creados} artículos`);
+    document.getElementById('pi-paste-area').value = '';
+    await piAbrir(_piState.budgetId);
+  }catch(e){ toast('Error al importar: ' + e.message); }
+}
+
+// ─── Cruce con Firebird (stock propio + Lista 1) ────────────────────────────
+async function piCruzarFirebird(){
+  if(!_piState.budgetId){ toast('Abrí un presupuesto primero'); return; }
+  const tbody = document.getElementById('pi-tbody-firebird');
+  tbody.innerHTML = '<tr><td colspan="9" class="empty">Buscando en Firebird...</td></tr>';
+  try{
+    const d = await apiStrict('GET', `/admin/presupuesto-importacion/${_piState.budgetId}/cruce-firebird`);
+    if(!d.items.length){
+      tbody.innerHTML = '<tr><td colspan="9" class="empty">No hay artículos cargados en este presupuesto todavía.</td></tr>';
+      return;
+    }
+    const fmt = n => isFinite(n) ? Number(n).toLocaleString('es-AR', {maximumFractionDigits:2}) : '-';
+    tbody.innerHTML = d.items.map(it => {
+      if(!it.tenemos){
+        return `<tr>
+          <td>${it.articulo}</td><td style="color:#9ca3af">No tenemos</td>
+          <td>${(it.score*100).toFixed(0)}%</td><td colspan="6" style="color:#9ca3af">Sin coincidencia — posible producto nuevo</td>
+        </tr>`;
+      }
+      const itemOriginal = _piState.items.find(x => x.id === it.item_id);
+      const mercado = itemOriginal ? parseFloat(itemOriginal.precio_mercado_ars) || 0 : 0;
+      let semaforo = '-', semColor = '#9ca3af';
+      if(mercado > 0){
+        const dif = ((mercado - it.precio_lista1_con_iva) / it.precio_lista1_con_iva) * 100;
+        // Semaforo desde la perspectiva de nuestro propio precio de venta vs mercado:
+        // si nuestro Lista1+IVA es mayor al precio de mercado, estamos caros.
+        const difPropio = ((it.precio_lista1_con_iva - mercado) / mercado) * 100;
+        semaforo = difPropio <= 0 ? '🎲 Verde' : difPropio <= 25 ? '🎱 Amarillo' : '🔴 Rojo';
+        semColor = difPropio <= 0 ? '#16a34a' : difPropio <= 25 ? '#ca8a04' : '#dc2626';
+      }
+      return `<tr>
+        <td>${it.articulo}</td><td style="color:#16a34a">Sí tenemos</td>
+        <td>${(it.score*100).toFixed(0)}%</td>
+        <td>${it.codigo_propio}<br><span style="font-size:.72rem;color:#6b7280">${it.descripcion_propia}</span></td>
+        <td>${fmt(it.stock_remanente)}</td>
+        <td>$ ${fmt(it.precio_lista1)}</td>
+        <td>$ ${fmt(it.precio_lista1_con_iva)}</td>
+        <td>${mercado ? '$ '+fmt(mercado) : '-'}</td>
+        <td style="color:${semColor};font-weight:700">${semaforo}</td>
+      </tr>`;
+    }).join('');
+  }catch(e){ tbody.innerHTML = `<tr><td colspan="9" class="empty">Error: ${e.message}</td></tr>`; }
 }
 
 // ─── AUDITORÍA ─────────────────────────────────────────────────────────────
@@ -4964,6 +6089,400 @@ async function ajLoadHistorial(){
       </tr>`).join('') +
       '</tbody></table>';
   } catch(e){ div.innerHTML='<p style="color:#dc2626">Error al cargar historial: '+e.message+'</p>'; }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   TRANSFERENCIA ENTRE DEPÓSITOS
+   ═══════════════════════════════════════════════════════════ */
+let TR_PREVIEW = [];
+let TR_TAB = 'csv';
+let TR_DEPOSITOS = [];
+
+function navToTransferencia(){
+  if(window._navPush) window._navPush('transferencia');
+  document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
+  document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));
+  document.getElementById('topnav').classList.remove('nav-open');
+  document.getElementById('sec-transferencia').classList.add('active');
+  _currentSection = 'Transferencia';
+  trInit();
+}
+
+async function trInit(){
+  if(TR_DEPOSITOS.length) return;
+  try {
+    TR_DEPOSITOS = await api('GET', '/admin/depositos') || [];
+    const fillSel = id => {
+      const sel = document.getElementById(id);
+      sel.innerHTML = '<option value="">— Seleccioná —</option>' +
+        TR_DEPOSITOS.map(d=>`<option value="${d.codigo}">${d.codigo} — ${d.nombre}</option>`).join('');
+    };
+    fillSel('tr-dep-origen'); fillSel('tr-dep-destino');
+  } catch(e){ toast('Error cargando depósitos: '+e.message, true); }
+  // Fecha default = hoy
+  const _trFechaEl = document.getElementById('tr-fecha');
+  if(_trFechaEl && !_trFechaEl.value) _trFechaEl.value = new Date().toISOString().slice(0,10);
+  trManualInitRows();
+  trTabSwitch('csv');
+  trLoadHistorial();
+}
+
+function trTabSwitch(tab){
+  TR_TAB = tab;
+  document.getElementById('tr-panel-csv').style.display    = tab==='csv'    ? '' : 'none';
+  document.getElementById('tr-panel-manual').style.display = tab==='manual' ? '' : 'none';
+  const bCsv    = document.getElementById('tr-tab-csv');
+  const bManual = document.getElementById('tr-tab-manual');
+  bCsv.style.color          = tab==='csv'    ? '#1a56db' : '#6b7280';
+  bCsv.style.borderBottom   = tab==='csv'    ? '2px solid #1a56db' : 'none';
+  bManual.style.color        = tab==='manual' ? '#1a56db' : '#6b7280';
+  bManual.style.borderBottom = tab==='manual' ? '2px solid #1a56db' : 'none';
+  trReset();
+}
+
+function trValidarDepositos(){
+  const o = document.getElementById('tr-dep-origen').value;
+  const d = document.getElementById('tr-dep-destino').value;
+  const err = document.getElementById('tr-dep-error');
+  err.style.display = (o && d && o===d) ? '' : 'none';
+}
+
+// ── Manual rows ──
+function trManualInitRows(){
+  const tbody = document.getElementById('tr-manual-tbody');
+  if(!tbody || tbody.children.length>0) return;
+  for(let i=0;i<5;i++) _trAddRow(tbody);
+}
+
+function trManualAddRow(){
+  _trAddRow(document.getElementById('tr-manual-tbody'));
+}
+
+let _trRowId = 0;
+function _trAddRow(tbody){
+  const id = ++_trRowId;
+  const tr = document.createElement('tr');
+  tr.dataset.rid = id;
+  tr.innerHTML = `
+    <td style="position:relative">
+      <input type="text" placeholder="SKU o descripción" autocomplete="off"
+        style="width:100%;padding:5px 8px;border:1px solid #d1d5db;border-radius:5px;font-size:.83rem;box-sizing:border-box"
+        oninput="_trAcInput(this,${id})" onkeydown="_trAcKey(event,${id})"
+        onblur="setTimeout(()=>_trAcHide(${id}),200)"
+        data-rid="${id}">
+      <div id="tr-ac-${id}" style="display:none;position:absolute;top:100%;left:0;right:0;z-index:600;
+        background:#fff;border:1px solid #d1d5db;border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.1);max-height:200px;overflow-y:auto"></div>
+    </td>
+    <td><span id="tr-desc-${id}" style="font-size:.78rem;color:#374151"></span></td>
+    <td><input type="number" min="1" step="1" value=""
+      style="width:80px;padding:5px 8px;border:1px solid #d1d5db;border-radius:5px;font-size:.83rem;text-align:right;box-sizing:border-box"
+      data-rid="${id}" class="tr-qty-input"></td>
+    <td style="text-align:center"><button class="btn btn-ghost btn-sm" style="color:#dc2626;padding:4px 8px" onclick="_trRemoveRow(${id})">×</button></td>`;
+  tbody.appendChild(tr);
+}
+
+function _trRemoveRow(id){
+  const tr = document.querySelector(`#tr-manual-tbody tr[data-rid="${id}"]`);
+  if(tr) tr.remove();
+}
+
+// Autocomplete — registro seguro (evita romper atributos HTML con comillas/acentos)
+const _trAcReg = {};
+
+async function _trAcInput(input, id){
+  const q = input.value.trim();
+  const drop = document.getElementById(`tr-ac-${id}`);
+  if(q.length < 2){ drop.style.display='none'; return; }
+  try {
+    const res = await api('GET', `/admin/transferencia/buscar-articulo?q=${encodeURIComponent(q)}`);
+    if(!res || !res.length){ drop.style.display='none'; return; }
+    _trAcReg[id] = res;
+    drop.innerHTML = res.map((r,i)=>`
+      <div data-idx="${i}"
+        style="padding:7px 10px;cursor:pointer;font-size:.82rem;border-bottom:1px solid #f3f4f6"
+        onmousedown="_trAcPickIdx(${id},${i})"
+        onmouseover="this.style.background='#eff6ff'"
+        onmouseout="this.style.background=''">
+        <span style="font-weight:600">${r.codigo_particular}</span>
+        <span style="color:#6b7280;margin-left:6px">${(r.descripcion||'').substring(0,60)}</span>
+      </div>`).join('');
+    drop.style.display = '';
+  } catch(e){ drop.style.display='none'; }
+}
+
+function _trAcPickIdx(id, idx){
+  const r = (_trAcReg[id] || [])[idx];
+  if(r) _trAcSelect(id, r.codigo_particular, r.descripcion);
+}
+
+function _trAcSelect(id, sku, desc){
+  const input = document.querySelector(`#tr-manual-tbody input[data-rid="${id}"]`);
+  if(input) input.value = sku;
+  const descEl = document.getElementById(`tr-desc-${id}`);
+  if(descEl) descEl.textContent = desc;
+  const drop = document.getElementById(`tr-ac-${id}`);
+  if(drop) drop.style.display='none';
+  const qty = document.querySelector(`#tr-manual-tbody .tr-qty-input[data-rid="${id}"]`);
+  if(qty) qty.focus();
+}
+
+function _trAcHide(id){ const d=document.getElementById(`tr-ac-${id}`); if(d) d.style.display='none'; }
+function _trAcKey(e,id){
+  if(e.key==='Escape') _trAcHide(id);
+  if(e.key==='Enter'){ e.preventDefault(); _trAcHide(id); }
+}
+
+// ── CSV parse ──
+async function trCSVCargar(){
+  const file = document.getElementById('tr-file').files[0];
+  if(!file){ toast('Seleccioná un archivo CSV', true); return; }
+  const text = await file.text();
+  const lines = text.split(/\r?\n/).filter(l=>l.trim());
+  const rows = [];
+  let skuCol=0, cantCol=1;
+  for(let i=0;i<lines.length;i++){
+    const parts = lines[i].split(/[,;\t]/);
+    if(parts.length<2) continue;
+    if(i===0){
+      const h0 = parts[0].trim().toUpperCase();
+      if(h0==='SKU'||h0==='CODIGO'||h0==='CODIGO_PARTICULAR'){ skuCol=0; cantCol=1; continue; }
+      if(h0==='CANTIDAD'||h0==='CANT'){ skuCol=1; cantCol=0; continue; }
+    }
+    const sku  = parts[skuCol]?.trim();
+    const cant = parseFloat(parts[cantCol]?.trim());
+    if(!sku || isNaN(cant) || cant<=0) continue;
+    rows.push({sku, cantidad: cant});
+  }
+  if(!rows.length){ toast('CSV vacío o sin datos válidos. Formato: SKU,CANTIDAD', true); return; }
+  await _trPreviewRows(rows);
+}
+
+// ── Manual preview ──
+async function trPreviewManual(){
+  const rows = [];
+  document.querySelectorAll('#tr-manual-tbody tr').forEach(tr=>{
+    const skuIn  = tr.querySelector('input[type="text"]');
+    const cantIn = tr.querySelector('input[type="number"]');
+    const sku  = (skuIn?.value||'').trim();
+    const cant = parseFloat(cantIn?.value||'0');
+    if(sku && cant>0) rows.push({sku, cantidad:cant});
+  });
+  if(!rows.length){ toast('Ingresá al menos un SKU y cantidad', true); return; }
+  await _trPreviewRows(rows);
+}
+
+async function _trPreviewRows(rows){
+  const depOrigen  = document.getElementById('tr-dep-origen').value;
+  const depDestino = document.getElementById('tr-dep-destino').value;
+  const fecha      = document.getElementById('tr-fecha').value;
+  if(!fecha){ toast('Ingresá la fecha de operación', true); return; }
+  if(!depOrigen||!depDestino){ toast('Seleccioná depósito origen y destino', true); return; }
+  if(depOrigen===depDestino){ toast('Origen y destino deben ser distintos', true); return; }
+
+  toast('Consultando preview...');
+  try {
+    const res = await api('POST', '/admin/transferencia/preview', {
+      deposito_origen: depOrigen, deposito_destino: depDestino, articulos: rows
+    });
+    TR_PREVIEW = res.articulos || [];
+    const noEnc = res.no_encontrados || [];
+
+    const depOrigenLabel  = TR_DEPOSITOS.find(d=>d.codigo===depOrigen)?.nombre  || depOrigen;
+    const depDestinoLabel = TR_DEPOSITOS.find(d=>d.codigo===depDestino)?.nombre || depDestino;
+    const alertas = TR_PREVIEW.filter(a=>a.alerta).length;
+
+    document.getElementById('tr-resumen').innerHTML =
+      `<b>Origen:</b> ${depOrigen} — ${depOrigenLabel} &nbsp;→&nbsp; <b>Destino:</b> ${depDestino} — ${depDestinoLabel}<br>`+
+      `<b>Artículos:</b> ${TR_PREVIEW.length}` +
+      (alertas>0 ? ` &nbsp;|&nbsp; <span style="color:#dc2626"><b>⚠️ ${alertas} artículo(s) con stock insuficiente</b></span>` : '') +
+      (noEnc.length ? `<br><span style="color:#dc2626">SKUs no encontrados: ${noEnc.join(', ')}</span>` : '');
+
+    document.getElementById('tr-tbody').innerHTML = TR_PREVIEW.map(a=>{
+      const alerta = a.alerta ? `<span style="color:#dc2626">⚠️ insuf.</span>` : '✔️';
+      const cOrig  = a.stock_origen_post  < 0 ? '#dc2626' : '#16a34a';
+      const cRemO  = a.remanente_origen_post < 0 ? '#dc2626' : '#16a34a';
+      const cDest  = '#16a34a';
+      return `<tr style="${a.alerta?'background:#fff5f5':''}">
+        <td>${a.codigo_particular}</td>
+        <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${a.descripcion}">${a.descripcion||''}</td>
+        <td style="text-align:right"><b>${a.cantidad}</b></td>
+        <td style="text-align:right">${Math.round(+a.stock_origen)}</td>
+        <td style="text-align:right;color:${cOrig}"><b>${Math.round(+a.stock_origen_post)}</b></td>
+        <td style="text-align:right">${Math.round(+a.remanente_origen)}</td>
+        <td style="text-align:right;color:${cRemO}"><b>${Math.round(+a.remanente_origen_post)}</b></td>
+        <td style="text-align:right">${Math.round(+a.stock_destino)}</td>
+        <td style="text-align:right;color:${cDest}"><b>${Math.round(+a.stock_destino_post)}</b></td>
+        <td style="text-align:right;color:${cDest}"><b>${Math.round(+a.remanente_destino_post)}</b></td>
+        <td>${alerta}</td>
+      </tr>`;
+    }).join('');
+    document.getElementById('tr-paso3').style.display = '';
+    // Habilitar/deshabilitar botón Transferir según alertas de stock
+    const btnTrf = document.getElementById('tr-btn-transferir');
+    if(btnTrf){
+      if(alertas > 0){
+        btnTrf.disabled = true;
+        btnTrf.style.opacity = '.4';
+        btnTrf.style.cursor = 'not-allowed';
+        btnTrf.title = 'Eliminá los artículos con stock insuficiente antes de transferir';
+      } else {
+        btnTrf.disabled = false;
+        btnTrf.style.opacity = '';
+        btnTrf.style.cursor = '';
+        btnTrf.title = '';
+      }
+    }
+    toast(`Preview: ${TR_PREVIEW.length} artículos`);
+  } catch(e){ toast('Error: '+e.message, true); }
+}
+
+// Botón "Vista previa" debajo de la tabla de tabs
+async function trVerPreview(){
+  if(TR_TAB==='csv') await trCSVCargar();
+  else               await trPreviewManual();
+}
+
+async function trConfirmar(){
+  if(!TR_PREVIEW.length){ toast('Sin datos para transferir', true); return; }
+  const alertas = TR_PREVIEW.filter(a=>a.alerta).length;
+  if(alertas > 0){ toast(`❌ ${alertas} artículo(s) con stock insuficiente. Eliminá esas líneas antes de transferir.`, true); return; }
+  const fecha      = document.getElementById('tr-fecha').value;
+  if(!fecha){ toast('Ingresá la fecha de operación', true); return; }
+  const depOrigen  = document.getElementById('tr-dep-origen').value;
+  const depDestino = document.getElementById('tr-dep-destino').value;
+  const depOrigenLabel  = TR_DEPOSITOS.find(d=>d.codigo===depOrigen)?.nombre  || depOrigen;
+  const depDestinoLabel = TR_DEPOSITOS.find(d=>d.codigo===depDestino)?.nombre || depDestino;
+  const msg = `¿Confirmás la transferencia de ${TR_PREVIEW.length} artículo(s)?\n\nOrigen: ${depOrigen} — ${depOrigenLabel}\nDestino: ${depDestino} — ${depDestinoLabel}`;
+  if(!confirm(msg)) return;
+
+  const btn = document.getElementById('tr-btn-transferir');
+  if(btn){ btn.disabled=true; btn.textContent='Transfiriendo…'; }
+  try {
+    const res = await api('POST', '/admin/transferencia/procesar', {
+      deposito_origen: depOrigen, deposito_origen_nombre: depOrigenLabel,
+      deposito_destino: depDestino, deposito_destino_nombre: depDestinoLabel,
+      fecha_operacion: fecha,
+      articulos: TR_PREVIEW
+    });
+    let msgOk = `✅ Transferencia completada.\n\nArtículos procesados: ${res.procesados}`;
+    if(res.errores && res.errores.length) msgOk += `\n\n⚠️ Errores (${res.errores.length}):\n${res.errores.slice(0,5).join('\n')}`;
+    alert(msgOk);
+    auditLog('Transferencia entre depósitos', `TRF-${res.log_id} | ${depOrigen}→${depDestino} | Art: ${res.procesados}`);
+    trMostrarResultado(res.log_id, depOrigenLabel, depDestinoLabel, res.procesados, res.errores);
+    trReset();
+    trLoadHistorial();
+  } catch(e){
+    alert('❌ Error: ' + e.message);
+  } finally {
+    if(btn){ btn.disabled=false; btn.textContent='🔄 Transferir'; }
+  }
+}
+
+function trReset(){
+  TR_PREVIEW = [];
+  document.getElementById('tr-paso3').style.display = 'none';
+  document.getElementById('tr-tbody').innerHTML = '';
+  document.getElementById('tr-resumen').innerHTML = '';
+  const btnTrf = document.getElementById('tr-btn-transferir');
+  if(btnTrf){ btnTrf.disabled=false; btnTrf.style.opacity=''; btnTrf.style.cursor=''; btnTrf.title=''; }
+  if(TR_TAB==='csv') document.getElementById('tr-file').value='';
+}
+
+async function trRevertir(log_id, origen, destino, total){
+  if(!confirm(`¿Revertir transferencia #${log_id}?\n${origen} → ${destino} (${total} artículos)\n\nEsto restaurará los stocks anteriores en Flexxus.`)) return;
+  try {
+    const res = await api('POST', `/admin/transferencia/revertir/${log_id}`);
+    alert(`✅ Reversión completada. Restaurados: ${res.revertidos}${res.errores.length?'\nErrores:\n'+res.errores.join('\n'):''}`);
+    trLoadHistorial();
+  } catch(e){ alert('❌ Error al revertir: ' + e.message); }
+}
+
+async function trLoadHistorial(){
+  const div = document.getElementById('tr-historial');
+  if(!div) return;
+  try {
+    const rows = await api('GET','/admin/transferencia/historial') || [];
+    if(!rows.length){ div.innerHTML='<p style="color:#6b7280">Sin transferencias registradas.</p>'; return; }
+    div.innerHTML = rows.map(r=>{
+      const puedeRevertir = r.estado==='ok' && !r.revertida;
+      const btnRev = puedeRevertir
+        ? `<button class="btn btn-danger btn-sm" onclick="trRevertir(${r.id},'${r.deposito_origen_nombre||r.deposito_origen}','${r.deposito_destino_nombre||r.deposito_destino}',${r.total_articulos})">↩ Revertir</button>`
+        : (r.revertida ? '<span style="color:#6b7280;font-size:.78rem">Revertida</span>' : '—');
+      const btnExport = `
+        <button class="btn btn-ghost btn-sm" onclick="trDescargar(${r.id},'pdf')" title="Descargar comprobante en PDF">📄 PDF</button>
+        <button class="btn btn-ghost btn-sm" onclick="trDescargar(${r.id},'excel')" title="Descargar comprobante en Excel">📊 Excel</button>`;
+      const items = (r.detalle_items||[]).map(d=>
+        `<tr><td>${d.codigo_particular}</td><td>${(d.descripcion||'').substring(0,40)}</td>
+         <td style="text-align:right">${d.cantidad}</td>
+         <td style="text-align:right">${d.stock_origen_anterior}</td>
+         <td style="text-align:right">${d.stock_destino_anterior}</td></tr>`
+      ).join('');
+      const tblItems = items ? `<details style="margin-top:4px"><summary style="cursor:pointer;font-size:.78rem;color:#6b7280">Ver artículos (${r.detalle_items.length})</summary>
+        <table style="font-size:.78rem;margin-top:4px"><thead><tr><th>SKU</th><th>Descripción</th><th>Cant.</th><th>St.Orig.Ant.</th><th>St.Dest.Ant.</th></tr></thead>
+        <tbody>${items}</tbody></table></details>` : '';
+      return `<div style="border:1px solid #e5e7eb;border-radius:8px;padding:12px;margin-bottom:8px;${r.revertida?'opacity:.65':''}">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px">
+          <div>
+            <span style="font-weight:600;font-size:.85rem">TRF-${r.id}</span>
+            <span style="color:#6b7280;font-size:.8rem;margin-left:8px">${r.fecha}</span>
+            <span style="color:#6b7280;font-size:.8rem;margin-left:8px">por ${r.usuario}</span>
+            <br>
+            <span style="font-size:.83rem"><b>${r.deposito_origen_nombre||r.deposito_origen}</b> → <b>${r.deposito_destino_nombre||r.deposito_destino}</b></span>
+            <span style="margin-left:8px;font-size:.8rem;color:#6b7280">${r.total_articulos} art.</span>
+            <span class="badge ${r.revertida?'badge-gray':(r.estado==='ok'?'badge-green':'badge-red')}" style="margin-left:6px">${r.revertida?'revertida':r.estado}</span>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center">${btnExport}${btnRev}</div>
+        </div>
+        ${r.detalle?`<div style="color:#dc2626;font-size:.78rem;margin-top:4px">${r.detalle}</div>`:''}
+        ${tblItems}
+      </div>`;
+    }).join('');
+  } catch(e){ div.innerHTML='<p style="color:#dc2626">Error: '+e.message+'</p>'; }
+}
+
+function trMostrarResultado(logId, origenLabel, destinoLabel, procesados, errores){
+  const panel = document.getElementById('tr-resultado');
+  const texto = document.getElementById('tr-resultado-texto');
+  if(!panel || !texto) return;
+  let html = `<b>TRF-${logId}</b> &nbsp;·&nbsp; ${origenLabel} → ${destinoLabel} &nbsp;·&nbsp; ${procesados} artículo(s) procesado(s)`;
+  if(errores && errores.length){
+    html += `<div style="color:#dc2626;margin-top:6px">⚠️ ${errores.length} error(es): ${errores.slice(0,5).join('; ')}</div>`;
+  }
+  texto.innerHTML = html;
+  document.getElementById('tr-resultado-pdf').onclick    = () => trDescargar(logId, 'pdf');
+  document.getElementById('tr-resultado-excel').onclick  = () => trDescargar(logId, 'excel');
+  panel.style.display = 'block';
+  panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+async function trDescargar(logId, formato){
+  const ext = formato === 'excel' ? 'excel' : 'pdf';
+  const endpoint = `${BASE}/admin/transferencia/${logId}/${ext}`;
+  const fname = `transferencia_TRF-${logId}.${formato === 'excel' ? 'xlsx' : 'pdf'}`;
+  try{
+    if(window.AndroidBridge){
+      const urlConToken = endpoint + `?access_token=${encodeURIComponent(TOKEN)}`;
+      if(formato === 'excel') window.AndroidBridge.download(urlConToken, TOKEN, fname);
+      else window.AndroidBridge.openPdf(urlConToken, TOKEN, fname);
+    } else if(_isAndroidWebView()){
+      window.location.href = endpoint + `?access_token=${encodeURIComponent(TOKEN)}`;
+    } else {
+      _ldStart();
+      try{
+        const resp = await fetch(endpoint, { headers: { 'Authorization': 'Bearer ' + TOKEN } });
+        if(!resp.ok){ toast('Error al descargar: ' + resp.status, true); return; }
+        const blob = await resp.blob();
+        const url  = URL.createObjectURL(blob);
+        if(formato === 'pdf'){
+          window.open(url, '_blank');
+        } else {
+          const a = document.createElement('a');
+          a.href = url; a.download = fname; a.click();
+        }
+        URL.revokeObjectURL(url);
+      } finally { _ldEnd(); }
+    }
+  }catch(e){ toast('Error al descargar: ' + e.message, true); }
 }
 
 /* ─── Columnas redimensionables + sticky headers en modales ─── */
@@ -5243,14 +6762,18 @@ document.querySelectorAll('.modal-backdrop').forEach(bd=>{
       const mlUrl   = `https://listado.mercadolibre.com.ar/${encodeURIComponent(_mlQueryAproximada(r.descripcion||''))}`;
       const noPuedeML = r.puede_pub_meli === false
         ? '<span title="Precio ML no cubre ni el punto de equilibrio (costo + gasto operativo)" style="color:#dc2626;font-size:.7rem"> ⚠</span>' : '';
-      const bultoLabel = r.bulto_sugerido ? `×${r.bulto_sugerido}` : '—';
-      const packMay    = r.precio_bulto_mayorista
-        ? `$${Math.round(r.precio_bulto_mayorista).toLocaleString('es-AR')}`
+      // Precio unitario para packs: usa precio_bulto_mayorista/bulto_sugerido si disponible,
+      // sino precio_mayorista como fallback
+      const precioUnitPack = (r.precio_bulto_mayorista && r.bulto_sugerido)
+        ? r.precio_bulto_mayorista / r.bulto_sugerido
+        : (r.precio_mayorista || 0);
+      const fmtPack = (qty) => precioUnitPack > 0
+        ? `$${Math.round(precioUnitPack * qty).toLocaleString('es-AR')}`
         : '—';
-      const tdBase = 'padding:5px 8px;border-bottom:1px solid #f3f4f6;font-size:.75rem';
+      const tdBase = 'padding:3px 5px;border-bottom:1px solid #f3f4f6;font-size:.7rem';
       return `<tr style="vertical-align:top">
         <td style="${tdBase};font-family:monospace;white-space:nowrap">${r.codigoparticular}</td>
-        <td style="${tdBase};min-width:150px;max-width:190px;white-space:normal;line-height:1.3">${r.descripcion}</td>
+        <td style="${tdBase};min-width:110px;max-width:160px;white-space:normal;line-height:1.3">${r.descripcion}</td>
         <td style="${tdBase};text-align:right;white-space:nowrap">${r.stock.toLocaleString('es-AR')}</td>
         <td style="${tdBase};text-align:right;color:#92400e;white-space:nowrap">${r.costo ? '$'+Math.round(r.costo).toLocaleString('es-AR') : '—'}</td>
         <td style="${tdBase};text-align:center;white-space:nowrap;color:#374151">${r.ultima_compra ? r.ultima_compra.split('-').reverse().join('/') : '—'}</td>
@@ -5258,8 +6781,14 @@ document.querySelectorAll('.modal-backdrop').forEach(bd=>{
         <td style="${tdBase};text-align:right;font-weight:700;color:#15803d;white-space:nowrap">$${Math.round(r.precio_mayorista||0).toLocaleString('es-AR')}</td>
         <td style="${tdBase};text-align:right;font-weight:600;color:#1d4ed8;white-space:nowrap">$${Math.round(r.precio_meli_pub||r.precio_meli||0).toLocaleString('es-AR')}${noPuedeML}</td>
         <td style="${tdBase};text-align:right;font-weight:600;color:${mc}">${r.margen_mayorista_pct !== null && r.margen_mayorista_pct !== undefined ? r.margen_mayorista_pct+'%' : '—'}</td>
-        <td style="${tdBase};text-align:center;font-weight:700;color:#7c3aed">${bultoLabel}</td>
-        <td style="${tdBase};text-align:right;font-weight:600;color:#7c3aed;white-space:nowrap">${packMay}</td>
+        <td style="${tdBase};text-align:right;white-space:nowrap">
+          <table style="border-collapse:collapse;margin-left:auto;font-size:.67rem">
+            <tr><td style="color:#7c3aed;font-weight:700;padding:0 3px 0 0">×10</td><td style="text-align:right">${fmtPack(10)}</td></tr>
+            <tr><td style="color:#7c3aed;font-weight:700;padding:0 3px 0 0">×20</td><td style="text-align:right">${fmtPack(20)}</td></tr>
+            <tr><td style="color:#7c3aed;font-weight:700;padding:0 3px 0 0">×30</td><td style="text-align:right">${fmtPack(30)}</td></tr>
+            <tr><td style="color:#7c3aed;font-weight:700;padding:0 3px 0 0">×40</td><td style="text-align:right">${fmtPack(40)}</td></tr>
+          </table>
+        </td>
         <td style="${tdBase};text-align:right;white-space:nowrap">
           <a href="#" onclick="rotVerVentas(${idx});return false"
             style="color:#1a56db;text-decoration:underline" title="Ver detalle de comprobantes de venta">
@@ -5346,11 +6875,14 @@ document.querySelectorAll('.modal-backdrop').forEach(bd=>{
   // propio navegador del admin — exactamente como si lo tipeara él mismo.
   function _mlQueryAproximada(desc){
     let s = (desc||'').toUpperCase();
-    s = s.replace(/\bART\.?\s*\d+\b/g, ' ');
+    s = s.replace(/\bART\.?\s*\d+\b/g, ' ');   // quitar ART.XXXX
     s = s.replace(/[-_/]/g, ' ');
     s = s.replace(/[^A-Z0-9ÁÉÍÓÚÑ\s]/g, ' ');
     s = s.replace(/\s+/g, ' ').trim();
-    return s.split(' ').slice(0, 6).join(' ');
+    let words = s.split(' ').filter(Boolean);
+    // Si quedan más de 4 palabras, quitar las últimas 2 (suelen ser marca/modelo)
+    if (words.length > 4) words = words.slice(0, -2);
+    return words.slice(0, 6).join(' ');
   }
 
   function _rotResumenHTML(rows){
@@ -5737,8 +7269,10 @@ document.querySelectorAll('.modal-backdrop').forEach(bd=>{
   let _vtaPage = 1;
   const PAGE_SIZE = 100;
   let _chartCli = null, _chartArt = null, _chartLin = null;
-  let _vtaCliSel = null;       // cliente seleccionado en gráfico (para cross-filter)
-  let _vtaArtSel = null;       // artículo seleccionado en gráfico (para cross-filter)
+  let _vtaCliSel       = null;   // cliente seleccionado (cross-filter)
+  let _vtaArtSel       = null;   // artículo seleccionado (cross-filter)
+  let _vtaVendSel      = null;   // vendedor seleccionado (cross-filter)
+  let _vtaFiltroVendedor = false; // true = vendedor fijo → barras muestran clientes
   let _vtaPeriodo = null;      // período activo (YYYY-MM | null = todos)
   let _vtaTrimestre = null;    // trimestre activo ("YYYY-Qn" | null = todos)
   let _vtaCliTimer = null;
@@ -5802,40 +7336,151 @@ document.querySelectorAll('.modal-backdrop').forEach(bd=>{
     document.getElementById('vta-cli-drop').style.display='none';
   }
 
+  // ─── Datos de filtros de categoría (cargados una vez) ────────────────────
+  let _vtaFiltros = null;
+  let _vtaFiltroArticulo = false; // true = filtro por artículo → mostrar clientes
+
+  async function vtaCargarFiltros(){
+    if(_vtaFiltros) return;
+    try{
+      const d=await api('GET','/admin/rotacion-filtros');
+      if(!d) return;
+      _vtaFiltros=d;
+      // Grupos
+      const selGsr=document.getElementById('vta-gsr');
+      (d.grupos||[]).forEach(g=>{
+        const o=document.createElement('option');
+        o.value=g.codigo; o.textContent=g.descripcion||g.codigo;
+        selGsr.appendChild(o);
+      });
+      // Marcas
+      const selMarca=document.getElementById('vta-marca');
+      (d.marcas||[]).forEach(m=>{
+        const o=document.createElement('option');
+        o.value=m.codigo; o.textContent=m.descripcion||m.codigo;
+        selMarca.appendChild(o);
+      });
+    }catch(e){}
+  }
+
+  function vtaFiltroGSRChange(){
+    const gsrCod=document.getElementById('vta-gsr').value;
+    const selSR =document.getElementById('vta-sr');
+    const selR  =document.getElementById('vta-rubro');
+    selSR.innerHTML='<option value="">Todos</option>';
+    selR.innerHTML='<option value="">Todos</option>';
+    if(!_vtaFiltros||!gsrCod) return;
+    (_vtaFiltros.superrubros||[]).filter(s=>s.grupo===gsrCod).forEach(s=>{
+      const o=document.createElement('option');
+      o.value=s.codigo; o.textContent=s.descripcion||s.codigo;
+      selSR.appendChild(o);
+    });
+  }
+
+  function vtaFiltroSRChange(){
+    const srCod=document.getElementById('vta-sr').value;
+    const selR =document.getElementById('vta-rubro');
+    selR.innerHTML='<option value="">Todos</option>';
+    if(!_vtaFiltros||!srCod) return;
+    (_vtaFiltros.rubros||[]).filter(r=>r.superrubro===srCod).forEach(r=>{
+      const o=document.createElement('option');
+      o.value=r.codigo; o.textContent=r.descripcion||r.codigo;
+      selR.appendChild(o);
+    });
+  }
+
+  // ─── Autocomplete artículo ────────────────────────────────────────────────
+  let _vtaArtTimer=null;
+  async function vtaBuscarArticulo(q){
+    clearTimeout(_vtaArtTimer);
+    document.getElementById('vta-art-cod').value='';
+    const drop=document.getElementById('vta-art-drop');
+    if(!q||q.length<2){drop.style.display='none';return;}
+    _vtaArtTimer=setTimeout(async()=>{
+      try{
+        const d=await api('GET','/admin/articulos-buscar?q='+encodeURIComponent(q)+'&limit=20');
+        if(!d||!d.length){drop.style.display='none';return;}
+        drop.innerHTML='';
+        d.forEach(a=>{
+          const item=document.createElement('div');
+          item.style.cssText='padding:7px 10px;cursor:pointer;font-size:.8rem;border-bottom:1px solid #f3f4f6';
+          item.textContent=`[${a.codigoparticular||a.codigo}] ${a.descripcion}`;
+          item.onmouseenter=()=>item.style.background='#eff6ff';
+          item.onmouseleave=()=>item.style.background='';
+          item.onclick=()=>{
+            document.getElementById('vta-art-inp').value=`[${a.codigoparticular||a.codigo}] ${a.descripcion}`;
+            document.getElementById('vta-art-cod').value=a.codigoparticular||a.codigo;
+            drop.style.display='none';
+          };
+          drop.appendChild(item);
+        });
+        drop.style.display='block';
+      }catch(e){drop.style.display='none';}
+    },300);
+  }
+  document.addEventListener('click',e=>{
+    if(!e.target.closest('#vta-art-inp')&&!e.target.closest('#vta-art-drop'))
+      document.getElementById('vta-art-drop').style.display='none';
+  });
+
   function vtaLimpiar(){
     document.getElementById('vta-vend-sel').value='';
     document.getElementById('vta-cli-inp').value='';
     document.getElementById('vta-cli-cod').value='';
     document.getElementById('vta-desde').value='';
     document.getElementById('vta-hasta').value='';
+    document.getElementById('vta-gsr').value='';
+    document.getElementById('vta-sr').innerHTML='<option value="">Todos</option>';
+    document.getElementById('vta-rubro').innerHTML='<option value="">Todos</option>';
+    document.getElementById('vta-marca').value='';
+    document.getElementById('vta-art-inp').value='';
+    document.getElementById('vta-art-cod').value='';
+    document.getElementById('vta-art-drop').style.display='none';
     document.getElementById('vta-tabla-wrap').style.display='none';
     document.getElementById('vta-dash').style.display='none';
     document.getElementById('vta-resumen').style.display='none';
     _vtaRows=[];_vtaParams=null;_vtaCliSel=null;_vtaArtSel=null;_vtaPeriodo=null;_vtaTrimestre=null;
+    _vtaFiltroArticulo=false; _vtaFiltroVendedor=false;
     if(_chartCli){_chartCli.destroy();_chartCli=null;}
     if(_chartArt){_chartArt.destroy();_chartArt=null;}
     if(_chartLin){_chartLin.destroy();_chartLin=null;}
   }
 
   async function vtaBuscar(){
-    const vend  = document.getElementById('vta-vend-sel').value;
-    const cliCod= document.getElementById('vta-cli-cod').value;
-    const desde = document.getElementById('vta-desde').value;
-    const hasta = document.getElementById('vta-hasta').value;
+    const vend    = document.getElementById('vta-vend-sel').value;
+    const cliCod  = document.getElementById('vta-cli-cod').value;
+    const desde   = document.getElementById('vta-desde').value;
+    const hasta   = document.getElementById('vta-hasta').value;
+    const grupo   = document.getElementById('vta-gsr').value;
+    const srubro  = document.getElementById('vta-sr').value;
+    const rubro   = document.getElementById('vta-rubro').value;
+    const marca   = document.getElementById('vta-marca').value;
+    const artCod  = document.getElementById('vta-art-cod').value;
+    const artTxt  = document.getElementById('vta-art-inp').value.trim();
+    const articulo= artCod || artTxt;
 
-    if(!vend && !cliCod && !desde && !hasta){
-      alert('Seleccioná al menos un filtro (vendedor, cliente o período).');
+    if(!vend && !cliCod && !desde && !hasta && !grupo && !srubro && !rubro && !marca && !articulo){
+      alert('Seleccioná al menos un filtro (vendedor, cliente, período o categoría).');
       return;
     }
 
     let url='/ventas?';
     const p=[];
-    if(vend)  p.push('vendedor='+encodeURIComponent(vend));
-    if(cliCod)p.push('cliente='+encodeURIComponent(cliCod));
-    if(desde) p.push('desde='+encodeURIComponent(desde));
-    if(hasta) p.push('hasta='+encodeURIComponent(hasta));
+    if(vend)    p.push('vendedor='+encodeURIComponent(vend));
+    if(cliCod)  p.push('cliente='+encodeURIComponent(cliCod));
+    if(desde)   p.push('desde='+encodeURIComponent(desde));
+    if(hasta)   p.push('hasta='+encodeURIComponent(hasta));
+    if(grupo)   p.push('grupo='+encodeURIComponent(grupo));
+    if(srubro)  p.push('superrubro='+encodeURIComponent(srubro));
+    if(rubro)   p.push('rubro='+encodeURIComponent(rubro));
+    if(marca)   p.push('marca='+encodeURIComponent(marca));
+    if(articulo)p.push('articulo='+encodeURIComponent(articulo));
     url+=p.join('&');
     _vtaParams=p.join('&');
+    // Determinar qué muestran las barras del dashboard
+    _vtaFiltroArticulo = !!articulo && !grupo && !srubro && !rubro && !marca;
+    // Vendedor seleccionado sin filtro de categoría → barras muestran clientes de ese vendedor
+    _vtaFiltroVendedor = !!vend && !grupo && !srubro && !rubro && !marca && !articulo;
 
     const btn=document.querySelector('#sec-ventas button[onclick="vtaBuscar()"]');
     if(btn){btn.disabled=true;btn.textContent='⏳ Buscando...';}
@@ -5922,7 +7567,7 @@ document.querySelectorAll('.modal-backdrop').forEach(bd=>{
       pager.appendChild(mkBtn('Sig ›',_vtaPage+1,_vtaPage===total_pages));
     }
 
-    resumen.textContent=`${_vtaRows.length} líneas encontradas — Total: ${fmtARS(totTot)}`;
+    resumen.innerHTML=`${_vtaRows.length} líneas encontradas — <span title="Total con IVA incluido">Total c/IVA: <strong>${fmtARS(totTot)}</strong></span> &nbsp;|&nbsp; <span title="Neto sin IVA = base imponible">Neto s/IVA: <strong>${fmtARS(totImp)}</strong></span>`;
     resDiv.style.display='flex';
     wrap.style.display='block';
   }
@@ -5971,30 +7616,47 @@ document.querySelectorAll('.modal-backdrop').forEach(bd=>{
   }
 
   function vtaActualizarTotales(rows){
-    let neto=0, costo=0, comision=0;
+    let neto=0, costo=0, comision=0, conIva=0;
     rows.forEach(r=>{
       neto     +=Number(r.importe   ||0);
       costo    +=Number(r.costo_total||0);
       comision +=Number(r.comision  ||0);
+      conIva   +=Number(r.total     ||0);
     });
     document.getElementById('vta-kpi-neto').textContent     =fmtARS(neto);
     document.getElementById('vta-kpi-costo').textContent    =fmtARS(costo);
     document.getElementById('vta-kpi-comision').textContent =fmtARS(comision);
+    document.getElementById('vta-kpi-coniva').textContent   =fmtARS(conIva);
     document.getElementById('vta-totales').style.display    =rows.length?'block':'none';
   }
 
+  // true = barras muestran clientes; false = barras muestran artículos
+  function _vtaMostrarClientes(){ return _vtaFiltroArticulo || _vtaFiltroVendedor; }
+
+  let _chartVend=null;
+
   function _vtaRefreshCharts(){
     const rows=_vtaFiltrarRows();
-    const tieneVendedor=!!document.getElementById('vta-vend-sel').value;
-    const tieneCliente =!!document.getElementById('vta-cli-cod').value;
+    const tieneCliente=!!document.getElementById('vta-cli-cod').value;
+    if(_chartVend){_chartVend.destroy();_chartVend=null;}
     if(_chartCli){_chartCli.destroy();_chartCli=null;}
     if(_chartArt){_chartArt.destroy();_chartArt=null;}
     if(_chartLin){_chartLin.destroy();_chartLin=null;}
-    _vtaCliSel=null; _vtaArtSel=null;
-    document.getElementById('vta-dash-art-titulo').textContent='Top 15 artículos más vendidos';
+    _vtaCliSel=null; _vtaArtSel=null; _vtaVendSel=null;
     vtaActualizarTotales(rows);
-    if(tieneVendedor||!tieneCliente) vtaBuiltChartClientes(rows,null);
-    vtaBuiltChartArticulos(rows,null);
+    if(_vtaFiltroVendedor){
+      // Vendedor seleccionado: vertical = clientes, horizontal = artículos
+      vtaBuildChartClientes(rows, null);
+      vtaBuildChartBarras_Articulos(rows, null);
+    } else if(_vtaFiltroArticulo){
+      // Artículo seleccionado: vertical = vendedores, horizontal = clientes
+      vtaBuildChartVendedores(rows, null);
+      vtaBuildChartBarras_Clientes(rows, null);
+    } else {
+      // Default: vertical = vendedores, horizontal = artículos
+      vtaBuildChartVendedores(rows, null);
+      vtaBuildChartBarras_Articulos(rows, null);
+    }
     if(tieneCliente) vtaBuildChartLinea(rows);
   }
 
@@ -6015,7 +7677,7 @@ document.querySelectorAll('.modal-backdrop').forEach(bd=>{
     const tieneVendedor=!!document.getElementById('vta-vend-sel').value;
     const tieneCliente =!!document.getElementById('vta-cli-cod').value;
     document.getElementById('vta-dash').style.display='block';
-    _vtaPeriodo=null; _vtaTrimestre=null; _vtaCliSel=null; _vtaArtSel=null;
+    _vtaPeriodo=null; _vtaTrimestre=null; _vtaCliSel=null; _vtaArtSel=null; _vtaVendSel=null;
 
     const meses=[...new Set(_vtaRows.filter(r=>r.fecha).map(r=>r.fecha.slice(0,7)))].sort();
 
@@ -6066,8 +7728,19 @@ document.querySelectorAll('.modal-backdrop').forEach(bd=>{
       divTri.style.display='none';
     }
 
-    document.getElementById('vta-dash-clientes').style.display=(tieneVendedor||!tieneCliente)?'block':'none';
     document.getElementById('vta-dash-linea').style.display=tieneCliente?'block':'none';
+
+    // Títulos dinámicos según modo
+    if(_vtaFiltroVendedor){
+      document.getElementById('vta-dash-vend-titulo').textContent='👥 Clientes del Vendedor';
+      document.getElementById('vta-dash-barras-titulo').textContent='🏆 Top 15 Artículos del vendedor';
+    } else if(_vtaFiltroArticulo){
+      document.getElementById('vta-dash-vend-titulo').textContent='📊 Facturación por Vendedor';
+      document.getElementById('vta-dash-barras-titulo').textContent='👥 Top 15 Clientes del artículo';
+    } else {
+      document.getElementById('vta-dash-vend-titulo').textContent='📊 Facturación por Vendedor';
+      document.getElementById('vta-dash-barras-titulo').textContent='🏆 Top 15 artículos más vendidos';
+    }
 
     _vtaRefreshCharts();
   }
@@ -6085,152 +7758,287 @@ document.querySelectorAll('.modal-backdrop').forEach(bd=>{
     return Object.values(map).sort((a,b)=>b.imp-a.imp).slice(0,15);
   }
 
-  function vtaBuiltChartClientes(rows, filterArt){
-    const ctx=document.getElementById('chartVtaClientes');
-    if(!ctx)return;
-    const data=agruparPor(rows, r=>r.razonsocial||r.codigocliente,
-      r=>!filterArt||(r.cod_articulo===filterArt||r.descripcion===filterArt));
-    if(_chartCli){_chartCli.destroy();_chartCli=null;}
-    if(!data.length)return;
+  // ── helpers de highlight para barras seleccionadas ───────────────────────
+  function _colorsVend(data, selLabel){
+    return data.map(d=>d.label===selLabel?'rgba(30,66,159,1)':'rgba(30,66,159,0.55)');
+  }
+  function _colorsBarras(data, selLabel, colorBase){
+    return data.map(d=>d.label===selLabel?colorBase.replace('0.78','1').replace('0.72','1'):colorBase);
+  }
 
+  // ── Chart CLIENTES en eje vertical (cuando vendedor seleccionado) ─────────
+  function vtaBuildChartClientes(rows, hilight){
+    const ctx=document.getElementById('chartVtaVendedores');
+    if(!ctx)return;
+    const map={};
+    rows.forEach(r=>{
+      const k=(r.razonsocial||r.codigocliente||'').trim()||'S/D';
+      if(!map[k])map[k]={label:k,cant:0,imp:0};
+      map[k].cant+=Math.abs(Number(r.cantidad||0));
+      map[k].imp +=Number(r.total||0);
+    });
+    const data=Object.values(map).sort((a,b)=>b.imp-a.imp).slice(0,15);
+    if(_chartVend){_chartVend.destroy();_chartVend=null;}
+    if(!data.length)return;
     const labels=data.map(d=>d.label.length>22?d.label.slice(0,22)+'…':d.label);
-    _chartCli=new Chart(ctx,{
+    const bgColors=hilight?data.map(d=>d.label===hilight?'rgba(5,150,105,1)':'rgba(5,150,105,0.45)'):data.map(()=>'rgba(5,150,105,0.75)');
+    _chartVend=new Chart(ctx,{
       type:'bar',
       data:{
         labels,
         datasets:[
-          {label:'Facturación ($)',data:data.map(d=>d.imp),backgroundColor:'rgba(30,66,159,0.75)',
-           yAxisID:'y',order:1},
-          {label:'Cantidad',data:data.map(d=>d.cant),type:'line',borderColor:'#f59e0b',
+          {label:'Facturación ($)',data:data.map(d=>d.imp),backgroundColor:bgColors,yAxisID:'y',order:1},
+          {label:'Unidades',data:data.map(d=>d.cant),type:'line',borderColor:'#f59e0b',
            backgroundColor:'rgba(245,158,11,0.15)',pointRadius:4,yAxisID:'y2',order:0}
         ]
       },
       options:{
         responsive:true,maintainAspectRatio:false,
-        plugins:{
-          legend:{position:'top'},
-          tooltip:{callbacks:{label:ctx=>{
-            if(ctx.dataset.yAxisID==='y') return ' '+fmtARS(ctx.raw);
-            return ' '+Number(ctx.raw).toLocaleString('es-AR',{minimumFractionDigits:0,maximumFractionDigits:2})+' u.';
+        plugins:{legend:{position:'top'},
+          tooltip:{callbacks:{label:c=>{
+            if(c.dataset.yAxisID==='y') return ' '+fmtARS(c.raw);
+            return ' '+Number(c.raw).toLocaleString('es-AR',{maximumFractionDigits:0})+' u.';
           }}}
         },
         scales:{
-          y:{position:'left',ticks:{callback:v=>fmtARS(v)},title:{display:true,text:'Facturación'}},
-          y2:{position:'right',grid:{drawOnChartArea:false},title:{display:true,text:'Cantidad'}}
+          y:{position:'left',ticks:{callback:v=>fmtARS(v),font:{size:9}},title:{display:true,text:'Facturación'}},
+          y2:{position:'right',grid:{drawOnChartArea:false},title:{display:true,text:'Unidades'}}
         },
         onClick(evt,els){
-          if(!els.length)return;
-          const idx=els[0].index;
-          const selLabel=data[idx].label;
-          if(_vtaCliSel===selLabel){
-            // Deselect
+          const baseRows=_vtaFiltrarRows();
+          if(!els.length){
             _vtaCliSel=null;
-            document.getElementById('vta-dash-art-titulo').textContent='Top 15 artículos más vendidos';
-            vtaBuiltChartArticulos(_vtaRows,null);
+            vtaActualizarTotales(baseRows);
+            vtaBuildChartClientes(baseRows, null);
+            vtaBuildChartBarras_Articulos(baseRows, null);
+            return;
+          }
+          const sel=data[els[0].index].label;
+          if(_vtaCliSel===sel){
+            _vtaCliSel=null;
+            vtaActualizarTotales(baseRows);
+            vtaBuildChartClientes(baseRows, null);
+            vtaBuildChartBarras_Articulos(baseRows, null);
           } else {
-            _vtaCliSel=selLabel;
-            document.getElementById('vta-dash-art-titulo').textContent=`Top 15 artículos — ${selLabel.slice(0,30)}`;
-            vtaBuiltChartArticulos(_vtaRows,selLabel);
+            _vtaCliSel=sel;
+            const filtRows=baseRows.filter(r=>(r.razonsocial||r.codigocliente||'').trim()===sel);
+            vtaActualizarTotales(filtRows);
+            vtaBuildChartClientes(baseRows, sel);
+            vtaBuildChartBarras_Articulos(filtRows, null);
           }
         }
       }
     });
   }
 
-  function vtaBuiltChartArticulos(rows, filterCliente){
-    const ctx=document.getElementById('chartVtaArticulos');
+  // ── Chart vendedores (siempre visible) ───────────────────────────────────
+  function vtaBuildChartVendedores(rows, hilight){
+    const ctx=document.getElementById('chartVtaVendedores');
     if(!ctx)return;
-    // Agrupar por código de artículo (evita duplicados por descripción con espacios)
     const map={};
-    rows.filter(r=>!filterCliente||(r.razonsocial===filterCliente||r.codigocliente===filterCliente))
-      .forEach(r=>{
-        const k=((r.cod_articulo||'').trim()||((r.descripcion||'').trim().replace(/\s+/g,' ')));
-        if(!k)return;
-        if(!map[k]){
-          const desc=(r.descripcion||k).trim().replace(/\s+/g,' ');
-          map[k]={label:desc,cant:0,imp:0};
+    rows.forEach(r=>{
+      const k=(r.vendedor_nombre||r.codigovendedor||'').trim()||'S/D';
+      if(!map[k])map[k]={label:k,cant:0,imp:0};
+      map[k].cant+=Math.abs(Number(r.cantidad||0));
+      map[k].imp +=Number(r.total||0);
+    });
+    const data=Object.values(map).sort((a,b)=>b.imp-a.imp).slice(0,15);
+    if(_chartVend){_chartVend.destroy();_chartVend=null;}
+    if(!data.length)return;
+    const labels=data.map(d=>d.label.length>22?d.label.slice(0,22)+'…':d.label);
+    const bgColors=hilight?_colorsVend(data,hilight):data.map(()=>'rgba(30,66,159,0.75)');
+    _chartVend=new Chart(ctx,{
+      type:'bar',
+      data:{
+        labels,
+        datasets:[
+          {label:'Facturación ($)',data:data.map(d=>d.imp),backgroundColor:bgColors,yAxisID:'y',order:1},
+          {label:'Unidades',data:data.map(d=>d.cant),type:'line',borderColor:'#f59e0b',
+           backgroundColor:'rgba(245,158,11,0.15)',pointRadius:4,yAxisID:'y2',order:0}
+        ]
+      },
+      options:{
+        responsive:true,maintainAspectRatio:false,
+        plugins:{legend:{position:'top'},
+          tooltip:{callbacks:{label:c=>{
+            if(c.dataset.yAxisID==='y') return ' '+fmtARS(c.raw);
+            return ' '+Number(c.raw).toLocaleString('es-AR',{maximumFractionDigits:0})+' u.';
+          }}}
+        },
+        scales:{
+          y:{position:'left',ticks:{callback:v=>fmtARS(v),font:{size:9}},title:{display:true,text:'Facturación'}},
+          y2:{position:'right',grid:{drawOnChartArea:false},title:{display:true,text:'Unidades'}}
+        },
+        onClick(evt,els){
+          const baseRows=_vtaFiltrarRows();
+          if(!els.length){
+            _vtaVendSel=null;
+            vtaActualizarTotales(baseRows);
+            vtaBuildChartVendedores(baseRows, null);
+            if(_vtaFiltroArticulo) vtaBuildChartBarras_Clientes(baseRows, null);
+            else vtaBuildChartBarras_Articulos(baseRows, null);
+            return;
+          }
+          const sel=data[els[0].index].label;
+          if(_vtaVendSel===sel){
+            _vtaVendSel=null;
+            vtaActualizarTotales(baseRows);
+            vtaBuildChartVendedores(baseRows, null);
+            if(_vtaFiltroArticulo) vtaBuildChartBarras_Clientes(baseRows, null);
+            else vtaBuildChartBarras_Articulos(baseRows, null);
+          } else {
+            _vtaVendSel=sel;
+            const filtRows=baseRows.filter(r=>(r.vendedor_nombre||r.codigovendedor||'S/D').trim()===sel);
+            vtaActualizarTotales(filtRows);
+            vtaBuildChartVendedores(baseRows, sel);
+            vtaBuildChartBarras_Articulos(filtRows, null);
+          }
         }
-        map[k].cant+=Number(r.cantidad||0);
-        map[k].imp +=Number(r.total||0);
-      });
+      }
+    });
+  }
+
+  // ── Barras: Top 15 CLIENTES (cuando filtro por artículo específico) ──────
+  function vtaBuildChartBarras_Clientes(rows, hilight){
+    const ctx=document.getElementById('chartVtaBarras');
+    if(!ctx)return;
+    const map={};
+    rows.forEach(r=>{
+      const k=(r.razonsocial||r.codigocliente||'').trim();
+      if(!k)return;
+      if(!map[k])map[k]={label:k,cant:0,imp:0};
+      map[k].cant+=Math.abs(Number(r.cantidad||0));
+      map[k].imp +=Number(r.total||0);
+    });
     const data=Object.values(map).sort((a,b)=>b.imp-a.imp).slice(0,15);
     if(_chartArt){_chartArt.destroy();_chartArt=null;}
     if(!data.length)return;
-
     const labels=data.map(d=>d.label.length>26?d.label.slice(0,26)+'…':d.label);
+    const bgColors=hilight
+      ?data.map(d=>d.label===hilight?'rgba(30,66,159,1)':'rgba(30,66,159,0.45)')
+      :data.map(()=>'rgba(30,66,159,0.72)');
+    _chartArt=new Chart(ctx,{
+      type:'bar',
+      data:{labels,datasets:[{
+        label:'Facturación ($)',data:data.map(d=>d.imp),
+        backgroundColor:bgColors,borderColor:'rgba(30,66,159,0.9)',borderWidth:1
+      }]},
+      options:{
+        indexAxis:'y',responsive:true,maintainAspectRatio:false,
+        plugins:{legend:{position:'top'},tooltip:{callbacks:{
+          label:c=>' '+fmtARS(c.raw),
+          afterLabel:c=>' Cant: '+Number(data[c.dataIndex].cant).toLocaleString('es-AR',{maximumFractionDigits:0})+' u.'
+        }}},
+        scales:{
+          y:{ticks:{font:{size:8},autoSkip:false}},
+          x:{position:'top',ticks:{callback:v=>fmtARS(v),maxTicksLimit:6},title:{display:true,text:'Facturación ($)'}}
+        },
+        onClick(evt,els){
+          const baseRows=_vtaFiltrarRows();
+          if(!els.length){
+            _vtaCliSel=null;
+            vtaActualizarTotales(baseRows);
+            vtaBuildChartVendedores(baseRows, _vtaVendSel);
+            vtaBuildChartBarras_Clientes(baseRows, null);
+            return;
+          }
+          const sel=data[els[0].index].label;
+          if(_vtaCliSel===sel){
+            _vtaCliSel=null;
+            vtaActualizarTotales(baseRows);
+            vtaBuildChartVendedores(baseRows, _vtaVendSel);
+            vtaBuildChartBarras_Clientes(baseRows, null);
+          } else {
+            _vtaCliSel=sel;
+            const filtRows=baseRows.filter(r=>(r.razonsocial||r.codigocliente||'').trim()===sel);
+            vtaActualizarTotales(filtRows);
+            vtaBuildChartVendedores(filtRows, null);
+            vtaBuildChartBarras_Clientes(baseRows, sel);
+          }
+        }
+      }
+    });
+  }
 
-    // Plugin inline: dibuja la cantidad como texto sobre cada barra
+  // ── Barras: Top 15 ARTÍCULOS (cuando filtro por categoría / sin artículo) ─
+  function vtaBuildChartBarras_Articulos(rows, hilight){
+    const ctx=document.getElementById('chartVtaBarras');
+    if(!ctx)return;
+    const map={};
+    rows.forEach(r=>{
+      const k=((r.cod_articulo||'').trim()||(r.descripcion||'').trim().replace(/\s+/g,' '));
+      if(!k)return;
+      if(!map[k]){
+        const desc=(r.descripcion||k).trim().replace(/\s+/g,' ');
+        map[k]={label:desc,cod:k,cant:0,imp:0};
+      }
+      map[k].cant+=Math.abs(Number(r.cantidad||0));
+      map[k].imp +=Number(r.total||0);
+    });
+    const data=Object.values(map).sort((a,b)=>b.imp-a.imp).slice(0,15);
+    if(_chartArt){_chartArt.destroy();_chartArt=null;}
+    if(!data.length)return;
+    const labels=data.map(d=>d.label.length>28?d.label.slice(0,28)+'…':d.label);
+    const bgColors=hilight
+      ?data.map(d=>d.label===hilight?'rgba(5,150,105,1)':'rgba(5,150,105,0.4)')
+      :data.map(()=>'rgba(5,150,105,0.78)');
     const cantPlugin={
-      id:'cantLabel',
+      id:'cantLbl',
       afterDatasetsDraw(chart){
         const {ctx:c2}=chart;
-        const meta=chart.getDatasetMeta(0);
-        meta.data.forEach((bar,i)=>{
-          const cant=data[i].cant;
-          if(!cant||cant<=0)return;
-          const txt=Number(cant).toLocaleString('es-AR',{maximumFractionDigits:0})+' u.';
-          c2.save();
-          c2.font='bold 9px Helvetica,Arial,sans-serif';
-          c2.textBaseline='middle';
-          const bw=Math.abs(bar.x-bar.base);
-          const tw=c2.measureText(txt).width;
-          if(bw>tw+12){
-            c2.fillStyle='rgba(255,255,255,0.92)';
-            c2.fillText(txt,bar.x-tw-5,bar.y);
-          } else {
-            c2.fillStyle='#1f2937';
-            c2.fillText(txt,bar.x+4,bar.y);
-          }
+        chart.getDatasetMeta(0).data.forEach((bar,i)=>{
+          const txt=Number(data[i].cant).toLocaleString('es-AR',{maximumFractionDigits:0})+' u.';
+          c2.save();c2.font='bold 9px Arial';c2.textBaseline='middle';
+          const bw=Math.abs(bar.x-bar.base);const tw=c2.measureText(txt).width;
+          if(bw>tw+12){c2.fillStyle='rgba(255,255,255,.9)';c2.fillText(txt,bar.x-tw-5,bar.y);}
+          else{c2.fillStyle='#1f2937';c2.fillText(txt,bar.x+4,bar.y);}
           c2.restore();
         });
       }
     };
-
     _chartArt=new Chart(ctx,{
       type:'bar',
-      data:{
-        labels,
-        datasets:[{
-          label:'Facturación ($)',
-          data:data.map(d=>d.imp),
-          backgroundColor:'rgba(5,150,105,0.78)',
-          borderColor:'rgba(4,120,87,0.9)',
-          borderWidth:1
-        }]
-      },
+      data:{labels,datasets:[{
+        label:'Facturación ($)',data:data.map(d=>d.imp),
+        backgroundColor:bgColors,borderColor:'rgba(4,120,87,0.9)',borderWidth:1
+      }]},
       options:{
-        indexAxis:'y',
-        responsive:true,maintainAspectRatio:false,
-        plugins:{
-          legend:{position:'top'},
-          cantLabel:{},  // activar plugin inline
+        indexAxis:'y',responsive:true,maintainAspectRatio:false,
+        plugins:{legend:{position:'top'},cantLbl:{},
           tooltip:{callbacks:{
             label:c=>' '+fmtARS(c.raw),
-            afterLabel:c=>{
-              const d=data[c.dataIndex];
-              return ' Cant: '+Number(d.cant).toLocaleString('es-AR',{minimumFractionDigits:0,maximumFractionDigits:2})+' u.';
-            }
-          }}
-        },
+            afterLabel:c=>' Cant: '+Number(data[c.dataIndex].cant).toLocaleString('es-AR',{maximumFractionDigits:0})+' u.'
+          }}},
         scales:{
-          y:{ticks:{font:{size:9},autoSkip:false}},
-          x:{position:'top',
-             ticks:{callback:v=>fmtARS(v),maxTicksLimit:6},
-             title:{display:true,text:'Facturación ($)'}}
+          y:{ticks:{font:{size:8},autoSkip:false}},
+          x:{position:'top',ticks:{callback:v=>fmtARS(v),maxTicksLimit:6},title:{display:true,text:'Facturación ($)'}}
         },
         onClick(evt,els){
-          if(!els.length)return;
-          const idx=els[0].index;
-          const selLabel=data[idx].label;
-          const divCli=document.getElementById('vta-dash-clientes');
-          if(divCli.style.display==='none') return;
-          const baseRows=_vtaPeriodo?_vtaRows.filter(r=>r.fecha&&r.fecha.slice(0,7)===_vtaPeriodo):_vtaRows;
-          if(_vtaArtSel===selLabel){
+          const baseRows=_vtaFiltrarRows();
+          if(!els.length){
             _vtaArtSel=null;
-            vtaBuiltChartClientes(baseRows,null);
+            vtaActualizarTotales(baseRows);
+            if(_vtaFiltroVendedor) vtaBuildChartClientes(baseRows, null);
+            else vtaBuildChartVendedores(baseRows, null);
+            vtaBuildChartBarras_Articulos(baseRows, null);
+            return;
+          }
+          const d=data[els[0].index];
+          if(_vtaArtSel===d.label){
+            _vtaArtSel=null;
+            vtaActualizarTotales(baseRows);
+            if(_vtaFiltroVendedor) vtaBuildChartClientes(baseRows, null);
+            else vtaBuildChartVendedores(baseRows, null);
+            vtaBuildChartBarras_Articulos(baseRows, null);
           } else {
-            _vtaArtSel=selLabel;
-            vtaBuiltChartClientes(baseRows,selLabel);
+            _vtaArtSel=d.label;
+            const filtRows=baseRows.filter(r=>
+              ((r.cod_articulo||'').trim()===d.cod)||
+              ((r.descripcion||'').trim().replace(/\s+/g,' ')===d.label));
+            vtaActualizarTotales(filtRows);
+            if(_vtaFiltroVendedor) vtaBuildChartClientes(filtRows, null);
+            else vtaBuildChartVendedores(filtRows, null);
+            vtaBuildChartBarras_Articulos(baseRows, d.label);
           }
         }
       },
@@ -6310,13 +8118,17 @@ document.querySelectorAll('.modal-backdrop').forEach(bd=>{
   }
 
   // ── Exponer globalmente ───────────────────────────────────────────────────
-  window.vtaCargarVendedores = vtaCargarVendedores;
+  window.vtaCargarVendedores  = vtaCargarVendedores;
   window.vtaOnVendedorChange  = vtaOnVendedorChange;
   window.vtaBuscarCliente     = vtaBuscarCliente;
   window.vtaSelCliente        = vtaSelCliente;
   window.vtaLimpiar           = vtaLimpiar;
   window.vtaBuscar            = vtaBuscar;
   window.vtaExportar          = vtaExportar;
+  window.vtaCargarFiltros     = vtaCargarFiltros;
+  window.vtaFiltroGSRChange   = vtaFiltroGSRChange;
+  window.vtaFiltroSRChange    = vtaFiltroSRChange;
+  window.vtaBuscarArticulo    = vtaBuscarArticulo;
 })();
 
 /* ─── Sticky headers + Resizable columns (universal) ─── */
