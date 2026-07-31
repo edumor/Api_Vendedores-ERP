@@ -29,6 +29,7 @@ import uvicorn
 import threading
 import asyncio
 import time
+import queue
 import firebirdsql
 from dotenv import load_dotenv
 from jose import JWTError, jwt
@@ -71,6 +72,9 @@ WA_ACCESS_TOKEN    = os.getenv('WHATSAPP_TOKEN') or os.getenv('WA_ACCESS_TOKEN',
 WA_WABA_ID         = os.getenv('WHATSAPP_WABA_ID') or os.getenv('WA_WABA_ID', '')        # para crear plantillas
 WA_TEMPLATE_CAT    = os.getenv('WA_TEMPLATE_CAT', 'microbell_catalogo')   # nombre plantilla catálogo
 WA_TEMPLATE_SLIDE  = os.getenv('WA_TEMPLATE_SLIDE', 'microbell_catalogo') # nombre plantilla slide (puede ser la misma)
+WA_TEMPLATE_COBRANZAS = os.getenv('WA_TEMPLATE_COBRANZAS', 'microbell_cobranzas_v1')  # plantilla aviso a Cobranzas
+WA_COBRANZAS_CEL   = os.getenv('WA_COBRANZAS_CEL', '5491168561985')  # celular Área de Cobranzas
+WA_TEMPLATE_REACTIVACION = os.getenv('WA_TEMPLATE_REACTIVACION', 'microbell_reactivacion_v1')  # plantilla reactivación de clientes
 
 # ── Catálogos ──────────────────────────────────────────────────────────────────
 _BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
@@ -78,13 +82,129 @@ CATALOGOS_DIR = os.path.join(_BASE_DIR, os.getenv('CATALOGOS_DIR', 'catalogos'))
 os.makedirs(CATALOGOS_DIR, exist_ok=True)
 # ──────────────────────────────────────────────────────────────────────────────
 
+# ── Pool de conexiones Firebird ────────────────────────────────────────────────
+# Antes conn() abría una conexión TCP nueva en CADA llamada y el resto del código la
+# cierra con c.close() al terminar (225 usos en este archivo). Abrir/cerrar la conexión
+# de red contra Firebird es lo que generaba los ~2seg de demora por artículo agregado,
+# no el cálculo del stock (eso ya estaba cacheado). La solución: conn() ahora devuelve
+# un wrapper que se comporta EXACTAMENTE igual (mismo .cursor()/.commit()/.rollback()/
+# .close()) pero .close() no cierra el socket — hace rollback() de cualquier
+# transacción sin confirmar (mismo efecto que tenía cerrar la conexión antes) y la
+# devuelve a un pool para reusarla en el próximo request. Ningún otro lugar del código
+# necesita cambiar. DB_POOL_ENABLED=0 en .env desactiva el pool y vuelve al
+# comportamiento anterior (conexión nueva por request) sin tocar código, por si hiciera
+# falta revertir rápido en producción.
+_DB_POOL_ENABLED = os.getenv('DB_POOL_ENABLED', '1') == '1'
+_DB_POOL_SIZE     = int(os.getenv('DB_POOL_SIZE', 8))   # máx. conexiones ociosas guardadas por (db, charset)
+_db_pools: dict         = {}   # (db_path, charset) -> queue.Queue de conexiones firebirdsql "crudas"
+_db_pool_created: dict  = {}   # (db_path, charset) -> cuántas conexiones vivas hay creadas (para logs/diagnóstico)
+_db_pools_lock = threading.Lock()
+
+def _db_pool_get_queue(key):
+    with _db_pools_lock:
+        pool = _db_pools.get(key)
+        if pool is None:
+            pool = queue.Queue(maxsize=_DB_POOL_SIZE)
+            _db_pools[key] = pool
+            _db_pool_created[key] = 0
+        return pool
+
+def _db_pool_dec(key):
+    with _db_pools_lock:
+        _db_pool_created[key] = max(0, _db_pool_created.get(key, 1) - 1)
+
+class _PooledConnection:
+    """Wrapper transparente sobre una conexión firebirdsql real. Todo lo que no sea
+    close() se delega tal cual (cursor, commit, rollback, etc.) — el resto del código
+    no nota la diferencia."""
+    def __init__(self, raw, key):
+        self._raw = raw
+        self._key = key
+        self._broken = False
+
+    def cursor(self, *a, **kw):
+        try:
+            return self._raw.cursor(*a, **kw)
+        except Exception:
+            self._broken = True
+            raise
+
+    def commit(self, *a, **kw):
+        try:
+            return self._raw.commit(*a, **kw)
+        except Exception:
+            self._broken = True
+            raise
+
+    def rollback(self, *a, **kw):
+        try:
+            return self._raw.rollback(*a, **kw)
+        except Exception:
+            self._broken = True
+            raise
+
+    def close(self):
+        if not _DB_POOL_ENABLED:
+            try: self._raw.close()
+            except Exception: pass
+            return
+        raw, key = self._raw, self._key
+        if self._broken:
+            try: raw.close()
+            except Exception: pass
+            _db_pool_dec(key)
+            return
+        try:
+            raw.rollback()  # limpia transacción abierta sin confirmar, igual que antes al cerrar
+        except Exception:
+            try: raw.close()
+            except Exception: pass
+            _db_pool_dec(key)
+            return
+        pool = _db_pool_get_queue(key)
+        try:
+            pool.put_nowait(raw)
+        except queue.Full:
+            try: raw.close()
+            except Exception: pass
+            _db_pool_dec(key)
+
+    def __getattr__(self, name):
+        return getattr(self._raw, name)
+
 def conn(charset='WIN1252', db=None):
-    return firebirdsql.connect(host=HOST, port=PORT, database=db or DATABASE,
-                               user=DB_USER, password=DB_PASS, charset=charset)
+    db_path = db or DATABASE
+    if not _DB_POOL_ENABLED:
+        return firebirdsql.connect(host=HOST, port=PORT, database=db_path,
+                                   user=DB_USER, password=DB_PASS, charset=charset)
+    key = (db_path, charset)
+    pool = _db_pool_get_queue(key)
+    # 1) Intentar reusar una conexión ociosa del pool, verificando que siga viva
+    while True:
+        try:
+            raw = pool.get_nowait()
+        except queue.Empty:
+            break
+        try:
+            _hc = raw.cursor()
+            _hc.execute('SELECT 1 FROM RDB$DATABASE')
+            _hc.fetchone()
+            return _PooledConnection(raw, key)
+        except Exception:
+            try: raw.close()
+            except Exception: pass
+            _db_pool_dec(key)
+            continue  # probar la siguiente ociosa, si hay más
+    # 2) No había ninguna reusable: crear una nueva
+    raw = firebirdsql.connect(host=HOST, port=PORT, database=db_path,
+                              user=DB_USER, password=DB_PASS, charset=charset)
+    with _db_pools_lock:
+        _db_pool_created[key] = _db_pool_created.get(key, 0) + 1
+    return _PooledConnection(raw, key)
 
 # ── Cache FMA_STOCK ───────────────────────────────────────────────────────────
-# TTL configurable via .env: FMA_CACHE_TTL=45 (segundos). 0 = sin caché.
-_FMA_CACHE_TTL   = int(os.getenv('FMA_CACHE_TTL', 45))   # default 45 segundos
+# TTL configurable via .env: FMA_CACHE_TTL=90 (segundos). 0 = sin caché.
+_FMA_CACHE_TTL   = int(os.getenv('FMA_CACHE_TTL', 90))   # default 90 segundos (1.5 min)
 _FMA_ALL_DEPS    = ['001', '002', '003', '005', '013', '016']
 _fma_cache: dict = {}
 _fma_cache_lock  = threading.Lock()
@@ -132,15 +252,20 @@ def _fma_cache_invalidate(deps: list = None):
                 _fma_cache.pop(d, None)
 
 def _prewarm_fma_cache():
-    """Precalienta el caché FMA_STOCK en background al arrancar el servidor.
-    Así la primera búsqueda del día ya es instantánea."""
+    """Precalienta el caché FMA_STOCK en background al arrancar el servidor y lo
+    mantiene tibio con refresco recurrente (antes de que expire el TTL) — así ninguna
+    búsqueda de stock paga el costo de una consulta en frío a Firebird, ni siquiera
+    tras minutos de inactividad."""
     if _FMA_CACHE_TTL <= 0:
         return
     time.sleep(4)   # espera que el servidor termine de arrancar
-    try:
-        _fma_stock_parallel(_FMA_ALL_DEPS)   # los 6 depósitos en paralelo
-    except Exception:
-        pass        # si falla el pre-calentamiento, no tumbar el servidor
+    _intervalo = max(10, _FMA_CACHE_TTL - 15)
+    while True:
+        try:
+            _fma_stock_parallel(_deps_activos())   # todos los depósitos activos, en paralelo
+        except Exception:
+            pass        # si falla el pre-calentamiento, no tumbar el servidor
+        time.sleep(_intervalo)
 
 threading.Thread(target=_prewarm_fma_cache, daemon=True).start()
 
@@ -156,6 +281,22 @@ def _s(v):
     """Convierte cualquier valor Firebird a str limpio."""
     if v is None: return ''
     return str(v).strip()
+
+def _sin_tildes(s):
+    """Quita acentos/diacríticos (NFKD) — usado para normalizar texto de búsqueda
+    (tolera tildes que cambian con reconocimiento de voz) y, en el catálogo en
+    memoria, para precomputar campos de búsqueda equivalentes a la colación
+    insensible a acentos que ya usa Firebird en CONTAINING/UPPER."""
+    import unicodedata as _ud
+    return ''.join(c for c in _ud.normalize('NFKD', s or '') if not _ud.combining(c))
+
+def _redondear_precio(v, factor=1.0):
+    """Política de redondeo de importes unitarios: entero más cercano (sin decimales),
+    tras aplicar la conversión de moneda si corresponde. Única fuente de verdad —
+    usada en listados/búsqueda de stock, informes (Excel/PDF) y carga de precio
+    unitario en pedidos/presupuestos."""
+    if not v: return 0
+    return round(float(v) * factor)
 
 # ── Tabla de Comisiones de Vendedores ────────────────────────────────────────
 # Cargada desde comisiones.json (generado desde la tabla Paradox).
@@ -201,27 +342,42 @@ def _load_catalog(charset='WIN1252') -> tuple:
             a.CODIGORUBRO,
             r.DESCRIPCION, r.CODIGOSUPERRUBRO,
             sr.DESCRIPCION, sr.CODIGOGRUPOSUPERRUBRO,
-            g.DESCRIPCION
+            g.DESCRIPCION,
+            a.COEFICIENTESEGUNRUBRO, r.COEFICIENTE,
+            a.DTOMAXIMO1, a.APLICABLEABONIFICACION, a.PERMITESTOCKNEGATIVO
         FROM "ARTICULOS" a
         LEFT JOIN "RUBROS" r ON r.CODIGORUBRO = a.CODIGORUBRO
         LEFT JOIN "SUPERRUBROS" sr ON sr.CODIGOSUPERRUBRO = r.CODIGOSUPERRUBRO
         LEFT JOIN "GRUPOSUPERRUBROS" g ON g.CODIGOGRUPOSUPERRUBRO = sr.CODIGOGRUPOSUPERRUBRO
         WHERE a.ACTIVO = '1'
+          AND (g.DESCRIPCION IS NULL OR UPPER(g.DESCRIPCION) NOT IN ('TERCEROS','SERVICIOS'))
     """)
     catalog = {}
     for row in cur.fetchall():
         art_id = row[0]
+        # IVA real (validado contra Flexxus): si COEFICIENTESEGUNRUBRO=1, el
+        # coeficiente aplicado es el del RUBRO (r.COEFICIENTE); si =0 (Manual),
+        # es el propio a.COEFICIENTE. ALICUOTAIVA NO se usa: siempre viene 0.
+        _coef_manual = float(row[9] or 0)
+        _coef_rubro = float(row[19] or 0)
+        _usa_rubro = _s(row[18]).strip() == '1'
+        _coef_final = _coef_rubro if _usa_rubro else _coef_manual
+        _cod_particular = _s(row[1]) or _s(art_id)
+        _descripcion    = _s(row[2])
         catalog[art_id] = {
             'codigo':                 art_id,
-            'codigoparticular':       _s(row[1]) or _s(art_id),
-            'descripcion':            _s(row[2]),
+            'codigoparticular':       _cod_particular,
+            'descripcion':            _descripcion,
             'codigomarca':            _s(row[3]),
             'precio1':                float(row[4] or 0),
             'precio2':                float(row[5] or 0),
             'precio3':                float(row[6] or 0),
             'precio5':                float(row[7] or 0),
             'alicuotaiva':            row[8],
-            'coeficiente':            float(row[9] or 0),
+            'coeficiente':            _coef_manual,
+            'coeficiente_segun_rubro': _usa_rubro,
+            'rubro_coeficiente':      _coef_rubro,
+            'iva':                    round(_coef_final * 21, 2),
             'unidad':                 _s(row[10]),
             'codigomoneda':           _s(row[11]).upper(),
             'codigo_rubro':           _s(row[12]),
@@ -230,6 +386,15 @@ def _load_catalog(charset='WIN1252') -> tuple:
             'superrubro':             _s(row[15]),
             'codigo_gruposuperrubro': _s(row[16]),
             'gruposuperrubro':        _s(row[17]),
+            'dtomaximo1_raw':             row[20],
+            'aplicableabonificacion_raw': row[21],
+            'permitestocknegativo_raw':   row[22],
+            # Campos precomputados para búsqueda de texto en memoria (/buscar-articulos)
+            # — evita pagar un CONTAINING en vivo contra Firebird en cada letra escrita.
+            # Sin acentos + mayúsculas, igual que la colación insensible a acentos que
+            # ya usa Firebird acá.
+            '_cn': _sin_tildes(_cod_particular).upper(),
+            '_dn': _sin_tildes(_descripcion).upper(),
         }
     c.close()
     return catalog, cambio_usd
@@ -260,6 +425,186 @@ def _catalog_invalidate():
     global _catalog_cache_ts
     with _catalog_cache_lock:
         _catalog_cache_ts = 0.0
+
+# ── Cache Combos Filtro (GSR/SR/Rubro/Marca/Depósitos) ───────────────────────
+# Evita ir a Firebird cada vez que se abre la sección Stock (admin.html) o el
+# formulario de pedido/presupuesto (frontend.html) solo para llenar combos.
+# Mismo TTL que el catálogo (30 min por defecto) — estas listas cambian poco.
+_filtros_cache: dict = {}
+_filtros_cache_ts: float = 0.0
+_filtros_cache_lock = threading.Lock()
+
+def _load_filtros_combos() -> dict:
+    c = conn('WIN1252'); cur = c.cursor()
+    cur.execute("""
+        SELECT DISTINCT g.CODIGOGRUPOSUPERRUBRO, g.DESCRIPCION
+        FROM "GRUPOSUPERRUBROS" g
+        JOIN "SUPERRUBROS" sr ON sr.CODIGOGRUPOSUPERRUBRO = g.CODIGOGRUPOSUPERRUBRO
+        JOIN "RUBROS" r ON r.CODIGOSUPERRUBRO = sr.CODIGOSUPERRUBRO
+        JOIN "ARTICULOS" a ON a.CODIGORUBRO = r.CODIGORUBRO
+        WHERE a.ACTIVO = '1'
+          AND UPPER(g.DESCRIPCION) NOT IN ('TERCEROS','SERVICIOS')
+        ORDER BY g.DESCRIPCION
+    """)
+    gsr = [{"codigo": str(r[0] or '').strip(), "descripcion": str(r[1] or '').strip()} for r in cur.fetchall()]
+
+    cur.execute('SELECT CODIGOSUPERRUBRO, DESCRIPCION FROM "SUPERRUBROS" ORDER BY DESCRIPCION')
+    sr = [{"codigo": str(r[0] or '').strip(), "descripcion": str(r[1] or '').strip()} for r in cur.fetchall()]
+
+    cur.execute('SELECT CODIGORUBRO, DESCRIPCION FROM "RUBROS" ORDER BY DESCRIPCION')
+    rubro = [{"codigo": str(r[0] or '').strip(), "descripcion": str(r[1] or '').strip()} for r in cur.fetchall()]
+
+    cur.execute("""
+        SELECT DISTINCT m.CODIGOMARCA, m.DESCRIPCION
+        FROM "MARCAS" m
+        JOIN "ARTICULOS" a ON a.CODIGOMARCA = m.CODIGOMARCA
+        WHERE a.ACTIVO = '1'
+        ORDER BY m.DESCRIPCION
+    """)
+    marca = [{"codigo": str(r[0] or '').strip(), "descripcion": str(r[1] or '').strip()} for r in cur.fetchall()]
+
+    cur.execute('SELECT CODIGODEPOSITO, DESCRIPCION FROM "DEPOSITOS" WHERE ACTIVO=1 ORDER BY CODIGODEPOSITO')
+    depositos = [{"codigo": str(r[0] or '').strip(), "nombre": str(r[1] or '').strip()}
+                 for r in cur.fetchall() if str(r[0] or '').strip()]
+    c.close()
+    return {'gsr': gsr, 'sr': sr, 'rubro': rubro, 'marca': marca, 'depositos': depositos}
+
+def _get_filtros_combos() -> dict:
+    """Devuelve los combos de filtro desde caché o recarga si el TTL expiró."""
+    global _filtros_cache, _filtros_cache_ts
+    now = time.time()
+    if _filtros_cache and (now - _filtros_cache_ts) < _CATALOG_CACHE_TTL:
+        return _filtros_cache
+    with _filtros_cache_lock:
+        now = time.time()
+        if _filtros_cache and (now - _filtros_cache_ts) < _CATALOG_CACHE_TTL:
+            return _filtros_cache
+        try:
+            data = _load_filtros_combos()
+            _filtros_cache = data
+            _filtros_cache_ts = time.time()
+        except Exception:
+            if not _filtros_cache:
+                raise
+    return _filtros_cache
+
+def _filtros_invalidate():
+    """Fuerza recarga de los combos de filtro en la próxima consulta."""
+    global _filtros_cache_ts
+    with _filtros_cache_lock:
+        _filtros_cache_ts = 0.0
+
+# _deps_activos: lista de códigos de depósito ACTIVOS (3 dígitos), leída dinámicamente
+# de la tabla DEPOSITOS de Firebird vía _get_filtros_combos (ya cacheada, TTL igual al
+# catálogo). Reemplaza las listas fijas de 6 depósitos que /stock, /stock/batch y
+# /stock/{codigo} tenían hardcodeadas (001,002,003,005,013,016) — cualquier depósito
+# agregado después (ej. 017 SARANDI) quedaba afuera para siempre, así que un vendedor
+# con ese depósito habilitado veía remanente 0 aunque el stock real fuera >0 (bug
+# reportado 2026-07-31: Krafft Ariel con depósito SARANDI, remanente real 51, el
+# frontend mostraba 0 porque el JSON de /stock nunca traía la clave "remanente_017").
+# Con esto, si mañana se crea un depósito 018, aparece solo con activarlo en Flexxus.
+def _deps_activos():
+    try:
+        deps = _get_filtros_combos().get('depositos') or []
+        result = sorted({str(d['codigo']).strip().zfill(3) for d in deps if d.get('codigo')})
+        if result:
+            return result
+    except Exception:
+        pass
+    return list(_FMA_ALL_DEPS)  # fallback si la consulta a DEPOSITOS falla
+
+def _depositos_arma_pedidos_map():
+    """Devuelve {codigo: bool} — si un depósito no tiene fila explícita en
+    depositos_config (SQLite admin.db), se asume arma_pedidos=True (opt-out: nada
+    cambia hasta que Eduardo desmarque explícitamente un depósito administrativo/
+    logístico, ej. SCRAP, MARKET PLACE, RMA, DESTRUCCION TOTAL). Usado por la
+    sugerencia de transferencia automática en el popup de stock del Pedido — NO
+    afecta ninguna otra vista de remanente (Presupuesto, Stock por Depósito, etc.)."""
+    result = {}
+    try:
+        db = _admin_db()
+        for row in db.execute("SELECT codigo, arma_pedidos FROM depositos_config"):
+            result[str(row['codigo']).strip().zfill(3)] = bool(row['arma_pedidos'])
+        db.close()
+    except Exception:
+        pass
+    return result
+
+# ── Cache Combos Filtro PÚBLICOS (frontend.html — /gruposuperrubros, /superrubros,
+# /rubros, /marcas) ───────────────────────────────────────────────────────────
+# Se piden los 4 juntos al hacer login del vendedor (cargarGruposSuperRubro), antes
+# de tocar la sección Stock. Mismo TTL que el catálogo (30 min).
+_pub_filtros_cache: dict = {}
+_pub_filtros_cache_ts: float = 0.0
+_pub_filtros_cache_lock = threading.Lock()
+
+def _load_pub_filtros() -> dict:
+    c = conn(); cur = c.cursor()
+    cur.execute("""
+        SELECT DISTINCT g.CODIGOGRUPOSUPERRUBRO, g.DESCRIPCION
+        FROM "GRUPOSUPERRUBROS" g
+        WHERE UPPER(g.DESCRIPCION) NOT IN ('TERCEROS','SERVICIOS')
+          AND EXISTS (
+            SELECT 1 FROM "ARTICULOS" a
+            JOIN "RUBROS" r ON r.CODIGORUBRO = a.CODIGORUBRO
+            JOIN "SUPERRUBROS" sr ON sr.CODIGOSUPERRUBRO = r.CODIGOSUPERRUBRO
+            WHERE sr.CODIGOGRUPOSUPERRUBRO = g.CODIGOGRUPOSUPERRUBRO
+              AND a.ACTIVO = '1'
+        )
+        ORDER BY g.DESCRIPCION
+    """)
+    gsr = [{"codigo": r[0], "descripcion": r[1]} for r in cur.fetchall()]
+
+    cur.execute('SELECT CODIGOSUPERRUBRO, DESCRIPCION, CODIGOGRUPOSUPERRUBRO FROM "SUPERRUBROS" ORDER BY DESCRIPCION')
+    sr = [{"codigo": r[0], "descripcion": r[1], "grupo": r[2] if len(r) > 2 else None} for r in cur.fetchall()]
+
+    cur.execute("""
+        SELECT DISTINCT r.CODIGORUBRO, r.DESCRIPCION, r.CODIGOSUPERRUBRO
+        FROM "RUBROS" r
+        JOIN "SUPERRUBROS" sr ON sr.CODIGOSUPERRUBRO = r.CODIGOSUPERRUBRO
+        WHERE EXISTS (
+            SELECT 1 FROM "ARTICULOS" a
+            WHERE a.CODIGORUBRO = r.CODIGORUBRO AND a.ACTIVO = '1'
+        )
+        ORDER BY r.DESCRIPCION
+    """)
+    rubro = [{"codigo": r[0], "descripcion": r[1], "superrubro": r[2]} for r in cur.fetchall()]
+
+    cur.execute("""
+        SELECT DISTINCT m.CODIGOMARCA, m.DESCRIPCION
+        FROM "MARCAS" m
+        WHERE EXISTS (
+            SELECT 1 FROM "ARTICULOS" a
+            WHERE a.CODIGOMARCA = m.CODIGOMARCA AND a.ACTIVO = '1'
+        )
+        ORDER BY m.DESCRIPCION
+    """)
+    marca = [{"codigo": r[0], "descripcion": r[1]} for r in cur.fetchall()]
+    c.close()
+    return {'gsr': gsr, 'sr': sr, 'rubro': rubro, 'marca': marca}
+
+def _get_pub_filtros() -> dict:
+    global _pub_filtros_cache, _pub_filtros_cache_ts
+    now = time.time()
+    if _pub_filtros_cache and (now - _pub_filtros_cache_ts) < _CATALOG_CACHE_TTL:
+        return _pub_filtros_cache
+    with _pub_filtros_cache_lock:
+        now = time.time()
+        if _pub_filtros_cache and (now - _pub_filtros_cache_ts) < _CATALOG_CACHE_TTL:
+            return _pub_filtros_cache
+        try:
+            data = _load_pub_filtros()
+            _pub_filtros_cache = data
+            _pub_filtros_cache_ts = time.time()
+        except Exception:
+            if not _pub_filtros_cache:
+                raise
+    return _pub_filtros_cache
+
+def _pub_filtros_invalidate():
+    global _pub_filtros_cache_ts
+    with _pub_filtros_cache_lock:
+        _pub_filtros_cache_ts = 0.0
 
 def _search_stock_cache(
     buscar=None, gruposuperrubro=None, superrubro=None, rubro=None, marca=None,
@@ -312,14 +657,18 @@ def _search_stock_cache(
     return resultados[offset:offset + limit], total, cambio_usd
 
 def _prewarm_catalog():
-    """Precalienta el catálogo en background al arrancar."""
+    """Precalienta el catálogo en background al arrancar y lo mantiene tibio con
+    refresco recurrente antes de que expire el TTL."""
     if _CATALOG_CACHE_TTL <= 0:
         return
     time.sleep(8)  # después del FMA prewarm
-    try:
-        _get_catalog()
-    except Exception:
-        pass
+    _intervalo = max(30, _CATALOG_CACHE_TTL - 60)
+    while True:
+        try:
+            _get_catalog()
+        except Exception:
+            pass
+        time.sleep(_intervalo)
 
 threading.Thread(target=_prewarm_catalog, daemon=True).start()
 
@@ -330,6 +679,8 @@ _QV_LAST_COUNTS: dict = {}
 app = FastAPI(title="API Vendedores Microbell")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 app.mount("/static", StaticFiles(directory="static"), name="static")
+os.makedirs("catalogo_imagenes", exist_ok=True)  # evita crash si aún no se copió el contenido sincronizado
+app.mount("/catalogo-imagenes", StaticFiles(directory="catalogo_imagenes"), name="catalogo_imagenes")
 
 from meli import router as meli_router
 app.include_router(meli_router)
@@ -544,6 +895,32 @@ def _init_admin_db():
         FOREIGN KEY (offer_id) REFERENCES offers(id) ON DELETE CASCADE,
         UNIQUE(offer_id, codigousuario)
     );
+    CREATE TABLE IF NOT EXISTS creditos_internos_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fecha TEXT DEFAULT (datetime('now','localtime')),
+        codigousuario TEXT NOT NULL,
+        codigocliente TEXT NOT NULL,
+        cliente_razonsocial TEXT DEFAULT '',
+        oferta_id INTEGER,
+        oferta_nombre TEXT DEFAULT '',
+        escalon_monto_minimo REAL,
+        monto REAL NOT NULL,
+        pedido_numero TEXT,
+        pedido_db TEXT DEFAULT 'oficial',
+        numero_ci REAL,
+        codigo_asiento REAL,
+        estado TEXT NOT NULL DEFAULT 'ok',
+        error_detalle TEXT,
+        numero_di REAL,
+        di_fecha TEXT,
+        di_motivo TEXT
+    );
+    CREATE TABLE IF NOT EXISTS depositos_config (
+        codigo TEXT PRIMARY KEY,
+        arma_pedidos INTEGER NOT NULL DEFAULT 1,
+        fecha_modificacion TEXT DEFAULT (datetime('now','localtime')),
+        modificado_por TEXT DEFAULT ''
+    );
     CREATE TABLE IF NOT EXISTS stock_ajuste_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         fecha TEXT DEFAULT (datetime('now','localtime')),
@@ -650,6 +1027,22 @@ def _init_admin_db():
         FOREIGN KEY (offer_id) REFERENCES offers(id) ON DELETE CASCADE,
         UNIQUE(offer_id, nivel, valor)
     )""")
+    # Tabla: alcance del DESCUENTO por escalón de facturación neta — más restrictivo
+    # (opcional) que offer_category_filters. offer_category_filters decide qué artículos
+    # SUMAN al neto para alcanzar un escalón; offer_discount_filters decide a cuáles de
+    # esos artículos se les aplica efectivamente el % cuando se alcanza el escalón (ej.
+    # Hasbro+Microelectronics suman al neto, pero el % solo se da a los Hasbro). Vacío =
+    # aplica a todo el alcance general (offer_category_filters), igual que antes de este
+    # campo existir.
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS offer_discount_filters (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        offer_id INTEGER NOT NULL,
+        nivel TEXT NOT NULL,
+        valor TEXT NOT NULL,
+        FOREIGN KEY (offer_id) REFERENCES offers(id) ON DELETE CASCADE,
+        UNIQUE(offer_id, nivel, valor)
+    )""")
     cur.execute("""
     CREATE TABLE IF NOT EXISTS offer_combo_escalones (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -671,6 +1064,135 @@ def _init_admin_db():
         cur.execute("ALTER TABLE offer_amount_escalones ADD COLUMN condicion_comercial TEXT")
     except Exception:
         pass
+    # Alcance de oferta por CLIENTE específico (ej. descuento de reactivación armado para
+    # un cliente puntual que dejó de comprar) — análogo a offer_vendors, pero por cliente.
+    # Cuando una oferta tiene filas acá, el alcance por cliente prevalece sobre
+    # offer_vendors/offer_profiles (cualquier corredor que atienda a ese cliente puede
+    # aplicarla), y sigue respetando offer_category_filters si los tuviera.
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS offer_clients (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        offer_id INTEGER NOT NULL,
+        codigocliente TEXT NOT NULL,
+        razonsocial TEXT DEFAULT '',
+        descuento_extra_pct REAL DEFAULT 0,
+        vencimiento_extra TEXT DEFAULT '',
+        monto_minimo_extra REAL DEFAULT 0,
+        FOREIGN KEY (offer_id) REFERENCES offers(id) ON DELETE CASCADE,
+        UNIQUE(offer_id, codigocliente)
+    )""")
+    # descuento_extra_pct / vencimiento_extra / monto_minimo_extra: "recupero de
+    # cartera" — cuando un cliente puntual viene de un análisis de Reactivación con
+    # descuento adicional cargado, se guarda ACÁ (dentro de la oferta de categoría
+    # que ya le aplicaba, ej. Jugueteria/Outdoors/Tecnologia) en vez de crear una
+    # oferta aparte. El % se inyecta en /ofertas SOLO para ese código de cliente, y
+    # SOLO en el escalón de financial_escalones ya alcanzado — nunca destraba el
+    # escalón por sí solo. monto_minimo_extra permite exigir un neto de facturación
+    # propio para el recupero, independiente (y potencialmente mayor) al escalón de
+    # la oferta base — si es menor o igual al escalón base, no cambia nada.
+    for _col, _ddl in (('descuento_extra_pct', "ALTER TABLE offer_clients ADD COLUMN descuento_extra_pct REAL DEFAULT 0"),
+                       ('vencimiento_extra',   "ALTER TABLE offer_clients ADD COLUMN vencimiento_extra TEXT DEFAULT ''"),
+                       ('monto_minimo_extra',  "ALTER TABLE offer_clients ADD COLUMN monto_minimo_extra REAL DEFAULT 0"),
+                       # Soporte para el panel independiente "Descuento por Cartera" (oferta
+                       # tipo='cartera'): cada tramo por cliente puede otorgar UNA de dos
+                       # recompensas excluyentes — % de descuento (descuento_extra_pct, como
+                       # antes) o una condición comercial distinta (condicion_comercial_extra).
+                       # tipo_cartera indica cuál de las dos aplica para esa fila.
+                       ('tipo_cartera',           "ALTER TABLE offer_clients ADD COLUMN tipo_cartera TEXT DEFAULT 'descuento'"),
+                       ('condicion_comercial_extra', "ALTER TABLE offer_clients ADD COLUMN condicion_comercial_extra TEXT DEFAULT ''")):
+        try:
+            cur.execute(_ddl)
+        except Exception:
+            pass
+    # ── Reactivación de Clientes ────────────────────────────────────────────────
+    # Un "análisis" define los parámetros de búsqueda de clientes importantes que
+    # dejaron de comprar: Periodo A (referencia histórica para el ranking de
+    # facturación, vacío=toda la historia), Periodo B (ventana deslizante de N días
+    # para chequear inactividad, siempre relativa a "hoy" en cada corrida), filtros
+    # de vendedor/categoría, descuento adicional opcional con su propio vencimiento,
+    # y el día/hora en que corre automáticamente.
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS reactivacion_analisis (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nombre TEXT NOT NULL,
+        vendedor_codigo TEXT DEFAULT '',
+        gruposuperrubro TEXT DEFAULT '',
+        superrubro TEXT DEFAULT '',
+        rubro TEXT DEFAULT '',
+        periodo_a_desde TEXT DEFAULT '',
+        periodo_a_hasta TEXT DEFAULT '',
+        periodo_b_dias INTEGER NOT NULL DEFAULT 60,
+        descuento_pct REAL DEFAULT 0,
+        oferta_vencimiento TEXT DEFAULT '',
+        descuento_monto_minimo REAL DEFAULT 0,
+        dia_semana INTEGER NOT NULL DEFAULT 0,
+        hora TEXT NOT NULL DEFAULT '09:00',
+        activo INTEGER DEFAULT 1,
+        ultima_corrida TEXT DEFAULT '',
+        ultimo_error TEXT DEFAULT '',
+        created_at TEXT DEFAULT (datetime('now','localtime'))
+    )""")
+    try:
+        cur.execute("ALTER TABLE reactivacion_analisis ADD COLUMN ultimo_error TEXT DEFAULT ''")
+    except Exception:
+        pass
+    try:
+        cur.execute("ALTER TABLE reactivacion_analisis ADD COLUMN descuento_monto_minimo REAL DEFAULT 0")
+    except Exception:
+        pass
+    try:
+        # Recompensa alternativa al % cuando descuento_pct queda en 0: al llegar al
+        # mínimo propio, en vez de (o además de) un %, se otorga esta condición
+        # comercial distinta — igual mecanismo que "Descuento por Cartera" en Ofertas.
+        cur.execute("ALTER TABLE reactivacion_analisis ADD COLUMN condicion_comercial_extra TEXT DEFAULT ''")
+    except Exception:
+        pass
+    # Resultado de UNA corrida (se recalcula todo desde cero en cada corrida — puede
+    # haber clientes que entran/salen de una corrida a otra). estado: pendiente (recién
+    # detectado, aún no se generó/envió el PDF) -> notificado (ya se avisó al vendedor)
+    # -> comprado (dejó de estar inactivo, se cierra positivo) | cerrado (venció la
+    # oferta especial sin compra, se deja de notificar).
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS reactivacion_resultados (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        analisis_id INTEGER NOT NULL,
+        fecha_corrida TEXT NOT NULL,
+        codigocliente TEXT NOT NULL,
+        codigoparticular TEXT DEFAULT '',
+        razonsocial TEXT DEFAULT '',
+        vendedor_codigo TEXT DEFAULT '',
+        vendedor_nombre TEXT DEFAULT '',
+        importe_total REAL NOT NULL DEFAULT 0,
+        estado TEXT NOT NULL DEFAULT 'pendiente',
+        fecha_ultima_notificacion TEXT DEFAULT '',
+        offer_id INTEGER,
+        FOREIGN KEY (analisis_id) REFERENCES reactivacion_analisis(id) ON DELETE CASCADE
+    )""")
+    # codigoparticular: agregado después de la primera versión — el código que ve el
+    # vendedor/admin debe ser el CODIGOPARTICULAR de Flexxus, no el CODIGOCLIENTE
+    # interno (que es solo la clave de join contra Firebird).
+    try:
+        cur.execute("ALTER TABLE reactivacion_resultados ADD COLUMN codigoparticular TEXT DEFAULT ''")
+    except Exception:
+        pass
+    # Detalle línea a línea (factura + artículo) que compone el importe_total de un
+    # resultado — solo para consulta/auditoría en el modal expandible del panel, nunca
+    # se envía a los corredores.
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS reactivacion_resultado_detalle (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        resultado_id INTEGER NOT NULL,
+        tipo_comprobante TEXT DEFAULT '',
+        numero_comprobante TEXT DEFAULT '',
+        fecha TEXT DEFAULT '',
+        codigo_articulo TEXT DEFAULT '',
+        descripcion_articulo TEXT DEFAULT '',
+        rubro TEXT DEFAULT '',
+        superrubro TEXT DEFAULT '',
+        cantidad REAL DEFAULT 0,
+        importe REAL DEFAULT 0,
+        FOREIGN KEY (resultado_id) REFERENCES reactivacion_resultados(id) ON DELETE CASCADE
+    )""")
     cur.execute("""
     CREATE TABLE IF NOT EXISTS app_config (
         clave TEXT PRIMARY KEY,
@@ -689,6 +1211,21 @@ def _init_admin_db():
     try: cur.execute("ALTER TABLE offers ADD COLUMN monto_minimo REAL DEFAULT 0")
     except Exception: pass
     try: cur.execute("ALTER TABLE offers ADD COLUMN financial_escalones TEXT")
+    except Exception: pass
+    # Tope de bonificación en $ acumulado a lo largo de la vida de la oferta (0 = ilimitado,
+    # mismo criterio que cupo/usos pero en pesos en vez de cantidad de veces). Al llegar al
+    # tope, la oferta se auto-desactiva igual que cuando se agota el cupo de usos.
+    try: cur.execute("ALTER TABLE offers ADD COLUMN tope_bonificacion_pesos REAL DEFAULT 0")
+    except Exception: pass
+    try: cur.execute("ALTER TABLE offers ADD COLUMN bonificado_acumulado_pesos REAL DEFAULT 0")
+    except Exception: pass
+    # Marca si esta oferta de bonificación puede SUMARSE con otras bonificaciones vigentes
+    # que matcheen el mismo artículo (p.ej. una campaña puntual como "Día del Niño" que debe
+    # sumarse a la bonificación de Jugueteria ya existente). Por defecto 0 (no acumulable):
+    # cuando varias bonificaciones no-acumulables matchean el mismo artículo, se toma solo la
+    # mayor (comportamiento histórico) — evita que dos bonificaciones de categoría no
+    # relacionadas (p.ej. Jugueteria + Outdoors) se sumen entre sí sin que eso sea intencional.
+    try: cur.execute("ALTER TABLE offers ADD COLUMN acumulable INTEGER DEFAULT 0")
     except Exception: pass
     try: cur.execute("ALTER TABLE offer_product_details ADD COLUMN descripcion TEXT DEFAULT ''")
     except Exception: pass
@@ -744,6 +1281,17 @@ def _init_admin_db():
         stock_destino_anterior REAL,
         FOREIGN KEY (log_id) REFERENCES transferencia_log(id) ON DELETE CASCADE
     )""")
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS articulo_imagenes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        codigo_particular TEXT NOT NULL,
+        ruta_imagen TEXT NOT NULL,
+        carpeta_origen TEXT,
+        orden INTEGER DEFAULT 0,
+        fecha_creacion TEXT DEFAULT (datetime('now','localtime')),
+        UNIQUE(codigo_particular, ruta_imagen)
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_articulo_imagenes_cod ON articulo_imagenes(codigo_particular)")
     # Seed: depósitos exclusivos para ECOMMERCE (002 y 013)
     for _dep_seed in ('deposito_exclusivo_002', 'deposito_exclusivo_013'):
         try:
@@ -1102,20 +1650,34 @@ def admin_set_flag(data: dict, _u=Depends(get_admin_user)):
 
 # Endpoint público para que el frontend consulte sus flags
 @app.post("/ofertas/{id}/usar")
-def registrar_uso_oferta(id: int):
-    """Registra un uso de la promo. Si usos >= cupo (y cupo > 0) la desactiva."""
+def registrar_uso_oferta(id: int, body: dict = Body(default={})):
+    """Registra un uso de la promo. Si usos >= cupo (y cupo > 0), o si el acumulado en $
+    bonificado llega al tope_bonificacion_pesos (y tope > 0), la desactiva.
+    body opcional: {"monto_bonificado": <pesos bonificados en este uso>} — usado por las
+    ofertas tipo bonificación/financiero, que no tienen un "uso" discreto por unidad como
+    las de tipo producto sino un monto acumulado por pedido/presupuesto."""
+    monto_bonificado = float((body or {}).get('monto_bonificado', 0) or 0)
     c = _admin_db()
-    row = c.execute("SELECT cupo, usos, activo FROM offers WHERE id=?", (id,)).fetchone()
+    row = c.execute("SELECT cupo, usos, activo, tope_bonificacion_pesos, bonificado_acumulado_pesos FROM offers WHERE id=?", (id,)).fetchone()
     if not row:
         c.close(); raise HTTPException(404, "Oferta no encontrada")
     cupo = row['cupo'] or 0
     usos = (row['usos'] or 0) + 1
     activo = row['activo']
+    tope = row['tope_bonificacion_pesos'] or 0
+    acumulado = (row['bonificado_acumulado_pesos'] or 0) + monto_bonificado
     if cupo > 0 and usos >= cupo:
         activo = 0
-    c.execute("UPDATE offers SET usos=?, activo=? WHERE id=?", (usos, activo, id))
+    if tope > 0 and acumulado >= tope:
+        activo = 0
+    c.execute("UPDATE offers SET usos=?, activo=?, bonificado_acumulado_pesos=? WHERE id=?", (usos, activo, acumulado, id))
     c.commit(); c.close()
-    return {"usos": usos, "cupo": cupo, "activo": activo, "agotada": cupo > 0 and usos >= cupo}
+    agotada_cupo = cupo > 0 and usos >= cupo
+    agotada_tope = tope > 0 and acumulado >= tope
+    return {"usos": usos, "cupo": cupo, "activo": activo,
+            "tope_bonificacion_pesos": tope, "bonificado_acumulado_pesos": acumulado,
+            "agotada": agotada_cupo or agotada_tope,
+            "agotada_cupo": agotada_cupo, "agotada_tope": agotada_tope}
 
 @app.get("/vendor-perfiles")
 def get_vendor_perfiles(vendedor: str):
@@ -1474,9 +2036,13 @@ def admin_cache_refresh(target: str = Query("all", description="'catalog', 'stoc
     if target in ("catalog", "all"):
         _catalog_invalidate()
         _get_catalog()   # recarga sincrónica
+        _filtros_invalidate()
+        _get_filtros_combos()   # recarga sincrónica
+        _pub_filtros_invalidate()
+        _get_pub_filtros()      # recarga sincrónica
     if target in ("stock", "all"):
         _fma_cache_invalidate()
-        _fma_stock_parallel(_FMA_ALL_DEPS)  # recarga sincrónica
+        _fma_stock_parallel(_deps_activos())  # recarga sincrónica
     return {"ok": True, "refreshed": target}
 
 @app.get("/admin/cache/status")
@@ -1497,6 +2063,10 @@ def admin_cache_status(_u=Depends(get_admin_user)):
         "fma_stock": {
             "depositos": fma_ages,
             "ttl_seg":   _FMA_CACHE_TTL,
+        },
+        "filtros_combos": {
+            "edad_seg": int(now - _filtros_cache_ts) if _filtros_cache_ts else None,
+            "ttl_seg":  _CATALOG_CACHE_TTL,
         }
     }
 
@@ -1504,16 +2074,7 @@ def admin_cache_status(_u=Depends(get_admin_user)):
 @app.get("/admin/depositos")
 def admin_get_depositos(_u=Depends(get_admin_user)):
     try:
-        c = conn('WIN1252')
-        cur = c.cursor()
-        cur.execute('SELECT CODIGODEPOSITO, DESCRIPCION FROM "DEPOSITOS" WHERE ACTIVO=1 ORDER BY CODIGODEPOSITO')
-        rows = cur.fetchall()
-        c.close()
-        result = [
-            {"codigo": str(r[0] or '').strip(), "nombre": str(r[1] or '').strip()}
-            for r in rows
-            if str(r[0] or '').strip()  # excluir vacios
-        ]
+        result = _get_filtros_combos()['depositos']
         if result:
             return result
     except Exception:
@@ -1528,30 +2089,64 @@ def admin_get_depositos(_u=Depends(get_admin_user)):
 
 @app.get("/depositos")
 def get_depositos_publico():
-    """Endpoint público: lista de depósitos activos (para frontend de vendedores)."""
+    """Endpoint público: lista de depósitos activos (para frontend de vendedores).
+    Incluye arma_pedidos (2026-07-31, ver depositos_config) — metadata inofensiva
+    para exponer a todos los vendedores, la sugerencia de transferencia automática
+    que la usa se sigue mostrando solo a los perfiles habilitados (front + back)."""
+    armaMap = _depositos_arma_pedidos_map()
     try:
-        c = conn('WIN1252')
-        cur = c.cursor()
-        cur.execute('SELECT CODIGODEPOSITO, DESCRIPCION FROM "DEPOSITOS" WHERE ACTIVO=1 ORDER BY CODIGODEPOSITO')
-        rows = cur.fetchall()
-        c.close()
-        result = [
-            {"codigo": str(r[0] or '').strip().zfill(3), "nombre": str(r[1] or '').strip()}
-            for r in rows
-            if str(r[0] or '').strip()
-        ]
+        result = [{"codigo": d["codigo"].zfill(3), "nombre": d["nombre"],
+                    "arma_pedidos": armaMap.get(d["codigo"].zfill(3), True)}
+                  for d in _get_filtros_combos()['depositos']]
         if result:
             return result
     except Exception:
         pass
     return [
-        {"codigo": "001", "nombre": "DEPOSITO VAC-LOG"},
-        {"codigo": "002", "nombre": "DEPOSITO MARKET PLACE"},
-        {"codigo": "003", "nombre": "DEPOSITO PACHECO"},
-        {"codigo": "005", "nombre": "DEPOSITO OUTLET"},
-        {"codigo": "013", "nombre": "DEPOSITO FULL ML"},
-        {"codigo": "016", "nombre": "DEPOSITO EXPO"},
+        {"codigo": "001", "nombre": "DEPOSITO VAC-LOG", "arma_pedidos": armaMap.get('001', True)},
+        {"codigo": "002", "nombre": "DEPOSITO MARKET PLACE", "arma_pedidos": armaMap.get('002', True)},
+        {"codigo": "003", "nombre": "DEPOSITO PACHECO", "arma_pedidos": armaMap.get('003', True)},
+        {"codigo": "005", "nombre": "DEPOSITO OUTLET", "arma_pedidos": armaMap.get('005', True)},
+        {"codigo": "013", "nombre": "DEPOSITO FULL ML", "arma_pedidos": armaMap.get('013', True)},
+        {"codigo": "016", "nombre": "DEPOSITO EXPO", "arma_pedidos": armaMap.get('016', True)},
     ]
+
+@app.get("/admin/depositos-config")
+def get_depositos_config(_u=Depends(get_admin_user)):
+    """Lista TODOS los depósitos activos de Firebird con su flag arma_pedidos actual
+    (default True si no hay fila explícita en depositos_config) — para el checklist
+    de admin.html donde Eduardo marca cuáles arman pedidos de verdad."""
+    armaMap = _depositos_arma_pedidos_map()
+    try:
+        deps = _get_filtros_combos()['depositos']
+    except Exception:
+        deps = []
+    return [{"codigo": d["codigo"].zfill(3), "nombre": d["nombre"],
+              "arma_pedidos": armaMap.get(d["codigo"].zfill(3), True)} for d in deps]
+
+@app.post("/admin/depositos-config")
+def set_depositos_config(body: dict = Body(...), u=Depends(get_admin_user)):
+    """Guarda en bloque el flag arma_pedidos de cada depósito. body: {"depositos":
+    [{"codigo":"006","arma_pedidos":false}, ...]}. Solo afecta la sugerencia de
+    transferencia automática en el popup de stock del Pedido (2026-07-31) — ninguna
+    otra vista de remanente lee depositos_config."""
+    items = (body or {}).get('depositos') or []
+    db = _admin_db()
+    usuario = (u or {}).get('sub') or (u or {}).get('nombre') or ''
+    for it in items:
+        cod = str(it.get('codigo', '')).strip().zfill(3)
+        if not cod:
+            continue
+        arma = 1 if it.get('arma_pedidos') else 0
+        db.execute(
+            "INSERT INTO depositos_config (codigo, arma_pedidos, fecha_modificacion, modificado_por) "
+            "VALUES (?,?,datetime('now','localtime'),?) "
+            "ON CONFLICT(codigo) DO UPDATE SET arma_pedidos=excluded.arma_pedidos, "
+            "fecha_modificacion=excluded.fecha_modificacion, modificado_por=excluded.modificado_por",
+            (cod, arma, usuario or '')
+        )
+    db.commit(); db.close()
+    return {"ok": True, "actualizados": len(items)}
 
 # ─── Admin: Ajuste de Stock ───────────────────────────────────────────────────
 _PERFILES_GERENTES       = {'GERENTES', 'GTES FE'}
@@ -1998,14 +2593,16 @@ def transferencia_preview(body: dict, _u=Depends(get_transferencia_user)):
     except HTTPException: raise
     except Exception as e: raise HTTPException(500, str(e))
 
-@app.post("/admin/transferencia/procesar")
-def transferencia_procesar(body: dict, _u=Depends(get_transferencia_user)):
-    dep_origen         = str(body.get('deposito_origen')         or '').strip()
-    dep_destino        = str(body.get('deposito_destino')        or '').strip()
-    dep_origen_nombre  = str(body.get('deposito_origen_nombre')  or dep_origen).strip()
-    dep_destino_nombre = str(body.get('deposito_destino_nombre') or dep_destino).strip()
-    articulos          = body.get('articulos') or []
-    usuario            = _u.get('sub', '?')
+def _procesar_transferencia_stock(dep_origen, dep_destino, dep_origen_nombre, dep_destino_nombre,
+                                   articulos, usuario, fecha_operacion=None):
+    """Lógica real (Firebird) de transferencia entre depósitos — mueve CASILLEROS.STOCKACTUAL,
+    recalcula STOCK y deja auditoría en CORRECCIONESSTOCKMANUALES. Extraída de
+    /admin/transferencia/procesar para poder reutilizarla también desde el endpoint de
+    transferencia automática disparado desde frontend.html (sesión de vendedor)."""
+    dep_origen         = str(dep_origen or '').strip()
+    dep_destino        = str(dep_destino or '').strip()
+    dep_origen_nombre  = str(dep_origen_nombre or dep_origen).strip()
+    dep_destino_nombre = str(dep_destino_nombre or dep_destino).strip()
 
     if not dep_origen or not dep_destino:
         raise HTTPException(400, "Seleccioná origen y destino")
@@ -2016,7 +2613,7 @@ def transferencia_procesar(body: dict, _u=Depends(get_transferencia_user)):
 
     from datetime import date as _date, datetime as _dt
     # Fecha de operación: la que manda el frontend (para registrar en Flexxus)
-    fecha_op_str = str(body.get('fecha_operacion') or '').strip()
+    fecha_op_str = str(fecha_operacion or '').strip()
     try:
         hoy_date = _date.fromisoformat(fecha_op_str) if fecha_op_str else _date.today()
     except ValueError:
@@ -2106,6 +2703,80 @@ def transferencia_procesar(body: dict, _u=Depends(get_transferencia_user)):
     if estado == 'error':
         raise HTTPException(500, errores[0] if errores else 'Error')
     return {"ok": True, "log_id": log_id, "procesados": procesados, "estado": estado, "errores": errores}
+
+@app.post("/admin/transferencia/procesar")
+def transferencia_procesar(body: dict, _u=Depends(get_transferencia_user)):
+    return _procesar_transferencia_stock(
+        body.get('deposito_origen'), body.get('deposito_destino'),
+        body.get('deposito_origen_nombre'), body.get('deposito_destino_nombre'),
+        body.get('articulos') or [], _u.get('sub', '?'),
+        fecha_operacion=body.get('fecha_operacion')
+    )
+
+# ─── Transferencia automática disparada desde frontend.html (sesión de vendedor) ──
+# Cuando un perfil privilegiado (ADV/ADVJUAN/GERENTES/GTES FE) carga un pedido y el
+# artículo no tiene remanente en el depósito seleccionado pero SÍ en un depósito que
+# no arma pedidos (ver depositos_config / arma_pedidos), el frontend ofrece transferir
+# automáticamente ese faltante. El token de frontend.html (impersonación) nunca trae
+# role='admin', por eso get_transferencia_user (que lo exige) no sirve acá — este
+# dependency acepta también sesiones de vendedor, validando el perfil igual de estricto.
+def get_transferencia_actor(credentials: HTTPAuthorizationCredentials = Depends(_bearer)):
+    if not credentials:
+        raise HTTPException(401, "No autenticado")
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGO])
+    except JWTError:
+        raise HTTPException(401, "Token inválido o expirado")
+    if payload.get('role') == 'admin':
+        perfil = str(payload.get('perfil') or '').strip().upper()
+    else:
+        # Sesión de vendedor/impersonación: el perfil relevante es el del admin que
+        # está actuando (admin_perfil), no el del vendedor impersonado (perfil).
+        perfil = str(payload.get('admin_perfil') or payload.get('perfil') or '').strip().upper()
+    if perfil not in _PERFILES_TRANSFERENCIA:
+        raise HTTPException(403, f"Perfil '{perfil}' no tiene acceso a Transferencia")
+    return payload
+
+class TransferenciaAutomaticaBody(BaseModel):
+    deposito_origen: str
+    deposito_destino: str
+    deposito_origen_nombre: str = ''
+    deposito_destino_nombre: str = ''
+    sku: str
+    cantidad: float
+
+@app.post("/pedidos/transferencia-automatica")
+def pedidos_transferencia_automatica(body: TransferenciaAutomaticaBody, _u=Depends(get_transferencia_actor)):
+    dep_origen  = body.deposito_origen.strip()
+    dep_destino = body.deposito_destino.strip()
+    sku         = body.sku.strip()
+    cantidad    = float(body.cantidad)
+    if not dep_origen or not dep_destino:
+        raise HTTPException(400, "Depósito origen/destino requerido")
+    if dep_origen == dep_destino:
+        raise HTTPException(400, "Origen y destino deben ser distintos")
+    if not sku or cantidad <= 0:
+        raise HTTPException(400, "SKU/cantidad inválidos")
+
+    try:
+        c = conn('WIN1252'); cur = c.cursor()
+        cur.execute('SELECT CODIGOARTICULO, DESCRIPCION FROM "ARTICULOS" WHERE CODIGOPARTICULAR=?', (sku,))
+        row = cur.fetchone(); c.close()
+    except Exception as e:
+        raise HTTPException(500, f"Error consultando artículo: {e}")
+    if not row:
+        raise HTTPException(404, f"Artículo {sku} no encontrado")
+    cod_art     = str(row[0] or '').strip()
+    descripcion = str(row[1] or '').strip()
+
+    usuario = _u.get('sub', '?')
+    resultado = _procesar_transferencia_stock(
+        dep_origen, dep_destino,
+        body.deposito_origen_nombre or dep_origen, body.deposito_destino_nombre or dep_destino,
+        [{'codigo_articulo': cod_art, 'codigo_particular': sku, 'descripcion': descripcion, 'cantidad': cantidad}],
+        usuario
+    )
+    return resultado
 
 @app.post("/admin/transferencia/revertir/{log_id}")
 def transferencia_revertir(log_id: int, _u=Depends(get_transferencia_user)):
@@ -2475,6 +3146,7 @@ def _send_whatsapp_catalogo(celulares: list, nombre_catalogo: str, url: str, des
     tpl = template_name or WA_TEMPLATE_CAT
     api_url = f"https://graph.facebook.com/v20.0/{WA_PHONE_NUMBER_ID}/messages"
     headers = {'Authorization': f'Bearer {WA_ACCESS_TOKEN}', 'Content-Type': 'application/json'}
+    suffix = url.rsplit('/', 1)[-1]
     ok_count = 0
     for cel in celulares:
         cel = _normalizar_celular_ar(cel)
@@ -2487,13 +3159,22 @@ def _send_whatsapp_catalogo(celulares: list, nombre_catalogo: str, url: str, des
             "template": {
                 "name": tpl,
                 "language": {"code": "es_AR"},
-                "components": [{
-                    "type": "body",
-                    "parameters": [
-                        {"type": "text", "parameter_name": "nombre_catalogo", "text": nombre_catalogo},
-                        {"type": "text", "parameter_name": "url_catalogo", "text": url}
-                    ]
-                }]
+                "components": [
+                    {
+                        "type": "body",
+                        "parameters": [
+                            {"type": "text", "text": nombre_catalogo}
+                        ]
+                    },
+                    {
+                        "type": "button",
+                        "sub_type": "url",
+                        "index": "0",
+                        "parameters": [
+                            {"type": "text", "text": suffix}
+                        ]
+                    }
+                ]
             }
         }).encode()
         try:
@@ -2510,6 +3191,50 @@ def _send_whatsapp_catalogo(celulares: list, nombre_catalogo: str, url: str, des
         except Exception as e:
             print(f"[WA] Error → {cel}: {e}")
     return ok_count
+
+
+def _send_whatsapp_cobranzas(tipo_doc: str, numero: str, corredor: str, cliente_cod: str,
+                              cliente_nombre: str, observacion: str) -> bool:
+    """Notifica al Área de Cobranzas por WhatsApp que se cargó un pedido/presupuesto
+    a un cliente con observaciones en el ABM, pendiente de su confirmación.
+    Requiere la plantilla WA_TEMPLATE_COBRANZAS (categoría UTILITY) aprobada en Meta."""
+    if not WA_PHONE_NUMBER_ID or not WA_ACCESS_TOKEN:
+        print("[WA-COB] WA_PHONE_NUMBER_ID o WA_ACCESS_TOKEN no configurados")
+        return False
+    cel = _normalizar_celular_ar(WA_COBRANZAS_CEL)
+    if not cel:
+        print("[WA-COB] WA_COBRANZAS_CEL no configurado")
+        return False
+    api_url = f"https://graph.facebook.com/v20.0/{WA_PHONE_NUMBER_ID}/messages"
+    headers = {'Authorization': f'Bearer {WA_ACCESS_TOKEN}', 'Content-Type': 'application/json'}
+    tipo_lbl = 'Pedido' if tipo_doc == 'pedido' else 'Presupuesto'
+    params = [tipo_lbl, str(numero), corredor or '-', f"{cliente_nombre} ({cliente_cod})", (observacion or '-')[:1000]]
+    payload = json.dumps({
+        "messaging_product": "whatsapp",
+        "to": cel,
+        "type": "template",
+        "template": {
+            "name": WA_TEMPLATE_COBRANZAS,
+            "language": {"code": "es_AR"},
+            "components": [
+                {"type": "body", "parameters": [{"type": "text", "text": p} for p in params]}
+            ]
+        }
+    }).encode()
+    try:
+        req_http = urllib.request.Request(api_url, data=payload, headers=headers, method='POST')
+        with urllib.request.urlopen(req_http, timeout=15) as resp:
+            body = resp.read().decode('utf-8', errors='replace')
+            print(f"[WA-COB] OK → {cel}: {body}")
+        return True
+    except urllib.error.HTTPError as e:
+        err_body = ''
+        try: err_body = e.read().decode('utf-8', errors='replace')
+        except Exception: pass
+        print(f"[WA-COB] HTTPError {e.code} → {cel}: {err_body}")
+    except Exception as e:
+        print(f"[WA-COB] Error → {cel}: {e}")
+    return False
 
 
 def _notificar_catalogo_bg(catalogo_id: int, nombre: str, token: str, base_url: str):
@@ -2734,9 +3459,16 @@ async def reenviar_catalogo(cat_id: int, data: dict, background_tasks: Backgroun
         for r in rows_pa:
             codigos.append(str(r['codigousuario']).strip().upper())
     codigos = list(set(codigos))
-    db.close()
     if not codigos:
+        db.close()
         raise HTTPException(400, "No hay destinatarios con datos de contacto para los perfiles/vendedores seleccionados")
+    # Dar acceso al catálogo en el portal del vendedor (visibilidad en /vendedor/catalogos)
+    for cod in codigos:
+        try:
+            db.execute("INSERT OR IGNORE INTO catalogo_vendedores (catalogo_id,codigo) VALUES (?,?)", (cat_id, cod))
+        except Exception:
+            pass
+    db.commit(); db.close()
     # Buscar contactos y enviar
     db2 = _admin_db()
     ph2 = ','.join('?' * len(codigos))
@@ -2810,64 +3542,44 @@ def debug_catalogos():
 # ─── Admin: catálogos de Firebird para selects ───────────────────────────────
 @app.get("/admin/gruposuperrubros")
 def admin_get_gsr(_u=Depends(get_admin_user)):
-    c = conn('WIN1252'); cur = c.cursor()
-    cur.execute("""
-        SELECT DISTINCT g.CODIGOGRUPOSUPERRUBRO, g.DESCRIPCION
-        FROM "GRUPOSUPERRUBROS" g
-        JOIN "SUPERRUBROS" sr ON sr.CODIGOGRUPOSUPERRUBRO = g.CODIGOGRUPOSUPERRUBRO
-        JOIN "RUBROS" r ON r.CODIGOSUPERRUBRO = sr.CODIGOSUPERRUBRO
-        JOIN "ARTICULOS" a ON a.CODIGORUBRO = r.CODIGORUBRO
-        WHERE a.ACTIVO = '1'
-        ORDER BY g.DESCRIPCION
-    """)
-    rows = cur.fetchall(); c.close()
-    return [{"codigo": str(r[0] or '').strip(), "descripcion": str(r[1] or '').strip()} for r in rows]
+    return _get_filtros_combos()['gsr']
 
 @app.get("/admin/superrubros")
 def admin_get_sr(grupo: Optional[str] = None, _u=Depends(get_admin_user)):
+    if not grupo:
+        return _get_filtros_combos()['sr']
+    # Filtrado en cascada (usuario ya seleccionó un GSR): consulta puntual en vivo
     c = conn('WIN1252'); cur = c.cursor()
-    if grupo:
-        cur.execute("""
-            SELECT DISTINCT sr.CODIGOSUPERRUBRO, sr.DESCRIPCION
-            FROM "SUPERRUBROS" sr
-            JOIN "RUBROS" r ON r.CODIGOSUPERRUBRO = sr.CODIGOSUPERRUBRO
-            JOIN "ARTICULOS" a ON a.CODIGORUBRO = r.CODIGORUBRO
-            WHERE sr.CODIGOGRUPOSUPERRUBRO = ? AND a.ACTIVO = '1'
-            ORDER BY sr.DESCRIPCION
-        """, (grupo,))
-    else:
-        cur.execute('SELECT CODIGOSUPERRUBRO, DESCRIPCION FROM "SUPERRUBROS" ORDER BY DESCRIPCION')
+    cur.execute("""
+        SELECT DISTINCT sr.CODIGOSUPERRUBRO, sr.DESCRIPCION
+        FROM "SUPERRUBROS" sr
+        JOIN "RUBROS" r ON r.CODIGOSUPERRUBRO = sr.CODIGOSUPERRUBRO
+        JOIN "ARTICULOS" a ON a.CODIGORUBRO = r.CODIGORUBRO
+        WHERE sr.CODIGOGRUPOSUPERRUBRO = ? AND a.ACTIVO = '1'
+        ORDER BY sr.DESCRIPCION
+    """, (grupo,))
     rows = cur.fetchall(); c.close()
     return [{"codigo": str(r[0] or '').strip(), "descripcion": str(r[1] or '').strip()} for r in rows]
 
 @app.get("/admin/rubros")
 def admin_get_rubros_admin(superrubro: Optional[str] = None, _u=Depends(get_admin_user)):
+    if not superrubro:
+        return _get_filtros_combos()['rubro']
+    # Filtrado en cascada (usuario ya seleccionó un SR): consulta puntual en vivo
     c = conn('WIN1252'); cur = c.cursor()
-    if superrubro:
-        cur.execute("""
-            SELECT DISTINCT r.CODIGORUBRO, r.DESCRIPCION
-            FROM "RUBROS" r
-            JOIN "ARTICULOS" a ON a.CODIGORUBRO = r.CODIGORUBRO
-            WHERE r.CODIGOSUPERRUBRO = ? AND a.ACTIVO = '1'
-            ORDER BY r.DESCRIPCION
-        """, (superrubro,))
-    else:
-        cur.execute('SELECT CODIGORUBRO, DESCRIPCION FROM "RUBROS" ORDER BY DESCRIPCION')
+    cur.execute("""
+        SELECT DISTINCT r.CODIGORUBRO, r.DESCRIPCION
+        FROM "RUBROS" r
+        JOIN "ARTICULOS" a ON a.CODIGORUBRO = r.CODIGORUBRO
+        WHERE r.CODIGOSUPERRUBRO = ? AND a.ACTIVO = '1'
+        ORDER BY r.DESCRIPCION
+    """, (superrubro,))
     rows = cur.fetchall(); c.close()
     return [{"codigo": str(r[0] or '').strip(), "descripcion": str(r[1] or '').strip()} for r in rows]
 
 @app.get("/admin/marcas")
 def admin_get_marcas_list(_u=Depends(get_admin_user)):
-    c = conn('WIN1252'); cur = c.cursor()
-    cur.execute("""
-        SELECT DISTINCT m.CODIGOMARCA, m.DESCRIPCION
-        FROM "MARCAS" m
-        JOIN "ARTICULOS" a ON a.CODIGOMARCA = m.CODIGOMARCA
-        WHERE a.ACTIVO = '1'
-        ORDER BY m.DESCRIPCION
-    """)
-    rows = cur.fetchall(); c.close()
-    return [{"codigo": str(r[0] or '').strip(), "descripcion": str(r[1] or '').strip()} for r in rows]
+    return _get_filtros_combos()['marca']
 
 class _TestEmailReq(BaseModel):
     destinatario: str
@@ -2951,15 +3663,24 @@ def admin_test_whatsapp(req: _TestWAReq, _u=Depends(get_admin_user)):
             "to": cel,
             "type": "template",
             "template": {
-                "name": "microbell_catalogo",
+                "name": WA_TEMPLATE_CAT,
                 "language": {"code": "es_AR"},
-                "components": [{
-                    "type": "body",
-                    "parameters": [
-                        {"type": "text", "parameter_name": "nombre_catalogo", "text": "Test Catálogo"},
-                        {"type": "text", "parameter_name": "url_catalogo", "text": "https://vendedores.microbellsa.com.ar"}
-                    ]
-                }]
+                "components": [
+                    {
+                        "type": "body",
+                        "parameters": [
+                            {"type": "text", "text": "Test Catálogo"}
+                        ]
+                    },
+                    {
+                        "type": "button",
+                        "sub_type": "url",
+                        "index": "0",
+                        "parameters": [
+                            {"type": "text", "text": "test123"}
+                        ]
+                    }
+                ]
             }
         }).encode()
         req_http = urllib.request.Request(
@@ -2990,25 +3711,29 @@ def admin_wa_crear_plantilla(_u=Depends(get_admin_user)):
         raise HTTPException(400, "WA_WABA_ID y WA_ACCESS_TOKEN deben estar configurados en .env")
     api_url = f"https://graph.facebook.com/v20.0/{WA_WABA_ID}/message_templates"
     payload = json.dumps({
-        "name": "microbell_catalogo",
+        "name": WA_TEMPLATE_CAT,
         "language": "es_AR",
         "category": "MARKETING",
         "components": [
             {
                 "type": "HEADER",
                 "format": "TEXT",
-                "text": "📚 Nuevo catálogo Microbell"
+                "text": "Nuevo catalogo Microbell"
             },
             {
                 "type": "BODY",
-                "text": (
-                    "Se publicó el catálogo *{{1}}*.\n\n"
-                    "Podés verlo desde la app Vendedores Microbell S.A.:\n{{2}}"
-                )
+                "text": "Se publico el catalogo {{1}}. Entra a la app Vendedores Microbell S.A. para verlo.",
+                "example": {"body_text": [["Verano 2026"]]}
             },
             {
                 "type": "FOOTER",
-                "text": "Microbell S.A. — Sistema de Vendedores"
+                "text": "Microbell S.A. - Sistema de Vendedores"
+            },
+            {
+                "type": "BUTTONS",
+                "buttons": [
+                    {"type": "URL", "text": "Ver catalogo", "url": "https://vendedores.microbellsa.com.ar/catalogo/{{1}}", "example": ["abc123"]}
+                ]
             }
         ]
     }).encode()
@@ -3028,6 +3753,150 @@ def admin_wa_crear_plantilla(_u=Depends(get_admin_user)):
         raise HTTPException(e.code, f"Meta API error: {err}")
     except Exception as e:
         raise HTTPException(500, str(e))
+
+
+@app.post("/admin/wa/crear-plantilla-cobranzas")
+def admin_wa_crear_plantilla_cobranzas(_u=Depends(get_admin_user)):
+    """Crea (o actualiza) la plantilla 'microbell_cobranzas_v1' en Meta Business.
+    Se usa para avisar al Área de Cobranzas cuando un corredor carga un pedido/presupuesto
+    a un cliente con observaciones en el ABM. Categoría UTILITY (notificación transaccional,
+    no marketing) — requiere aprobación de Meta antes de poder enviarse.
+    Requiere WA_WABA_ID y WA_ACCESS_TOKEN configurados en .env"""
+    if not WA_WABA_ID or not WA_ACCESS_TOKEN:
+        raise HTTPException(400, "WA_WABA_ID y WA_ACCESS_TOKEN deben estar configurados en .env")
+    api_url = f"https://graph.facebook.com/v20.0/{WA_WABA_ID}/message_templates"
+    payload = json.dumps({
+        "name": WA_TEMPLATE_COBRANZAS,
+        "language": "es_AR",
+        "category": "UTILITY",
+        "components": [
+            {
+                "type": "HEADER",
+                "format": "TEXT",
+                "text": "Aviso: cliente con observación"
+            },
+            {
+                "type": "BODY",
+                "text": "Se cargó un {{1}} Nro: {{2}}\nCorredor: {{3}}\nCliente: {{4}}\n\nObservación del cliente:\n{{5}}\n\nPendiente de confirmación por Cobranzas Microbell.",
+                "example": {"body_text": [["Pedido", "100024114", "ALVAREZ FERNANDO", "SUCESION DE GOMEZ GREGORIO OSVALDO (9267)", "NOSIS 27-09 CHEQ SIN FONDO - no cumple con los pagos"]]}
+            },
+            {
+                "type": "FOOTER",
+                "text": "Microbell S.A. - Sistema de Vendedores"
+            }
+        ]
+    }).encode()
+    try:
+        req_http = urllib.request.Request(
+            api_url, data=payload,
+            headers={'Authorization': f'Bearer {WA_ACCESS_TOKEN}', 'Content-Type': 'application/json'},
+            method='POST'
+        )
+        with urllib.request.urlopen(req_http, timeout=15) as resp:
+            body = resp.read().decode('utf-8', errors='replace')
+        return {"ok": True, "response": json.loads(body)}
+    except urllib.error.HTTPError as e:
+        err = ''
+        try: err = e.read().decode('utf-8', errors='replace')
+        except Exception: pass
+        raise HTTPException(e.code, f"Meta API error: {err}")
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.post("/admin/wa/crear-plantilla-reactivacion")
+def admin_wa_crear_plantilla_reactivacion(_u=Depends(get_admin_user)):
+    """Crea (o actualiza) la plantilla 'microbell_reactivacion_v1' en Meta Business.
+    Avisa al corredor que se detectaron clientes importantes sin compras recientes —
+    el detalle completo va por mail (PDF adjunto), acá solo se lo alerta a revisar el
+    correo. Categoría UTILITY — requiere aprobación de Meta antes de poder enviarse.
+    Requiere WA_WABA_ID y WA_ACCESS_TOKEN configurados en .env"""
+    if not WA_WABA_ID or not WA_ACCESS_TOKEN:
+        raise HTTPException(400, "WA_WABA_ID y WA_ACCESS_TOKEN deben estar configurados en .env")
+    api_url = f"https://graph.facebook.com/v20.0/{WA_WABA_ID}/message_templates"
+    payload = json.dumps({
+        "name": WA_TEMPLATE_REACTIVACION,
+        "language": "es_AR",
+        "category": "UTILITY",
+        "components": [
+            {
+                "type": "HEADER",
+                "format": "TEXT",
+                "text": "Reactivación de clientes"
+            },
+            {
+                "type": "BODY",
+                "text": "Hola {{1}}, detectamos {{2}} cliente(s) tuyo(s) con alta facturación histórica sin compras recientes. Te enviamos el detalle por mail, con ofertas vigentes para ofrecerles.",
+                "example": {"body_text": [["Juan", "3"]]}
+            },
+            {
+                "type": "FOOTER",
+                "text": "Microbell S.A. - Sistema de Vendedores"
+            }
+        ]
+    }).encode()
+    try:
+        req_http = urllib.request.Request(
+            api_url, data=payload,
+            headers={'Authorization': f'Bearer {WA_ACCESS_TOKEN}', 'Content-Type': 'application/json'},
+            method='POST'
+        )
+        with urllib.request.urlopen(req_http, timeout=15) as resp:
+            body = resp.read().decode('utf-8', errors='replace')
+        return {"ok": True, "response": json.loads(body)}
+    except urllib.error.HTTPError as e:
+        err = ''
+        try: err = e.read().decode('utf-8', errors='replace')
+        except Exception: pass
+        raise HTTPException(e.code, f"Meta API error: {err}")
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+def _send_whatsapp_reactivacion(celular: str, vendedor_nombre: str, cantidad: int) -> tuple:
+    """Envía WA vía Meta Cloud API con la plantilla de reactivación. No lleva PDF adjunto
+    (WhatsApp Cloud API no permite adjuntar documentos arbitrarios en templates de texto) —
+    el detalle completo va por mail. Retorna (ok: bool, error: str) — error vacío si ok,
+    con el detalle devuelto por Meta si falló (para poder diagnosticar sin consola del servidor)."""
+    if not WA_PHONE_NUMBER_ID or not WA_ACCESS_TOKEN:
+        return False, "WA_PHONE_NUMBER_ID/WA_ACCESS_TOKEN no configurados"
+    cel = _normalizar_celular_ar(celular)
+    if not cel:
+        return False, f"celular inválido: {celular!r}"
+    api_url = f"https://graph.facebook.com/v20.0/{WA_PHONE_NUMBER_ID}/messages"
+    payload = json.dumps({
+        "messaging_product": "whatsapp",
+        "to": cel,
+        "type": "template",
+        "template": {
+            "name": WA_TEMPLATE_REACTIVACION,
+            "language": {"code": "es_AR"},
+            "components": [{
+                "type": "body",
+                "parameters": [
+                    {"type": "text", "text": vendedor_nombre or ''},
+                    {"type": "text", "text": str(cantidad)}
+                ]
+            }]
+        }
+    }).encode()
+    try:
+        req_http = urllib.request.Request(
+            api_url, data=payload,
+            headers={'Authorization': f'Bearer {WA_ACCESS_TOKEN}', 'Content-Type': 'application/json'},
+            method='POST'
+        )
+        with urllib.request.urlopen(req_http, timeout=15) as resp:
+            resp.read()
+        return True, ""
+    except urllib.error.HTTPError as e:
+        try: err_body = e.read().decode('utf-8', errors='replace')
+        except Exception: err_body = str(e)
+        print(f"[REACTIVACION WA] HTTPError {e.code} → {cel}: {err_body}")
+        return False, f"HTTP {e.code}: {err_body[:300]}"
+    except Exception as e:
+        print(f"[REACTIVACION WA] error → {cel}: {e}")
+        return False, str(e)
 
 
 @app.post("/admin/cambiar-password")
@@ -3123,10 +3992,6 @@ def _get_reservas_activas():
 def _apply_reservas(resultado, reservas, rem_key='remanente_total'):
     """Agrega 'reservado' y 'reservado_por_deposito' a cada item,
     y descuenta directamente los campos remanente_XXX por depósito."""
-    _DEP_FIELDS = {
-        '001': 'remanente_001', '002': 'remanente_002', '003': 'remanente_003',
-        '005': 'remanente_005', '013': 'remanente_013', '016': 'remanente_016',
-    }
     for item in resultado:
         reservado = 0.0
         reservado_por_dep: dict = {}
@@ -3177,10 +4042,13 @@ def _apply_reservas(resultado, reservas, rem_key='remanente_total'):
                     reservado_por_dep[dep] = reservado_por_dep.get(dep, 0.0) + amount_stock
         item['reservado'] = round(reservado)
         item['reservado_por_deposito'] = {k: round(v) for k, v in reservado_por_dep.items()}
-        # Descontar directamente en los campos remanente por depósito (mínimo 0)
+        # Descontar directamente en los campos remanente por depósito (mínimo 0).
+        # field se arma dinámicamente (antes era un diccionario fijo de 6 depósitos
+        # que dejaba sin descontar la reserva en cualquier depósito nuevo, ej. 017
+        # SARANDI — mismo bug de fondo que en /stock, /stock/batch y /stock/{codigo}).
         for dep, amount in reservado_por_dep.items():
-            field = _DEP_FIELDS.get(dep)
-            if field and field in item:
+            field = f"remanente_{dep.strip().zfill(3)}"
+            if field in item:
                 item[field] = max(0.0, float(item[field] or 0) - amount)
     return resultado
 
@@ -3348,19 +4216,20 @@ def get_reservas_activas_articulo(codigo: str, _u=Depends(get_current_user)):
     c.close()
     reservas = [dict(row) for row in rows]
 
-    # Consultar remanente en Firebird para reservas tipo articulo con es_preventa
+    # Consultar remanente para reservas tipo articulo con es_preventa.
+    # Reutiliza la caché FMA_STOCK por depósito (ya con TTL/pre-warm) en vez de
+    # correr FMA_STOCK(NULL,NULL,NULL,1,1) sin caché en cada llamada.
     art_preventa = [r for r in reservas if r.get('es_preventa') and r.get('codigo_articulo')]
     rem_map = {}
     if art_preventa:
         try:
-            fb = conn('WIN1252')
-            cur = fb.cursor()
-            cur.execute('SELECT ID_ARTICULO, STOCKREMANENTE FROM "FMA_STOCK"(NULL, NULL, NULL, 1, 1)')
             art_set = {str(r['codigo_articulo']) for r in art_preventa}
-            for row in cur.fetchall():
-                if str(row[0]) in art_set:
-                    rem_map[str(row[0])] = float(row[1] or 0)
-            fb.close()
+            fma_por_dep = _fma_stock_parallel(_deps_activos())
+            for dep_data in fma_por_dep.values():
+                for art_id, stock in dep_data.items():
+                    sid = str(art_id)
+                    if sid in art_set:
+                        rem_map[sid] = rem_map.get(sid, 0.0) + stock
         except Exception:
             pass
 
@@ -3536,8 +4405,7 @@ def admin_get_stock(
     _u=Depends(get_admin_user)
 ):
     dep_lista = [d.strip() for d in (depositos or '001,003').split(',') if d.strip()]
-    # Admin siempre lee directo de Firebird (sin caché)
-    _fma_cache_invalidate(dep_lista)
+    # Usa la misma caché TTL (90s) que frontend.html — prioriza velocidad sobre exactitud al segundo
     try:
         pagina, total_count, cambio_usd = _search_stock_cache(
             buscar=buscar, gruposuperrubro=gruposuperrubro, superrubro=superrubro,
@@ -3546,14 +4414,14 @@ def admin_get_stock(
         resultado = []
         for art, rem_dep, rem_total in pagina:
             factor = cambio_usd if art['codigomoneda'] == 'DOLARES' else 1.0
-            precio = math.ceil(art['precio1'] * factor * 100) / 100
+            precio = _redondear_precio(art['precio1'], factor)
             item = {
                 "codigo":               art['codigo'],
                 "codigoparticular":     art['codigoparticular'],
                 "descripcion":          art['descripcion'],
                 "marca":                art['codigomarca'],
                 "precio1":              precio,
-                "iva":                  round(art['coeficiente'] * 21, 1),
+                "iva":                  art['iva'],
                 "unidad":               art['unidad'],
                 "stock_total":          rem_total,
                 "remanente_total":      rem_total,
@@ -3623,13 +4491,13 @@ def _admin_stock_data(buscar=None, depositos=None, gruposuperrubro=None,
             continue
 
         factor = cambio_usd if art.get('codigomoneda', '').upper() == 'DOLARES' else 1.0
-        precio = math.ceil(float(art.get('precio1', 0)) * factor * 100) / 100
+        precio = _redondear_precio(art.get('precio1', 0), factor)
 
         item = {
             "codigo":        art.get('codigoparticular', ''),
             "descripcion":   art.get('descripcion', ''),
             "precio1":       precio,
-            "iva":           round(float(art.get('coeficiente', 0)) * 21, 1),
+            "iva":           art.get('iva', 0),
             "marca":         art.get('codigomarca', ''),
             "rubro":         art.get('rubro', ''),
             "superrubro":    art.get('superrubro', ''),
@@ -3694,7 +4562,9 @@ def admin_exportar_stock_excel(
             col_rt = 6 + len(dep_lista)
             ws.cell(ri, col_rt, round(row["rem_total"], 2)).alignment = right_al
             ws.cell(ri, col_rt+1, row["precio1"]).alignment = right_al
-            ws.cell(ri, col_rt+2, row["iva"]).alignment = right_al
+            _c_iva = ws.cell(ri, col_rt+2, row["iva"])
+            _c_iva.alignment = right_al
+            _c_iva.number_format = '0.00'
             if ri % 2 == 0:
                 for ci2 in range(1, len(headers)+1):
                     ws.cell(ri, ci2).fill = alt_fill
@@ -3773,7 +4643,7 @@ def admin_exportar_stock_pdf(
                 r_row.append(Paragraph(fmt_n(v) if v != 0 else '—', style))
             r_row.append(Paragraph(fmt_n(row["rem_total"]), s_cell_r))
             r_row.append(Paragraph(fmt_p(row["precio1"]), s_cell_r))
-            r_row.append(Paragraph(f"{row['iva']:.0f}%" if row['iva'] else '—', s_cell_r))
+            r_row.append(Paragraph((f"{row['iva']:.2f}".replace('.', ',')+'%') if row['iva'] else '—', s_cell_r))
             table_data.append(r_row)
 
         n_dep = len(dep_lista)
@@ -3804,6 +4674,29 @@ def admin_exportar_stock_pdf(
 
 
 # ─── Admin: motor de ofertas ──────────────────────────────────────────────────
+def _resolver_codigoparticular_clientes(offers: list):
+    """Resuelve codigoparticular (el código que reconoce el equipo comercial) para cada
+    cliente de offer_clients, SOLO para mostrar en el panel — codigocliente (el interno
+    de Firebird) no se toca, porque es lo que frontend.html manda como ?cliente= al
+    matchear ofertas."""
+    todos_cod = sorted({cl['codigocliente'] for o in offers for cl in o.get('clients', []) if cl.get('codigocliente')})
+    if not todos_cod:
+        return
+    try:
+        fb = conn('WIN1252', db='c:/flexxus/DB/DB-Microbell.gdb')
+        cur = fb.cursor()
+        ph2 = ','.join('?' * len(todos_cod))
+        cur.execute(f"""SELECT CODIGOCLIENTE, TRIM(CODIGOPARTICULAR) FROM "CLIENTES"
+                        WHERE CODIGOCLIENTE IN ({ph2})""", todos_cod)
+        part_map = {str(r[0]).strip(): (r[1] or '').strip() for r in cur.fetchall()}
+        fb.close()
+        for o in offers:
+            for cl in o.get('clients', []):
+                cl['codigoparticular'] = part_map.get(cl['codigocliente']) or cl['codigocliente']
+    except Exception as e:
+        print(f"[OFERTAS] error resolviendo codigoparticular para mostrar: {e}")
+
+
 def _load_offer_relations(c, o):
     oid = o['id']
     o['product_details']    = [dict(r) for r in c.execute("SELECT * FROM offer_product_details WHERE offer_id=?", (oid,)).fetchall()]
@@ -3812,12 +4705,355 @@ def _load_offer_relations(c, o):
     o['vendors']            = [r[0] for r in c.execute("SELECT codigousuario FROM offer_vendors WHERE offer_id=?", (oid,)).fetchall()]
     o['profiles']           = [r[0] for r in c.execute("SELECT perfil_codigo FROM offer_profiles WHERE offer_id=?", (oid,)).fetchall()]
     o['category_filters']   = [dict(r) for r in c.execute("SELECT nivel, valor FROM offer_category_filters WHERE offer_id=?", (oid,)).fetchall()]
+    o['clients']            = [dict(r) for r in c.execute("SELECT codigocliente, razonsocial, descuento_extra_pct, vencimiento_extra, monto_minimo_extra, tipo_cartera, condicion_comercial_extra FROM offer_clients WHERE offer_id=?", (oid,)).fetchall()]
+    o['discount_filters']   = [dict(r) for r in c.execute("SELECT nivel, valor FROM offer_discount_filters WHERE offer_id=?", (oid,)).fetchall()]
     o['combo_escalones']    = [dict(r) for r in c.execute("SELECT min_combos, descuento_pct FROM offer_combo_escalones WHERE offer_id=? ORDER BY min_combos", (oid,)).fetchall()]
     o['amount_escalones']   = [dict(r) for r in c.execute("SELECT monto_minimo, descuento_pct, condicion_comercial FROM offer_amount_escalones WHERE offer_id=? ORDER BY monto_minimo", (oid,)).fetchall()]
-    for k,d in [('deposito',''),('tipo_financiero','descuento_total'),('monto_minimo',0),('cupo',0),('usos',0)]:
+    for k,d in [('deposito',''),('tipo_financiero','descuento_total'),('monto_minimo',0),('cupo',0),('usos',0),('tope_bonificacion_pesos',0),('bonificado_acumulado_pesos',0),('acumulable',0)]:
         if k not in o: o[k] = d
     o['financial_escalones'] = json.loads(o['financial_escalones']) if o.get('financial_escalones') else []
+    _resolver_codigoparticular_clientes([o])
     return o
+
+def _fmt_entero(v):
+    """NUMEROCOMPROBANTE en Firebird viaja como NUMERIC/DOUBLE y el driver lo
+    entrega como float (7938.0). Los números de comprobante son siempre
+    enteros, así que se muestran sin el '.0'."""
+    if v is None:
+        return ''
+    s = str(v).strip()
+    try:
+        f = float(s)
+        return str(int(f)) if f == int(f) else s
+    except (ValueError, TypeError):
+        return s
+
+
+def _fmt_cant(v):
+    """Cantidades e IVA%: enteros sin '.0' cuando no tienen parte decimal."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return v
+    return int(f) if f == int(f) else round(f, 2)
+
+
+def _admin_pendientes_query(c, tabla_cab, tabla_cuerpo, tipo_label, es_pedido,
+                             fecha_desde, fecha_hasta, grupo, superrubro, rubro, marca, articulo, vendedor=None):
+    """Devuelve líneas de Pedidos o Presupuestos con saldo pendiente de remitir
+    (CANTIDAD - CANTIDADREMITIDA > 0), cruzadas con ARTICULOS/RUBROS para poder
+    filtrar por categoría."""
+    wheres = ["cb.ANULADA = '0'",
+              '(cu.CANTIDAD - COALESCE(cu.CANTIDADREMITIDA, 0)) > 0',
+              'cb.FECHACOMPROBANTE >= ?', 'cb.FECHACOMPROBANTE < ?']
+    if es_pedido:
+        wheres.insert(0, "cb.TIPOCOMPROBANTE = 'NP'")
+    else:
+        # Solo presupuestos aprobados: los que no se aprobaron nunca no están
+        # "pendientes de cumplimentar", son borradores.
+        wheres.append('cb.FECHAAPROBADO IS NOT NULL')
+        wheres.append("cb.FECHAAPROBADO > CAST('1900-01-02 00:00:00' AS TIMESTAMP)")
+    if vendedor:
+        wheres.append('UPPER(cb.CODIGOUSUARIO) = ?')
+    if grupo:
+        wheres.append('g.CODIGOGRUPOSUPERRUBRO = ?')
+    if superrubro:
+        wheres.append('sr.CODIGOSUPERRUBRO = ?')
+    if rubro:
+        wheres.append('a.CODIGORUBRO = ?')
+    if marca:
+        wheres.append('a.CODIGOMARCA = ?')
+    if articulo:
+        wheres.append("(UPPER(a.CODIGOPARTICULAR) CONTAINING UPPER(?) OR UPPER(cu.DESCRIPCION) CONTAINING UPPER(?))")
+
+    # params deben ir en el mismo orden que aparecen los "?" en el WHERE final
+    params = [fecha_desde, fecha_hasta]
+    if vendedor:   params.append(vendedor.strip().upper())
+    if grupo:      params.append(grupo)
+    if superrubro: params.append(superrubro)
+    if rubro:      params.append(rubro)
+    if marca:      params.append(marca)
+    if articulo:   params += [articulo, articulo]
+
+    join_tipo = " AND cu.TIPOCOMPROBANTE = cb.TIPOCOMPROBANTE" if es_pedido else ""
+    sql = f"""
+        SELECT cb.NUMEROCOMPROBANTE, cb.FECHACOMPROBANTE, cb.CODIGOCLIENTE, cb.RAZONSOCIAL,
+               cu.LINEA, cu.CODIGOARTICULO,
+               COALESCE(NULLIF(TRIM(cu.CODIGOPARTICULAR),''), NULLIF(TRIM(a.CODIGOPARTICULAR),''), TRIM(cu.CODIGOARTICULO)),
+               cu.DESCRIPCION, cu.CANTIDAD, COALESCE(cu.CANTIDADREMITIDA,0),
+               cu.PRECIOUNITARIO, cu.PORCENTAJEIVA,
+               a.CODIGOMARCA, m.DESCRIPCION, a.CODIGORUBRO, r.DESCRIPCION,
+               sr.CODIGOSUPERRUBRO, sr.DESCRIPCION, g.DESCRIPCION,
+               cb.CODIGOUSUARIO, u.RAZONSOCIAL,
+               a.COEFICIENTESEGUNRUBRO, a.COEFICIENTE, r.COEFICIENTE
+        FROM "{tabla_cab}" cb
+        JOIN "{tabla_cuerpo}" cu ON cu.NUMEROCOMPROBANTE = cb.NUMEROCOMPROBANTE{join_tipo}
+        LEFT JOIN "ARTICULOS" a ON a.CODIGOARTICULO = cu.CODIGOARTICULO
+        LEFT JOIN "MARCAS" m ON m.CODIGOMARCA = a.CODIGOMARCA
+        LEFT JOIN "RUBROS" r ON r.CODIGORUBRO = a.CODIGORUBRO
+        LEFT JOIN "SUPERRUBROS" sr ON sr.CODIGOSUPERRUBRO = r.CODIGOSUPERRUBRO
+        LEFT JOIN "GRUPOSUPERRUBROS" g ON g.CODIGOGRUPOSUPERRUBRO = sr.CODIGOGRUPOSUPERRUBRO
+        LEFT JOIN "USUARIOS" u ON u.CODIGOUSUARIO = cb.CODIGOUSUARIO
+        WHERE {' AND '.join(wheres)}
+        ORDER BY cb.FECHACOMPROBANTE DESC
+    """
+    cur = c.cursor()
+    cur.execute(sql, params)
+    rows = []
+    for r in cur.fetchall():
+        cant_total = float(r[8] or 0)
+        cant_rem   = float(r[9] or 0)
+        # IVA real (mismo criterio que el resto de la app): si COEFICIENTESEGUNRUBRO=1
+        # usar el coeficiente del RUBRO, si=0 (Manual) usar el propio del artículo.
+        # cu.PORCENTAJEIVA queda desactualizado en comprobantes viejos y no se usa.
+        _coef_manual = float(r[22] or 0)
+        _coef_rubro  = float(r[23] or 0)
+        _usa_rubro   = str(r[21] or '').strip() == '1'
+        _coef_final  = _coef_rubro if _usa_rubro else _coef_manual
+        iva_pct      = round(_coef_final * 21, 2)
+        rows.append({
+            "tipo":              tipo_label,
+            "numero":            _fmt_entero(r[0]),
+            "fecha":             str(r[1])[:10] if r[1] else '',
+            "codigocliente":     str(r[2] or '').strip(),
+            "razonsocial":       (r[3] or '').strip(),
+            "linea":             r[4],
+            "codigo":            r[5],
+            "codigoparticular":  (r[6] or r[5] or '').strip(),
+            "descripcion":       (r[7] or '').strip(),
+            "cantidad_total":    cant_total,
+            "cantidad_remitida": cant_rem,
+            "cantidad_pendiente": round(cant_total - cant_rem, 3),
+            "precio_unitario":   float(r[10] or 0),
+            "iva":               iva_pct,
+            "codigomarca":       (r[12] or '').strip(),
+            "marca":             (r[13] or '').strip(),
+            "codigo_rubro":      (r[14] or '').strip(),
+            "rubro":             (r[15] or '').strip(),
+            "codigo_superrubro": (r[16] or '').strip(),
+            "superrubro":        (r[17] or '').strip(),
+            "gruposuperrubro":   (r[18] or '').strip(),
+            "codigo_vendedor":   (r[19] or '').strip(),
+            "vendedor":          (r[20] or r[19] or '').strip(),
+        })
+    return rows
+
+
+@app.get("/admin/pendientes-cumplimentar")
+def admin_pendientes_cumplimentar(
+    fecha_desde: str = Query(...),
+    fecha_hasta: str = Query(...),
+    grupo: str = None,
+    superrubro: str = None,
+    rubro: str = None,
+    marca: str = None,
+    articulo: str = None,
+    vendedor: str = None,
+    _u=Depends(get_admin_user)
+):
+    """Artículos de Pedidos y Presupuestos (aprobados) con saldo pendiente de
+    remitir, dentro del rango de FECHACOMPROBANTE indicado. Sin filtros de
+    categoría/vendedor seleccionados, trae todos los pendientes del rango."""
+    # FECHACOMPROBANTE < hasta+1día para incluir el día completo de "hasta"
+    hasta_excl = (datetime.strptime(fecha_hasta, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
+    c = conn('WIN1252')
+    try:
+        rows_pedidos = _admin_pendientes_query(
+            c, 'CABEZAPEDIDOS', 'CUERPOPEDIDOS', 'Pedido', True,
+            fecha_desde, hasta_excl, grupo, superrubro, rubro, marca, articulo, vendedor
+        )
+        rows_presu = _admin_pendientes_query(
+            c, 'CABEZAPRESUPUESTOS', 'CUERPOPRESUPUESTOS', 'Presupuesto', False,
+            fecha_desde, hasta_excl, grupo, superrubro, rubro, marca, articulo, vendedor
+        )
+    finally:
+        c.close()
+    result = rows_pedidos + rows_presu
+    # Más antiguo primero: lo más urgente de cumplimentar va en la página 1.
+    result.sort(key=lambda x: x['fecha'])
+    return result
+
+
+_PENDIENTES_HEADERS = ["Tipo", "Número", "Fecha", "Vendedor", "Cliente", "Código", "Descripción",
+                        "Cant. Total", "Cant. Remitida", "Cant. Pendiente",
+                        "Precio Unit.", "IVA%", "Marca", "Rubro"]
+
+def _pendientes_row_vals(r):
+    return [r['tipo'], r['numero'], r['fecha'], r['vendedor'], r['razonsocial'], r['codigoparticular'], r['descripcion'],
+            _fmt_cant(r['cantidad_total']), _fmt_cant(r['cantidad_remitida']), _fmt_cant(r['cantidad_pendiente']),
+            round(r['precio_unitario'], 2), _fmt_cant(r['iva']), r['marca'], r['rubro']]
+
+
+@app.get("/admin/pendientes-cumplimentar/exportar-excel")
+def admin_pendientes_exportar_excel(
+    fecha_desde: str = Query(...),
+    fecha_hasta: str = Query(...),
+    grupo: str = None,
+    superrubro: str = None,
+    rubro: str = None,
+    marca: str = None,
+    articulo: str = None,
+    vendedor: str = None,
+    _u=Depends(get_admin_download_auth)
+):
+    try:
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment
+        import io
+
+        rows = admin_pendientes_cumplimentar(
+            fecha_desde=fecha_desde, fecha_hasta=fecha_hasta, grupo=grupo,
+            superrubro=superrubro, rubro=rubro, marca=marca, articulo=articulo,
+            vendedor=vendedor, _u=_u
+        )
+        if not rows:
+            raise HTTPException(404, "Sin artículos pendientes para los filtros indicados")
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Pendientes"
+
+        hdr_fill = PatternFill("solid", fgColor="1A56DB")
+        hdr_font = Font(bold=True, color="FFFFFFFF", size=10)
+        alt_fill = PatternFill("solid", fgColor="EFF6FF")
+        title_font = Font(bold=True, size=13, color="111827")
+        right_al = Alignment(horizontal="right", vertical="center")
+        left_al  = Alignment(horizontal="left", vertical="center", wrap_text=True)
+        center_al = Alignment(horizontal="center", vertical="center")
+        NUM_COLS = len(_PENDIENTES_HEADERS)
+
+        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=NUM_COLS)
+        fecha_gen = datetime.now().strftime('%d/%m/%Y %H:%M')
+        c1 = ws.cell(1, 1, f"MICROBELL S.A. — Artículos Pendientes de Cumplimentar  ({fecha_desde} a {fecha_hasta})  ·  Generado: {fecha_gen}")
+        c1.font = title_font; c1.alignment = left_al
+        ws.row_dimensions[1].height = 22
+        ws.row_dimensions[2].height = 6
+
+        for ci, h in enumerate(_PENDIENTES_HEADERS, 1):
+            cell = ws.cell(3, ci, h)
+            cell.font = hdr_font; cell.fill = hdr_fill; cell.alignment = center_al
+        ws.row_dimensions[3].height = 20
+
+        for ri, r in enumerate(rows, 4):
+            fill = alt_fill if ri % 2 == 0 else None
+            vals = _pendientes_row_vals(r)
+            for ci, v in enumerate(vals, 1):
+                cell = ws.cell(ri, ci, v)
+                if fill: cell.fill = fill
+                if ci in (8, 9, 10, 11, 12): cell.alignment = right_al
+                elif ci in (4, 5, 7): cell.alignment = left_al
+
+        widths = [11, 9, 11, 14, 26, 11, 36, 11, 13, 13, 12, 8, 16, 16]
+        for i, w in enumerate(widths, 1):
+            ws.column_dimensions[chr(64+i) if i <= 26 else 'A'].width = w
+
+        buf = io.BytesIO()
+        wb.save(buf); buf.seek(0)
+        from fastapi.responses import StreamingResponse
+        fname = f"pendientes_{fecha_desde}_a_{fecha_hasta}.xlsx"
+        return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                 headers={"Content-Disposition": f"attachment; filename={fname}"})
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.get("/admin/pendientes-cumplimentar/exportar-pdf")
+def admin_pendientes_exportar_pdf(
+    fecha_desde: str = Query(...),
+    fecha_hasta: str = Query(...),
+    grupo: str = None,
+    superrubro: str = None,
+    rubro: str = None,
+    marca: str = None,
+    articulo: str = None,
+    vendedor: str = None,
+    _u=Depends(get_admin_download_auth)
+):
+    try:
+        import io
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.lib import colors
+        from reportlab.lib.units import mm
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.enums import TA_LEFT
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+
+        rows = admin_pendientes_cumplimentar(
+            fecha_desde=fecha_desde, fecha_hasta=fecha_hasta, grupo=grupo,
+            superrubro=superrubro, rubro=rubro, marca=marca, articulo=articulo,
+            vendedor=vendedor, _u=_u
+        )
+        if not rows:
+            raise HTTPException(404, "Sin artículos pendientes para los filtros indicados")
+
+        fecha_gen = datetime.now().strftime('%d/%m/%Y %H:%M')
+        buf = io.BytesIO()
+        doc = SimpleDocTemplate(buf, pagesize=landscape(A4),
+                                leftMargin=6*mm, rightMargin=6*mm,
+                                topMargin=12*mm, bottomMargin=12*mm)
+        styles = getSampleStyleSheet()
+        st_title = ParagraphStyle('pend_title', fontName='Helvetica-Bold', fontSize=13,
+                                  textColor=colors.HexColor('#111827'), spaceAfter=6)
+        st_desc  = ParagraphStyle('pend_desc', fontName='Helvetica', fontSize=7.5,
+                                  textColor=colors.HexColor('#111827'), leading=9, wordWrap='LTR')
+        st_cli   = ParagraphStyle('pend_cli', fontName='Helvetica', fontSize=7.5,
+                                  textColor=colors.HexColor('#111827'), leading=9, wordWrap='LTR')
+        st_txt   = ParagraphStyle('pend_txt', fontName='Helvetica', fontSize=7.5,
+                                  textColor=colors.HexColor('#111827'), leading=9, wordWrap='LTR')
+        st_head  = ParagraphStyle('pend_head', fontName='Helvetica-Bold', fontSize=7.5,
+                                  textColor=colors.white, leading=9, wordWrap='LTR')
+
+        story = [Paragraph(
+            f"MICROBELL S.A. — Artículos Pendientes de Cumplimentar &nbsp;({fecha_desde} a {fecha_hasta}) &nbsp;·&nbsp; Generado: {fecha_gen} &nbsp;·&nbsp; {len(rows)} líneas",
+            st_title
+        )]
+
+        # Encabezados abreviados (evita que el texto del header se salga de columnas angostas)
+        pdf_headers = ["Tipo", "Número", "Fecha", "Vendedor", "Cliente", "Código", "Descripción",
+                       "Cant.Total", "Cant.Remit.", "Cant.Pend.", "P.Unit.", "IVA%", "Marca", "Rubro"]
+        data = [[Paragraph(h, st_head) for h in pdf_headers]]
+        for r in rows:
+            vals = _pendientes_row_vals(r)
+            vals[0]  = Paragraph(str(vals[0] or ''), st_txt)   # Tipo con wrap (Presupuesto no entra en 1 línea corta)
+            vals[1]  = Paragraph(str(vals[1] or ''), st_txt)   # Número con wrap
+            vals[2]  = Paragraph(str(vals[2] or ''), st_txt)   # Fecha con wrap
+            vals[3]  = Paragraph(str(vals[3] or ''), st_txt)   # Vendedor con wrap
+            vals[4]  = Paragraph(str(vals[4] or ''), st_cli)   # Cliente con wrap (evita que invada la celda de al lado)
+            vals[6]  = Paragraph(str(vals[6] or ''), st_desc)  # Descripción con wrap
+            vals[12] = Paragraph(str(vals[12] or ''), st_txt)  # Marca con wrap
+            vals[13] = Paragraph(str(vals[13] or ''), st_txt)  # Rubro con wrap
+            data.append(vals)
+
+        # Anchos ajustados para que Vendedor/Cliente/Descripción tengan lugar de sobra
+        # y hagan wrap en vez de superponerse con la columna siguiente.
+        col_widths = [16*mm, 14*mm, 16*mm, 30*mm, 39*mm, 11*mm, 66*mm, 11*mm, 12*mm, 12*mm, 13*mm, 8*mm, 17*mm, 17*mm]
+        tbl = Table(data, colWidths=col_widths, repeatRows=1)
+        tbl.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#1A56DB')),
+            ('TEXTCOLOR',  (0,0), (-1,0), colors.white),
+            ('FONTNAME',   (0,0), (-1,0), 'Helvetica-Bold'),
+            ('FONTSIZE',   (0,0), (-1,-1), 7.5),
+            ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, colors.HexColor('#EFF6FF')]),
+            ('GRID', (0,0), (-1,-1), 0.4, colors.lightgrey),
+            ('ALIGN', (7,1), (11,-1), 'RIGHT'),
+            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+            ('TOPPADDING', (0,0), (-1,-1), 3),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 3),
+        ]))
+        story.append(tbl)
+        doc.build(story)
+        buf.seek(0)
+        from fastapi.responses import StreamingResponse
+        fname = f"pendientes_{fecha_desde}_a_{fecha_hasta}.pdf"
+        return StreamingResponse(buf, media_type="application/pdf",
+                                 headers={"Content-Disposition": f'inline; filename="{fname}"'})
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
 
 @app.get("/admin/rotacion-filtros")
 def admin_rotacion_filtros(_u=Depends(get_admin_user)):
@@ -3826,7 +5062,8 @@ def admin_rotacion_filtros(_u=Depends(get_admin_user)):
         c = conn('WIN1252', db=DATABASE)
         cur = c.cursor()
         cur.execute('SELECT TRIM(CODIGOGRUPOSUPERRUBRO), TRIM(DESCRIPCION) FROM "GRUPOSUPERRUBROS" ORDER BY DESCRIPCION')
-        grupos = [{'codigo': r[0], 'descripcion': r[1] or r[0]} for r in cur.fetchall() if r[0]]
+        grupos = [{'codigo': r[0], 'descripcion': r[1] or r[0]} for r in cur.fetchall()
+                  if r[0] and (r[1] or '').strip().upper() not in ('TERCEROS', 'SERVICIOS')]
         cur.execute('SELECT TRIM(CODIGOSUPERRUBRO), TRIM(DESCRIPCION), TRIM(CODIGOGRUPOSUPERRUBRO) FROM "SUPERRUBROS" ORDER BY DESCRIPCION')
         superrubros = [{'codigo': r[0], 'descripcion': r[1] or r[0], 'grupo': r[2] or ''} for r in cur.fetchall() if r[0]]
         cur.execute('SELECT TRIM(CODIGORUBRO), TRIM(DESCRIPCION), TRIM(CODIGOSUPERRUBRO) FROM "RUBROS" ORDER BY DESCRIPCION')
@@ -3865,6 +5102,32 @@ def admin_debug_multiplazos_columns(_u=Depends(get_admin_user)):
         return {"columnas": cols, "ejemplo_multiplazo_36": row_dict}
     except Exception as e:
         raise HTTPException(500, str(e))
+
+@app.get("/admin/debug-clientes-codigo")
+def admin_debug_clientes_codigo(codigos: str = Query(..., description="CODIGOCLIENTE separados por coma, ej: 12440,9748"),
+                                 _u=Depends(get_admin_user)):
+    """Debug temporal: para un CODIGOCLIENTE interno dado, muestra lado a lado
+    CODIGOCLIENTE, CODIGOPARTICULAR y RAZONSOCIAL tal cual están en Firebird —
+    para diagnosticar por qué Reactivación muestra un código que no coincide
+    con lo esperado en el módulo de Ofertas."""
+    lista = [c.strip() for c in codigos.split(',') if c.strip()]
+    if not lista:
+        return []
+    try:
+        c = conn('WIN1252', db='c:/flexxus/DB/DB-Microbell.gdb')
+        cur = c.cursor()
+        ph = ','.join('?' * len(lista))
+        cur.execute(f"""
+            SELECT CODIGOCLIENTE, TRIM(CODIGOPARTICULAR), TRIM(RAZONSOCIAL), ACTIVO
+            FROM "CLIENTES" WHERE CODIGOCLIENTE IN ({ph})
+        """, lista)
+        rows = cur.fetchall()
+        c.close()
+        return [{"codigocliente": str(r[0]).strip(), "codigoparticular": (r[1] or '').strip(),
+                  "razonsocial": (r[2] or '').strip(), "activo": str(r[3])} for r in rows]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/admin/debug-tipos-comprobante")
 def admin_debug_tipos_comprobante(_u=Depends(get_admin_user)):
@@ -3923,7 +5186,7 @@ def admin_analisis_rotacion(
         #    "Stock por Depósito" (probada y consistente). Pasar un CSV de
         #    varios depósitos directo a FMA_STOCK en una sola llamada daba
         #    resultados incorrectos; acá se llama una vez por depósito.
-        dep_lista = [d.strip() for d in depositos.split(',') if d.strip()] if depositos and depositos.strip() else list(_FMA_ALL_DEPS)
+        dep_lista = [d.strip() for d in depositos.split(',') if d.strip()] if depositos and depositos.strip() else _deps_activos()
         fma_data = _fma_stock_parallel(dep_lista)  # {dep: {art_id: stock}}
         stock_map = {}  # art_id (CODIGOARTICULO) -> stock total
         for art_id in catalog.keys():
@@ -4187,7 +5450,7 @@ def admin_analisis_rotacion(
                 'bulto_sugerido':     bulto,
                 'precio_bulto_meli':      precio_bulto_meli,
                 'precio_bulto_mayorista': precio_bulto_mayorista,
-                'alicuotaiva':        art['alicuotaiva'],
+                'alicuotaiva':        art['iva'],
                 'cambio_usd':         cambio_usd,
                 'pct_operativo':      pct_operativo,
                 'pct_utilidad':       pct_utilidad,
@@ -4946,9 +6209,11 @@ def admin_get_ofertas(_u=Depends(get_admin_user)):
         o['vendors']          = []
         o['profiles']         = []
         o['category_filters'] = []
+        o['discount_filters'] = []
         o['combo_escalones']   = []
         o['amount_escalones']  = []
-        for k, d in [('deposito',''),('tipo_financiero','descuento_total'),('monto_minimo',0),('cupo',0),('usos',0)]:
+        o['clients']           = []
+        for k, d in [('deposito',''),('tipo_financiero','descuento_total'),('monto_minimo',0),('cupo',0),('usos',0),('tope_bonificacion_pesos',0),('bonificado_acumulado_pesos',0),('acumulable',0)]:
             if k not in o: o[k] = d
     ph = ','.join('?' * len(ids))
     for r in c.execute(f"SELECT * FROM offer_product_details WHERE offer_id IN ({ph})", ids):
@@ -4965,11 +6230,16 @@ def admin_get_ofertas(_u=Depends(get_admin_user)):
         if r[0] in idx: idx[r[0]]['profiles'].append(r[1])
     for r in c.execute(f"SELECT offer_id, nivel, valor FROM offer_category_filters WHERE offer_id IN ({ph})", ids):
         if r[0] in idx: idx[r[0]]['category_filters'].append({'nivel': r[1], 'valor': r[2]})
+    for r in c.execute(f"SELECT offer_id, nivel, valor FROM offer_discount_filters WHERE offer_id IN ({ph})", ids):
+        if r[0] in idx: idx[r[0]]['discount_filters'].append({'nivel': r[1], 'valor': r[2]})
     for r in c.execute(f"SELECT offer_id, min_combos, descuento_pct FROM offer_combo_escalones WHERE offer_id IN ({ph}) ORDER BY min_combos", ids):
         if r[0] in idx: idx[r[0]]['combo_escalones'].append({'min_combos': r[1], 'descuento_pct': r[2]})
     for r in c.execute(f"SELECT offer_id, monto_minimo, descuento_pct, condicion_comercial FROM offer_amount_escalones WHERE offer_id IN ({ph}) ORDER BY monto_minimo", ids):
         if r[0] in idx: idx[r[0]]['amount_escalones'].append({'monto_minimo': r[1], 'descuento_pct': r[2], 'condicion_comercial': r[3]})
+    for r in c.execute(f"SELECT offer_id, codigocliente, razonsocial, descuento_extra_pct, vencimiento_extra, monto_minimo_extra, tipo_cartera, condicion_comercial_extra FROM offer_clients WHERE offer_id IN ({ph})", ids):
+        if r[0] in idx: idx[r[0]]['clients'].append({'codigocliente': r[1], 'razonsocial': r[2], 'descuento_extra_pct': r[3], 'vencimiento_extra': r[4], 'monto_minimo_extra': r[5], 'tipo_cartera': r[6], 'condicion_comercial_extra': r[7]})
     c.close()
+    _resolver_codigoparticular_clientes(offers)
     return offers
 
 def _save_offer_relations(c, id_, data):
@@ -5007,6 +6277,22 @@ def _save_offer_relations(c, id_, data):
         if f.get('nivel') and f.get('valor'):
             try: c.execute("INSERT OR IGNORE INTO offer_category_filters (offer_id, nivel, valor) VALUES (?,?,?)", (id_, f['nivel'], f['valor']))
             except: pass
+    for f in (data.get('discount_filters') or []):
+        if f.get('nivel') and f.get('valor'):
+            try: c.execute("INSERT OR IGNORE INTO offer_discount_filters (offer_id, nivel, valor) VALUES (?,?,?)", (id_, f['nivel'], f['valor']))
+            except: pass
+    for cli in (data.get('clients') or []):
+        cod = str(cli.get('codigocliente') or '').strip()
+        if cod:
+            try: c.execute("""INSERT OR IGNORE INTO offer_clients
+                               (offer_id, codigocliente, razonsocial, descuento_extra_pct, vencimiento_extra, monto_minimo_extra, tipo_cartera, condicion_comercial_extra)
+                               VALUES (?,?,?,?,?,?,?,?)""",
+                           (id_, cod, str(cli.get('razonsocial') or '').strip(),
+                            float(cli.get('descuento_extra_pct') or 0), str(cli.get('vencimiento_extra') or ''),
+                            float(cli.get('monto_minimo_extra') or 0),
+                            str(cli.get('tipo_cartera') or 'descuento'),
+                            str(cli.get('condicion_comercial_extra') or '')))
+            except: pass
     c.commit()
 
 @app.get("/admin/ofertas/{id}")
@@ -5026,10 +6312,11 @@ def admin_create_oferta(data: dict, _u=Depends(get_admin_user)):
     if not nombre or not tipo:
         raise HTTPException(400, "nombre y tipo requeridos")
     c = _admin_db()
-    c.execute("INSERT INTO offers (nombre, tipo, descripcion, fecha_desde, fecha_hasta, deposito, tipo_financiero, monto_minimo, cupo, usos) VALUES (?,?,?,?,?,?,?,?,?,0)",
+    c.execute("INSERT INTO offers (nombre, tipo, descripcion, fecha_desde, fecha_hasta, deposito, tipo_financiero, monto_minimo, cupo, usos, tope_bonificacion_pesos, bonificado_acumulado_pesos, acumulable) VALUES (?,?,?,?,?,?,?,?,?,0,?,0,?)",
               (nombre, tipo, data.get('descripcion','').strip(), data.get('fecha_desde'), data.get('fecha_hasta'),
                data.get('deposito','').strip(), data.get('tipo_financiero','descuento_total'),
-               data.get('monto_minimo',0), int(data.get('cupo',0) or 0)))
+               data.get('monto_minimo',0), int(data.get('cupo',0) or 0), float(data.get('tope_bonificacion_pesos',0) or 0),
+               1 if data.get('acumulable') else 0))
     c.commit(); id_ = c.execute("SELECT last_insert_rowid()").fetchone()[0]
     _save_offer_relations(c, id_, data)
     c.close()
@@ -5039,20 +6326,23 @@ def admin_create_oferta(data: dict, _u=Depends(get_admin_user)):
 def admin_update_oferta(id: int, data: dict, _u=Depends(get_admin_user)):
     c = _admin_db()
     nuevo_cupo = int(data.get('cupo',0) or 0)
-    # Al ampliar el cupo, reactivar si estaba inactiva por cupo agotado
-    row = c.execute("SELECT usos, activo FROM offers WHERE id=?", (id,)).fetchone()
+    nuevo_tope = float(data.get('tope_bonificacion_pesos',0) or 0)
+    # Al ampliar el cupo o el tope de bonificación, reactivar si estaba inactiva por
+    # agotamiento de cualquiera de los dos (mismo criterio para ambos).
+    row = c.execute("SELECT usos, activo, bonificado_acumulado_pesos FROM offers WHERE id=?", (id,)).fetchone()
     usos_actual = row['usos'] if row else 0
-    activo_nuevo = data.get('activo',1)
-    if nuevo_cupo == 0 or usos_actual < nuevo_cupo:
-        activo_nuevo = data.get('activo',1)  # respetar lo que manda el formulario
+    acumulado_actual = (row['bonificado_acumulado_pesos'] if row else 0) or 0
+    activo_nuevo = data.get('activo',1)  # respetar lo que manda el formulario
     c.execute("""UPDATE offers SET nombre=?, tipo=?, descripcion=?, fecha_desde=?, fecha_hasta=?,
-                 activo=?, deposito=?, tipo_financiero=?, monto_minimo=?, cupo=? WHERE id=?""",
+                 activo=?, deposito=?, tipo_financiero=?, monto_minimo=?, cupo=?, tope_bonificacion_pesos=?, acumulable=? WHERE id=?""",
               (data.get('nombre','').strip(), data.get('tipo','').strip(),
                data.get('descripcion','').strip(), data.get('fecha_desde'), data.get('fecha_hasta'),
                activo_nuevo, data.get('deposito','').strip(),
-               data.get('tipo_financiero','descuento_total'), data.get('monto_minimo',0), nuevo_cupo, id))
+               data.get('tipo_financiero','descuento_total'), data.get('monto_minimo',0), nuevo_cupo, nuevo_tope,
+               1 if data.get('acumulable') else 0, id))
     for tbl in ('offer_product_details','offer_financial_details','offer_conditions',
-                'offer_vendors','offer_profiles','offer_category_filters','offer_combo_escalones','offer_amount_escalones'):
+                'offer_vendors','offer_profiles','offer_category_filters','offer_discount_filters',
+                'offer_combo_escalones','offer_amount_escalones','offer_clients'):
         c.execute(f"DELETE FROM {tbl} WHERE offer_id=?", (id,))
     _save_offer_relations(c, id, data)
     c.close()
@@ -5065,16 +6355,31 @@ def admin_delete_oferta(id: int, _u=Depends(get_admin_user)):
 
 # Endpoint público para frontend
 @app.get("/ofertas")
-def get_ofertas_for_vendor(vendedor: Optional[str] = None, perfil: Optional[str] = None):
+def get_ofertas_for_vendor(vendedor: Optional[str] = None, perfil: Optional[str] = None, cliente: Optional[str] = None):
     from datetime import date
     hoy = date.today().isoformat()
     c = _admin_db()
     vend_up = vendedor.upper() if vendedor else None
     perf_up = perfil.upper() if perfil else None
-    # Una oferta aplica al vendedor si:
-    #   - No tiene restricción de vendor/profile (tablas vacías), O
+    cli_up  = cliente.strip() if cliente else None
+    # Una oferta aplica si:
+    #   - No tiene NINGUNA restricción de vendor/profile (offer_clients NO cuenta acá —
+    #     ver nota abajo), O
     #   - El vendedor está en offer_vendors, O
-    #   - El perfil del vendedor está en offer_profiles
+    #   - El perfil del vendedor está en offer_profiles, O
+    #   - El cliente de la operación está en offer_clients (alcance por cliente prevalece:
+    #     cualquier corredor que atienda a ese cliente puede aplicarla, aunque la oferta
+    #     tenga cargados otros vendedores/perfiles distintos al que consulta).
+    #
+    # IMPORTANTE: offer_clients es SIEMPRE complementario, nunca restrictivo. Antes,
+    # una oferta sin ningún vendor/perfil cargado (o sea "para todos") dejaba de ser
+    # "para todos" en cuanto Reactivación le agregaba filas de recupero de cartera a
+    # offer_clients — porque la condición de "sin restricción" exigía ADEMÁS que
+    # offer_clients estuviera vacía. Eso rompía la oferta base (ej. escalón Hasbro-
+    # Microelectronics) para CUALQUIER cliente que no fuera uno de los pocos cargados
+    # para el recupero, salvo que el vendedor matcheara offer_vendors/offer_profiles.
+    # offer_clients solo debe SUMAR acceso (a esos clientes puntuales, para cualquier
+    # corredor), nunca sacarle el alcance general a la oferta.
     base_cond = """
         SELECT DISTINCT o.* FROM offers o
         WHERE o.activo=1
@@ -5091,6 +6396,9 @@ def get_ofertas_for_vendor(vendedor: Optional[str] = None, perfil: Optional[str]
     if perf_up:
         base_cond += " OR EXISTS (SELECT 1 FROM offer_profiles op WHERE op.offer_id=o.id AND op.perfil_codigo=?)"
         params.append(perf_up)
+    if cli_up:
+        base_cond += " OR EXISTS (SELECT 1 FROM offer_clients oc WHERE oc.offer_id=o.id AND oc.codigocliente=?)"
+        params.append(cli_up)
     base_cond += ")"
     offers = c.execute(base_cond, params).fetchall()
     if not offers:
@@ -5150,12 +6458,39 @@ def get_ofertas_for_vendor(vendedor: Optional[str] = None, perfil: Optional[str]
     for row in c.execute(f"SELECT offer_id, nivel, valor FROM offer_category_filters WHERE offer_id IN ({ph})", ids):
         cat_by_offer.setdefault(row[0], []).append({'nivel': row[1], 'valor': row[2]})
 
+    disc_by_offer = {}
+    for row in c.execute(f"SELECT offer_id, nivel, valor FROM offer_discount_filters WHERE offer_id IN ({ph})", ids):
+        disc_by_offer.setdefault(row[0], []).append({'nivel': row[1], 'valor': row[2]})
+
     esc_by_offer  = {}
     for row in c.execute(f"SELECT offer_id, min_combos, descuento_pct FROM offer_combo_escalones WHERE offer_id IN ({ph}) ORDER BY min_combos", ids):
         esc_by_offer.setdefault(row[0], []).append({'min_combos': row[1], 'descuento_pct': row[2]})
     amt_esc_by_offer = {}
     for row in c.execute(f"SELECT offer_id, monto_minimo, descuento_pct, condicion_comercial FROM offer_amount_escalones WHERE offer_id IN ({ph}) ORDER BY monto_minimo", ids):
         amt_esc_by_offer.setdefault(row[0], []).append({'monto_minimo': row[1], 'descuento_pct': row[2], 'condicion_comercial': row[3]})
+
+    # "Recupero de cartera": % adicional de Reactivación, cargado por cliente
+    # puntual dentro de offer_clients (ver _reactivacion_vincular_cliente_recupero).
+    # Se inyecta MÁS ABAJO únicamente en el escalón ya alcanzado de esta oferta para
+    # ESTE cliente puntual — nunca destraba el escalón por sí solo. monto_minimo_extra
+    # permite exigir, además, un neto propio del recupero (independiente del escalón
+    # base — si es menor o igual, no cambia nada).
+    extra_by_offer = {}
+    if cli_up:
+        for row in c.execute(
+            f"SELECT offer_id, descuento_extra_pct, vencimiento_extra, monto_minimo_extra, tipo_cartera, condicion_comercial_extra FROM offer_clients WHERE offer_id IN ({ph}) AND codigocliente=?",
+            ids + [cli_up]):
+            pct_extra  = row[1] or 0
+            vto_extra  = (row[2] or '').strip()
+            tipo_extra = (row[4] or 'descuento').strip()
+            cond_extra = (row[5] or '').strip()
+            vigente = (not vto_extra or vto_extra >= hoy)
+            # La recompensa puede ser % de descuento, condición comercial distinta, o
+            # ambas a la vez — alcanza con que cualquiera de las dos esté cargada,
+            # sin importar la etiqueta tipo_extra (solo informativa).
+            if vigente and (pct_extra > 0 or cond_extra):
+                extra_by_offer[row[0]] = {'pct': pct_extra, 'monto_minimo': row[3] or 0,
+                                           'tipo': tipo_extra, 'condicion': cond_extra}
 
     result = []
     for o in offers:
@@ -5165,13 +6500,63 @@ def get_ofertas_for_vendor(vendedor: Optional[str] = None, perfil: Optional[str]
         od['product_details']   = prod_by_offer.get(oid, [])
         od['conditions']        = conds_by_offer.get(oid, [])
         od['category_filters']  = cat_by_offer.get(oid, [])
+        od['discount_filters']  = disc_by_offer.get(oid, [])
         od['combo_escalones']   = esc_by_offer.get(oid, [])
         od['amount_escalones']  = amt_esc_by_offer.get(oid, [])
-        for k, d in [('deposito',''),('tipo_financiero','descuento_total'),('monto_minimo',0),('cupo',0),('usos',0)]:
+        for k, d in [('deposito',''),('tipo_financiero','descuento_total'),('monto_minimo',0),('cupo',0),('usos',0),('tope_bonificacion_pesos',0),('bonificado_acumulado_pesos',0),('acumulable',0)]:
             if k not in od: od[k] = d
         # Parsear financial_escalones de JSON string a lista
         fe_raw = od.get('financial_escalones')
         od['financial_escalones'] = json.loads(fe_raw) if fe_raw else []
+        extra = extra_by_offer.get(oid)
+        if od.get('tipo') == 'cartera':
+            # Oferta del panel "Descuento por Cartera": no tiene alcance de
+            # categoría/vendedor/perfil ni financial_escalones propios en la DB — el
+            # único tramo que existe es el cargado para ESTE cliente puntual en
+            # offer_clients. Sin cliente coincidente, la oferta queda inerte (sin
+            # escalones, _checkDescuentoMonto del frontend la ignora).
+            if extra:
+                # % y condición no son excluyentes — se aplican los dos si están cargados.
+                esc = {'monto_minimo': extra['monto_minimo'], 'porcentajes': [], 'condicion_comercial': None}
+                if extra['pct'] > 0:
+                    esc['porcentajes'] = [extra['pct']]
+                    esc['_recupero_pct'] = extra['pct']
+                if extra['condicion']:
+                    esc['condicion_comercial'] = extra['condicion']
+                    esc['_recupero_condicion'] = extra['condicion']
+                od['financial_escalones'] = [esc]
+            else:
+                od['financial_escalones'] = []
+        elif extra and od['financial_escalones']:
+            # El recupero exige, como mínimo, el escalón de mayor monto_minimo que ya
+            # tiene la oferta — el pedido tiene que alcanzarlo primero. Si además se
+            # cargó un monto_minimo_extra propio (mayor al del escalón base), ese pasa
+            # a ser el umbral real: el % extra recién se otorga a partir de ahí, pero
+            # sumado al % base (no lo reemplaza) para no perder el beneficio ya ganado.
+            top = max(od['financial_escalones'], key=lambda e: e.get('monto_minimo', 0))
+            umbral = max(top.get('monto_minimo', 0), extra['monto_minimo'])
+            # % y condición no son excluyentes — se aplican los dos si están cargados,
+            # sumando el % al del escalón base (nunca lo reemplaza) y reemplazando la
+            # condición del escalón alcanzado si se cargó una distinta. _recupero_condicion
+            # (análogo a _recupero_pct) le avisa al frontend que la condición vino del
+            # recupero de cartera, no del escalón base, para informarlo con su propio cartel.
+            if umbral <= top.get('monto_minimo', 0):
+                if extra['condicion']:
+                    top['condicion_comercial'] = extra['condicion']
+                    top['_recupero_condicion'] = extra['condicion']
+                if extra['pct'] > 0:
+                    top['porcentajes'] = list(top.get('porcentajes') or []) + [extra['pct']]
+                    top['_recupero_pct'] = extra['pct']
+            else:
+                nuevo_escalon = dict(top)
+                nuevo_escalon['monto_minimo'] = umbral
+                if extra['condicion']:
+                    nuevo_escalon['condicion_comercial'] = extra['condicion']
+                    nuevo_escalon['_recupero_condicion'] = extra['condicion']
+                if extra['pct'] > 0:
+                    nuevo_escalon['porcentajes'] = list(top.get('porcentajes') or []) + [extra['pct']]
+                    nuevo_escalon['_recupero_pct'] = extra['pct']
+                od['financial_escalones'] = od['financial_escalones'] + [nuevo_escalon]
         result.append(od)
     c.close()
     return result
@@ -5184,6 +6569,18 @@ _BANCOS = [
 ]
 _MP_EMAIL = "marketing@microbellsa.com.ar"
 _MP_CVU   = "0000003100004756934965"
+
+def _fecha_ddmmyyyy(s):
+    """Convierte una fecha ISO (YYYY-MM-DD, con o sin hora) a dd/mm/yyyy — formato
+    español latinoamericano. Si no matchea el patrón, devuelve el string tal cual
+    en vez de romper (puede venir ya en otro formato)."""
+    s = (s or '').strip()
+    if not s:
+        return ''
+    try:
+        return datetime.strptime(s[:10], '%Y-%m-%d').strftime('%d/%m/%Y')
+    except Exception:
+        return s
 
 def _fmt(v):
     """Formato moneda argentina: $ 1.234,56"""
@@ -5299,16 +6696,18 @@ def get_stock(
             buscar=buscar, gruposuperrubro=gruposuperrubro, superrubro=superrubro,
             rubro=rubro, marca=marca, dep_lista=dep_lista, limit=limit, offset=offset
         )
-        # Asegurar todos los depósitos en caché para los rem_* del frontend
-        _fma_stock_parallel(_FMA_ALL_DEPS)
+        # Asegurar TODOS los depósitos activos en caché para los remanente_XXX del
+        # frontend (antes solo se aseguraban 6 depósitos fijos — ver _deps_activos).
+        _deps_all = _deps_activos()
+        _fma_stock_parallel(_deps_all)
         with _fma_cache_lock:
-            all_rem = {d: (_fma_cache.get(d) or (0, {}))[1] for d in _FMA_ALL_DEPS}
+            all_rem = {d: (_fma_cache.get(d) or (0, {}))[1] for d in _deps_all}
 
         resultado = []
         for art, rem_dep, rem_total in pagina:
             factor = cambio_usd if art['codigomoneda'] == 'DOLARES' else 1.0
-            def conv(v): return math.ceil(v * factor * 100) / 100
-            resultado.append({
+            def conv(v): return _redondear_precio(v, factor)
+            item = {
                 "codigo":           art['codigo'],
                 "codigoparticular": art['codigoparticular'],
                 "descripcion":      art['descripcion'],
@@ -5317,16 +6716,10 @@ def get_stock(
                 "precio2":          conv(art['precio2']),
                 "precio3":          conv(art['precio3']),
                 "precio5":          conv(art['precio5']),
-                "iva":              art['alicuotaiva'],
+                "iva":              art['iva'],
                 "unidad":           art['unidad'],
                 "stock":            rem_total,
                 "remanente":        rem_total,
-                "remanente_001":    all_rem['001'].get(art['codigo'], 0),
-                "remanente_002":    all_rem['002'].get(art['codigo'], 0),
-                "remanente_003":    all_rem['003'].get(art['codigo'], 0),
-                "remanente_005":    all_rem['005'].get(art['codigo'], 0),
-                "remanente_013":    all_rem['013'].get(art['codigo'], 0),
-                "remanente_016":    all_rem['016'].get(art['codigo'], 0),
                 "rubro":            art['rubro'],
                 "superrubro":       art['superrubro'],
                 "gruposuperrubro":  art['gruposuperrubro'],
@@ -5334,73 +6727,66 @@ def get_stock(
                 "codigo_rubro":     art['codigo_rubro'],
                 "codigo_superrubro": art['codigo_superrubro'],
                 "codigo_gruposuperrubro": art['codigo_gruposuperrubro'],
-            })
+            }
+            # remanente_XXX para CADA depósito activo (antes solo 001/002/003/005/013/016
+            # — cualquier depósito nuevo, ej. 017 SARANDI, quedaba sin su clave y el
+            # frontend lo mostraba en 0 aunque tuviera stock real).
+            for _d in _deps_all:
+                item[f"remanente_{_d}"] = all_rem[_d].get(art['codigo'], 0)
+            resultado.append(item)
         _apply_reservas(resultado, _get_reservas_activas(), rem_key='remanente')
         return resultado
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-_bart_cache: dict = {}  # (q,db,skip_stock) -> (ts, rows)
-_BART_TTL = 25  # segundos
-
 @app.get("/buscar-articulos")
-def buscar_articulos(q: str = Query("", min_length=2), db: str = Query("oficial"), deposito: Optional[str] = None, skip_stock: int = Query(0)):
+def buscar_articulos(q: str = Query("", min_length=2), db: str = Query("oficial"), deposito: Optional[str] = None, skip_stock: int = Query(0), solo_con_stock: int = Query(0)):
     from concurrent.futures import ThreadPoolExecutor
     import re as _re
     ALL_DEPS = ['001','002','003','005','013','016']
     deps_to_fetch = [d.strip() for d in deposito.split(',')] if deposito else ALL_DEPS
 
-    # ── 1. Articulos — con caché TTL para búsquedas repetidas ─────────────────
-    _cache_key = (q.upper(), db, skip_stock)
-    _now = time.time()
-    _cached = _bart_cache.get(_cache_key)
-    if _cached and (_now - _cached[0]) < _BART_TTL:
-        rows, cambio_usd = _cached[1], _cached[2]
+    # ── 1. Artículos — búsqueda de texto contra el catálogo en memoria (2026-07-31) ──
+    # Antes esto era un CONTAINING en vivo contra Firebird en CADA letra escrita (sin
+    # índice útil para substring → varios segundos por búsqueda, con la conexión yendo
+    # y viniendo cada vez — ver reporte de Eduardo). El catálogo (_get_catalog) ya vive
+    # en memoria con refresco automático cada CATALOG_CACHE_TTL (30 min por default,
+    # con pre-calentamiento en background — ver _prewarm_catalog) para otras pantallas;
+    # acá se reutiliza para que la búsqueda de texto sea instantánea, sin tocar
+    # Firebird en absoluto. Misma semántica que el SQL anterior: detección de código
+    # puro, AND de palabras sueltas con tolerancia a tildes/plural, FIRST 30, mismo
+    # orden — _cn/_dn son los campos normalizados (sin tildes, mayúsculas) precomputados
+    # en _load_catalog.
+    catalog, cambio_usd = _get_catalog()
+    _es_codigo = bool(_re.match(r'^[A-Za-z0-9\-]{2,15}$', q) and ' ' not in q)
+    q_norm = _sin_tildes(q).upper()
+
+    if _es_codigo:
+        matched = [a for a in catalog.values() if q_norm in a['_cn'] or q_norm in a['_dn']]
+        matched.sort(key=lambda a: (0 if a['_cn'].startswith(q_norm) else 1, a['codigoparticular'], a['descripcion']))
     else:
-        c = conn('WIN1252', db=DATABASE)
-        cur = c.cursor()
-        try:
-            try:
-                cur.execute('SELECT CAMBIO FROM "MONEDAS" WHERE CODIGOMONEDA = ?', ('DOLARES',))
-                rm = cur.fetchone()
-                cambio_usd = float(rm[0]) if rm else 1.0
-            except Exception:
-                cambio_usd = 1.0
-
-            # Detectar si la búsqueda es un código puro (solo dígitos/letras sin espacios)
-            # → usar STARTING WITH o = en lugar de CONTAINING en DESCRIPCION (mucho más rápido)
-            _es_codigo = bool(_re.match(r'^[A-Za-z0-9\-]{2,15}$', q) and ' ' not in q)
-            if _es_codigo:
-                sql_art = (
-                    "SELECT FIRST 30 CODIGOARTICULO, CODIGOPARTICULAR, DESCRIPCION, PRECIOLISTA1, ALICUOTAIVA, CODIGOMONEDA, "
-                    "DTOMAXIMO1, APLICABLEABONIFICACION, PRECIOLISTA5 "
-                    "FROM \"ARTICULOS\" WHERE ACTIVO = '1' "
-                    "AND (UPPER(CODIGOPARTICULAR) CONTAINING UPPER(?) "
-                    "     OR UPPER(DESCRIPCION) CONTAINING UPPER(?)) "
-                    "ORDER BY CASE WHEN UPPER(CODIGOPARTICULAR) STARTING WITH UPPER(?) THEN 0 ELSE 1 END, "
-                    "         CODIGOPARTICULAR, DESCRIPCION"
-                )
-                params_art = (q, q, q)
-            else:
-                sql_art = (
-                    "SELECT FIRST 30 CODIGOARTICULO, CODIGOPARTICULAR, DESCRIPCION, PRECIOLISTA1, ALICUOTAIVA, CODIGOMONEDA, "
-                    "DTOMAXIMO1, APLICABLEABONIFICACION, PRECIOLISTA5 "
-                    "FROM \"ARTICULOS\" WHERE ACTIVO = '1' "
-                    "AND (UPPER(DESCRIPCION) CONTAINING UPPER(?) OR UPPER(CODIGOPARTICULAR) CONTAINING UPPER(?)) "
-                    "ORDER BY DESCRIPCION, CODIGOPARTICULAR"
-                )
-                params_art = (q, q)
-
-            cur.execute(sql_art, params_art)
-            rows = cur.fetchall()
-        finally:
-            c.close()
-        _bart_cache[_cache_key] = (_now, rows, cambio_usd)
-        # Limpiar entradas viejas (evitar crecimiento ilimitado)
-        if len(_bart_cache) > 200:
-            _oldest = sorted(_bart_cache, key=lambda k: _bart_cache[k][0])[:50]
-            for _k in _oldest:
-                _bart_cache.pop(_k, None)
+        # Búsqueda por palabras sueltas: si hay más de una palabra, exige que TODAS
+        # aparezcan en DESCRIPCION (en cualquier orden), en vez de exigir la frase
+        # exacta contigua. Tolera reconocimiento de voz que cambia el orden o los
+        # conectores (ej. "pistola para dardos" vs "pistola de dardos").
+        _words = [w for w in q.split() if w]
+        if len(_words) > 1:
+            # Normaliza tildes y, en palabras de 4+ letras terminadas en "s", también
+            # prueba sin esa "s" final — tolera diferencias de singular/plural y
+            # tildes que introduce el reconocimiento de voz (ej. "baterías" dicho por
+            # voz vs "BATERIA" cargado en Flexxus).
+            _word_norms = []
+            for _w in _words:
+                _wn = _sin_tildes(_w).upper()
+                _wn_sin_s = _wn[:-1] if (len(_wn) >= 4 and _wn[-1] == 'S') else None
+                _word_norms.append((_wn, _wn_sin_s))
+            def _todas_las_palabras(a):
+                return all((wn in a['_dn']) or (wn2 and wn2 in a['_dn']) for wn, wn2 in _word_norms)
+            matched = [a for a in catalog.values() if _todas_las_palabras(a) or q_norm in a['_cn']]
+        else:
+            matched = [a for a in catalog.values() if q_norm in a['_dn'] or q_norm in a['_cn']]
+        matched.sort(key=lambda a: (a['descripcion'], a['codigoparticular']))
+    arts_matched = matched[:30]
 
     # 2. FMA_STOCK en paralelo - una conexion por deposito
     def _fetch_dep(dep):
@@ -5415,28 +6801,45 @@ def buscar_articulos(q: str = Query("", min_length=2), db: str = Query("oficial"
             return dep, {}
 
     rem_maps = {d: {} for d in ALL_DEPS}
-    if rows and not skip_stock:
+    if arts_matched and not skip_stock:
         with ThreadPoolExecutor(max_workers=len(deps_to_fetch)) as ex:
             for dep, data in ex.map(_fetch_dep, deps_to_fetch):
                 rem_maps[dep] = data
 
+    # Filtro "solo con stock" para el autocomplete del vendedor — reusa el caché FMA
+    # compartido (TTL, mismo que usa /stock/batch) en vez de _fetch_dep de arriba, para
+    # no reintroducir conexiones sin cachear por cada tecla escrita. Se queda afuera un
+    # artículo solo si no tiene remanente en NINGUNO de los depósitos consultados
+    # (deps_to_fetch = los asignados al vendedor, o todos si no tiene restricción) —
+    # salvo que tenga PERMITESTOCKNEGATIVO activo, que siempre se muestra.
+    rem_stock_filtro = None
+    if arts_matched and solo_con_stock:
+        rem_stock_filtro = _fma_stock_parallel(deps_to_fetch)
+
     resultado = []
-    for r in rows:
-        moneda = (r[5] or '').strip().upper()
+    for art in arts_matched:
+        cod = art['codigo']
+        moneda = art['codigomoneda']
         factor = cambio_usd if moneda == 'DOLARES' else 1.0
-        precio = math.ceil(float(r[3]) * factor * 100) / 100 if r[3] else 0
-        dto_max = float(r[6]) if r[6] is not None else None
-        aplica_bonif = str(r[7] or '0').strip() == '1'
+        precio = _redondear_precio(art['precio1'], factor)
+        dto_max = float(art['dtomaximo1_raw']) if art['dtomaximo1_raw'] is not None else None
+        aplica_bonif = str(art['aplicableabonificacion_raw'] or '0').strip() == '1'
         if not aplica_bonif:
             dto_max = None
-        precio5_raw = float(r[8]) if r[8] else 0
-        precio5 = math.ceil(precio5_raw * factor * 100) / 100 if precio5_raw else 0
-        item = {"codigo": r[0], "codigoparticular": r[1] or r[0],
-                "descripcion": r[2], "precio": precio, "precio5": precio5,
-                "iva": float(r[4]) if r[4] else 21,
-                "dto_max": dto_max}
+        precio5 = _redondear_precio(art['precio5'], factor)
+        _coef = art['rubro_coeficiente'] if art['coeficiente_segun_rubro'] else art['coeficiente']
+        permite_neg = str(art['permitestocknegativo_raw'] or '0').strip() == '1'
+        if rem_stock_filtro is not None and not permite_neg:
+            total_rem = sum(rem_stock_filtro.get(dep, {}).get(cod, 0.0) for dep in deps_to_fetch)
+            if total_rem <= 0:
+                continue
+        item = {"codigo": cod, "codigoparticular": art['codigoparticular'],
+                "descripcion": art['descripcion'], "precio": precio, "precio5": precio5,
+                "iva": round(_coef * 21, 2),
+                "dto_max": dto_max,
+                "permite_stock_negativo": permite_neg}
         for dep in ALL_DEPS:
-            item[f'rem{dep}'] = rem_maps.get(dep, {}).get(r[0], 0)
+            item[f'rem{dep}'] = rem_maps.get(dep, {}).get(cod, 0)
         resultado.append(item)
     return resultado
 
@@ -5456,7 +6859,7 @@ def _fetch_stock_data(buscar=None, gruposuperrubro=None, superrubro=None, rubro=
         pass
 
     # ── 2. Query principal (001+003 combinados)
-    wheres = ["a.ACTIVO = '1'"]
+    wheres = ["a.ACTIVO = '1'", "(g.DESCRIPCION IS NULL OR UPPER(g.DESCRIPCION) NOT IN ('TERCEROS','SERVICIOS'))"]
     params = []
     if buscar:
         buscar = _sanitizar_buscar(buscar)
@@ -5478,9 +6881,10 @@ def _fetch_stock_data(buscar=None, gruposuperrubro=None, superrubro=None, rubro=
 
     sql = f"""
         SELECT s.ID_ARTICULO, a.CODIGOPARTICULAR, a.DESCRIPCION,
-               a.PRECIOLISTA1, a.ALICUOTAIVA, a.CODIGOUNIDADMEDIDA,
+               a.PRECIOLISTA1, a.COEFICIENTESEGUNRUBRO, a.CODIGOUNIDADMEDIDA,
                s.STOCKREAL, s.STOCKREMANENTE, a.CODIGOMONEDA,
-               r.DESCRIPCION, sr.DESCRIPCION, g.DESCRIPCION
+               r.DESCRIPCION, sr.DESCRIPCION, g.DESCRIPCION,
+               a.COEFICIENTE, r.COEFICIENTE
         FROM "FMA_STOCK"(NULL, NULL, '001,003', 1, 1) s
         JOIN "ARTICULOS" a ON a.CODIGOARTICULO = s.ID_ARTICULO
         LEFT JOIN "RUBROS" r ON r.CODIGORUBRO = a.CODIGORUBRO
@@ -5520,7 +6924,7 @@ def _fetch_stock_data(buscar=None, gruposuperrubro=None, superrubro=None, rubro=
     for r in rows:
         moneda = (r[8] or '').strip().upper()
         factor = cambio_usd if moneda == 'DOLARES' else 1.0
-        precio = math.ceil(float(r[3]) * factor * 100) / 100 if r[3] else 0
+        precio = _redondear_precio(r[3], factor)
         result.append({
             "codigo":           r[1] or r[0],
             "descripcion":      (r[2] or '').strip(),
@@ -5529,7 +6933,7 @@ def _fetch_stock_data(buscar=None, gruposuperrubro=None, superrubro=None, rubro=
             "rem_003":          rem_003_map.get(r[0], 0),
             "rem_total":        float(r[7] or 0),
             "precio":           precio,
-            "iva":              float(r[4]) if r[4] else 21,
+            "iva":              round((float(r[13] or 0) if str(r[4] or '0').strip() == '1' else float(r[12] or 0)) * 21, 2),
             "rubro":            (r[9] or '').strip(),
             "superrubro":       (r[10] or '').strip(),
             "gruposuperrubro":  (r[11] or '').strip(),
@@ -5592,10 +6996,12 @@ def exportar_stock_excel(
             vals = [row["gruposuperrubro"], row["superrubro"], row["rubro"],
                     row["codigo"], row["descripcion"],
                     int(row["rem_001"]), int(row["rem_003"]), int(row["rem_total"]),
-                    row["precio"], int(row["iva"])]
+                    row["precio"], float(row["iva"] or 0)]
             for ci, v in enumerate(vals, 1):
                 cell = ws.cell(row=ri, column=ci, value=v)
                 cell.alignment = left_al if ci <= 5 else right_al
+                if ci == 10:
+                    cell.number_format = '0.00'
                 if ri % 2 == 0:
                     cell.fill = alt_fill
 
@@ -5758,7 +7164,7 @@ def exportar_stock_pdf(
             Paragraph(f"{int(row['rem_003']):,}".replace(',', '.'),   s_cell_r),
             Paragraph(f"{int(row['rem_total']):,}".replace(',', '.'), s_cell_r),
             Paragraph('$'+f"{row['precio']:,.2f}".replace(',','X').replace('.',',').replace('X','.'), s_cell_r),
-            Paragraph(f"{int(row['iva'])}%",         s_cell_r),
+            Paragraph((f"{row['iva']:.2f}".replace('.', ',')+'%') if row['iva'] else '—', s_cell_r),
         ])
 
     tbl = Table(data, colWidths=cw, repeatRows=1)
@@ -5801,10 +7207,10 @@ def get_articulos_batch(codigos: str = Query(..., description="Códigos separado
     except Exception:
         cambio_usd = 1.0
     _COLS = ('SELECT a.CODIGOARTICULO, a.DESCRIPCION, a.CODIGOMARCA, '
-             'a.PRECIOLISTA1, a.PRECIOLISTA5, a.ALICUOTAIVA, '
+             'a.PRECIOLISTA1, a.PRECIOLISTA5, a.COEFICIENTESEGUNRUBRO, '
              'a.CODIGOMONEDA, a.CODIGOPARTICULAR, a.DTOMAXIMO1, a.APLICABLEABONIFICACION, '
-             'a.PERMITESTOCKNEGATIVO '
-             'FROM "ARTICULOS" a WHERE ')
+             'a.PERMITESTOCKNEGATIVO, a.COEFICIENTE, r.COEFICIENTE '
+             'FROM "ARTICULOS" a LEFT JOIN "RUBROS" r ON r.CODIGORUBRO = a.CODIGORUBRO WHERE ')
     placeholders = ','.join(['?' for _ in codes])
     # Buscar por CODIGOPARTICULAR
     cur.execute(_COLS + f'a.CODIGOPARTICULAR IN ({placeholders})', codes)
@@ -5817,9 +7223,23 @@ def get_articulos_batch(codigos: str = Query(..., description="Códigos separado
         cur.execute(_COLS + f'a.CODIGOARTICULO IN ({ph2})', missing)
         rows_by_art = {str(r[0] or '').strip(): r for r in cur.fetchall()}
     c.close()
-    # FMA stock (cache compartido, una llamada paralela)
-    _DEPS = ['001', '002', '003', '005', '013', '016']
+    # FMA stock (cache compartido, una llamada paralela) — todos los depósitos activos
+    # (antes 6 fijos, dejaba afuera depósitos nuevos como 017 SARANDI).
+    _DEPS = _deps_activos()
     rem_bulk = _fma_stock_parallel(_DEPS)
+    # Resolver la clave de FMA_STOCK usando el catálogo compartido (_get_catalog),
+    # que es el mismo que usa /stock (get_stock) y SÍ matchea correctamente contra
+    # _fma_cache. La query propia de este endpoint (arriba, conn() sin WIN1252)
+    # puede traer CODIGOARTICULO con una representación distinta (charset/padding)
+    # que no coincide como clave de dict aunque "se vea" igual — por eso este
+    # endpoint venía devolviendo 0 en todos los depósitos para ciertos artículos.
+    _catalog, _ = _get_catalog()
+    _cat_by_part = {}
+    _cat_by_id_str = {}
+    for _aid, _a in _catalog.items():
+        _cat_by_id_str[str(_aid).strip()] = _aid
+        if _a.get('codigoparticular'):
+            _cat_by_part[_a['codigoparticular']] = _aid
     results = []
     for cod in codes:
         row = rows_by_part.get(cod) or rows_by_art.get(cod)
@@ -5827,10 +7247,24 @@ def get_articulos_batch(codigos: str = Query(..., description="Códigos separado
             continue
         moneda = (row[6] or '').strip().upper()
         factor = cambio_usd if moneda == 'DOLARES' else 1.0
-        def conv(v, f=factor): return math.ceil(float(v) * f * 100) / 100 if v else 0
+        def conv(v, f=factor): return _redondear_precio(v, f)
         codigoarticulo = row[0]
         cod_key = str(codigoarticulo).strip()
-        rem = {dep: rem_bulk[dep].get(codigoarticulo, rem_bulk[dep].get(cod_key, 0.0)) for dep in _DEPS}
+        # Clave "buena" resuelta vía catálogo (prioridad), con fallback a la propia
+        fma_key = _cat_by_part.get(cod) or _cat_by_id_str.get(cod) or _cat_by_id_str.get(cod_key) or codigoarticulo
+        rem = {}
+        _debug_dep = None
+        for dep in _DEPS:
+            d = rem_bulk[dep]
+            if fma_key in d:
+                rem[dep] = d[fma_key]
+            elif codigoarticulo in d:
+                rem[dep] = d[codigoarticulo]
+            elif cod_key in d:
+                rem[dep] = d[cod_key]
+            else:
+                rem[dep] = 0.0
+                _debug_dep = dep  # se guarda el último depósito donde falló el match, para diagnóstico
         dto_max_raw = row[8]
         aplica_b = str(row[9] or '0').strip() == '1'
         dto_max = float(dto_max_raw) if (dto_max_raw is not None and aplica_b) else None
@@ -5841,16 +7275,84 @@ def get_articulos_batch(codigos: str = Query(..., description="Códigos separado
             "descripcion": row[1],
             "marca": (row[2] or '').strip(),
             "precio1": conv(row[3]), "precio5": conv(row[4]),
-            "iva": row[5], "moneda": row[6],
-            "remanente_001": rem['001'], "remanente_002": rem['002'],
-            "remanente_003": rem['003'], "remanente_005": rem['005'],
-            "remanente_013": rem['013'], "remanente_016": rem['016'],
+            "iva": round((float(row[12] or 0) if str(row[5] or '0').strip() == '1' else float(row[11] or 0)) * 21, 2),
+            "moneda": row[6],
             "dto_max": dto_max,
             "permite_stock_negativo": permite_neg,
             "_input_cod": cod,
         }
+        for _d in _DEPS:
+            item[f"remanente_{_d}"] = rem[_d]
+        if _debug_dep:
+            # Diagnóstico temporal: el remanente de ESTE artículo no matcheó ninguna
+            # clave de rem_bulk (ver /stock/batch) — se adjuntan tipo/valor de la clave
+            # buscada y 5 claves de muestra de FMA_STOCK para ese depósito, así se puede
+            # ver desde el propio JSON (Network tab) si es un problema de tipo de dato
+            # (ej. CODIGOARTICULO con padding CHAR vs ID_ARTICULO ya trimeado).
+            _sample = list(rem_bulk[_debug_dep].keys())[:5]
+            item["_debug_fma"] = {
+                "dep_fallo": _debug_dep,
+                "codigoarticulo_valor": repr(codigoarticulo),
+                "codigoarticulo_tipo": type(codigoarticulo).__name__,
+                "fma_key_usada": repr(fma_key),
+                "cod_key": cod_key,
+                "muestra_claves_fma": [repr(k) for k in _sample],
+                "muestra_tipos_fma": [type(k).__name__ for k in _sample],
+            }
         results.append(item)
     return results
+
+
+@app.get("/debug/stock-check")
+def debug_stock_check(codigo: str):
+    """DEBUG TEMPORAL: para un CODIGOPARTICULAR dado, muestra en una sola
+    respuesta cómo lo resuelve el catálogo compartido (_get_catalog, usado por
+    /stock — probado correcto), cómo lo resuelve la query propia de
+    /stock/batch (conn() sin WIN1252 — sospechosa), y qué devuelve el caché
+    FMA_STOCK para cada clave candidata en los depósitos 001/003. Objetivo:
+    confirmar de una vez si el mismatch es de clave (tipo/padding) o si el
+    valor en caché es legítimamente distinto al de /stock. Sin auth (mismo
+    nivel que /stock/batch) — sacar una vez resuelto el bug real."""
+    out = {"codigo_buscado": codigo}
+
+    catalog, _ = _get_catalog()
+    cat_hit = None
+    for aid, a in catalog.items():
+        if a.get('codigoparticular') == codigo or str(aid).strip() == codigo:
+            cat_hit = (aid, a)
+            break
+    out["catalog"] = None
+    if cat_hit:
+        aid, a = cat_hit
+        out["catalog"] = {
+            "art_id": repr(aid), "art_id_tipo": type(aid).__name__,
+            "codigoparticular": a.get('codigoparticular'),
+        }
+
+    c = conn()
+    cur = c.cursor()
+    cur.execute('SELECT CODIGOARTICULO, CODIGOPARTICULAR FROM "ARTICULOS" WHERE CODIGOPARTICULAR=?', (codigo,))
+    row = cur.fetchone()
+    c.close()
+    out["query_batch"] = None
+    if row:
+        out["query_batch"] = {
+            "codigoarticulo": repr(row[0]), "codigoarticulo_tipo": type(row[0]).__name__,
+            "codigoparticular": repr(row[1]),
+        }
+
+    rem_bulk = _fma_stock_parallel(['001', '003'])
+    candidatos = []
+    if cat_hit: candidatos.append(('catalog_art_id', cat_hit[0]))
+    if row: candidatos.append(('query_codigoarticulo', row[0]))
+    out["fma"] = {}
+    for dep in ('001', '003'):
+        d = rem_bulk[dep]
+        entry = {"total_claves_en_dep": len(d), "muestra_claves": [repr(k) for k in list(d.keys())[:3]]}
+        for nombre, key in candidatos:
+            entry[nombre] = {"clave": repr(key), "encontrada": key in d, "valor": d.get(key)}
+        out["fma"][dep] = entry
+    return out
 
 
 @app.get("/conjunto/{codigo}/partes")
@@ -5870,27 +7372,27 @@ def get_conjunto_partes(codigo: str):
     cur.execute(
         'SELECT cj.CODIGOARTICULO, cj.CANTIDAD, a.DESCRIPCION, a.DESCRIPCIONADICIONAL, '
         'a.CODIGOPARTICULAR, a.PRECIOLISTA1, a.PRECIOLISTA2, a.PRECIOLISTA3, a.PRECIOLISTA5, '
-        'a.ALICUOTAIVA, a.CODIGOUNIDADMEDIDA, a.CODIGOMONEDA, a.PERMITESTOCKNEGATIVO, cj.COEFICIENTEPRECIO '
+        'a.COEFICIENTESEGUNRUBRO, a.CODIGOUNIDADMEDIDA, a.CODIGOMONEDA, a.PERMITESTOCKNEGATIVO, cj.COEFICIENTEPRECIO, '
+        'a.COEFICIENTE, r.COEFICIENTE '
         'FROM "CONJUNTOS" cj '
         'JOIN "ARTICULOS" a ON a.CODIGOARTICULO = cj.CODIGOARTICULO '
+        'LEFT JOIN "RUBROS" r ON r.CODIGORUBRO = a.CODIGORUBRO '
         'WHERE cj.CODIGOCONJUNTO = ? ORDER BY cj.LINEA',
         (cod_interno,)
     )
     partes_rows = cur.fetchall()
-    c.close()
     try:
-        c2 = conn(); cur2 = c2.cursor()
-        cur2.execute('SELECT CAMBIO FROM "MONEDAS" WHERE CODIGOMONEDA = ?', ('DOLARES',))
-        rm = cur2.fetchone()
+        cur.execute('SELECT CAMBIO FROM "MONEDAS" WHERE CODIGOMONEDA = ?', ('DOLARES',))
+        rm = cur.fetchone()
         cambio_usd = float(rm[0]) if rm else 1.0
-        c2.close()
     except Exception:
         cambio_usd = 1.0
+    c.close()
     partes = []
     for p in partes_rows:
         moneda = (p[11] or '').strip().upper()
         factor = cambio_usd if moneda == 'DOLARES' else 1.0
-        def conv(v): return math.ceil(float(v) * factor * 100) / 100 if v else 0
+        def conv(v): return _redondear_precio(v, factor)
         partes.append({
             "codigo": (p[0] or '').strip(),
             "codigoparticular": (p[4] or p[0] or '').strip(),
@@ -5899,11 +7401,180 @@ def get_conjunto_partes(codigo: str):
             "descripcion_adicional": p[3],
             "precio1": conv(p[5]), "precio2": conv(p[6]),
             "precio3": conv(p[7]), "precio5": conv(p[8]),
-            "iva": p[9], "unidad": p[10], "moneda": p[11],
+            "iva": round((float(p[15] or 0) if str(p[9] or '0').strip() == '1' else float(p[14] or 0)) * 21, 2),
+            "unidad": p[10], "moneda": p[11],
             "permite_stock_negativo": str(p[12] or '0').strip() == '1',
             "coeficiente_precio": float(p[13] or 0)
         })
     return partes
+
+
+# ─── Catálogo de imágenes (Drive → servidor) ─────────────────────────────────
+CATALOGO_IMG_DIR = "catalogo_imagenes"
+_IMG_EXTS = ('.jpg', '.jpeg', '.png', '.webp', '.gif')
+
+def _catalogo_leaf_folders():
+    """Recorre CATALOGO_IMG_DIR y devuelve carpetas que tienen imágenes
+    directamente adentro — cada una es un candidato = un artículo/variante."""
+    resultado = []
+    base = CATALOGO_IMG_DIR
+    if not os.path.isdir(base):
+        return resultado
+    for root, dirs, files in os.walk(base):
+        imgs = sorted([f for f in files if f.lower().endswith(_IMG_EXTS)])
+        if imgs:
+            rel = os.path.relpath(root, base).replace('\\', '/')
+            resultado.append({"carpeta": rel, "imagenes": imgs})
+    return sorted(resultado, key=lambda x: x["carpeta"])
+
+def _sin_tildes_cat(s):
+    import unicodedata as _ud
+    return ''.join(c for c in _ud.normalize('NFKD', s or '') if not _ud.combining(c))
+
+def _candidatos_articulo_por_carpeta(carpeta, limit=8):
+    """Sugiere artículos de Firebird parecidos al nombre de una carpeta del catálogo
+    (match exacto de código como fast-path, y por texto/similaridad como respaldo)."""
+    import re as _re_cat
+    import difflib
+    _IGNORAR = {'fotos','foto','banner','banners','video','videos','imagen','imagenes',
+                'jpg','png','the','de','del','la','el','los','las','y'}
+    tokens = [t for t in _re_cat.split(r'[\s/_\-]+', carpeta) if t and not t.isdigit() and t.lower() not in _IGNORAR]
+    if not tokens:
+        return []
+    c = conn()
+    cur = c.cursor()
+    candidatos = {}
+    try:
+        # Fast-path: algún token coincide EXACTO con un CODIGOPARTICULAR (ej. carpeta "T033")
+        for tok in tokens:
+            cur.execute(
+                'SELECT CODIGOPARTICULAR, DESCRIPCION FROM "ARTICULOS" '
+                'WHERE UPPER(CODIGOPARTICULAR) = UPPER(?) AND ACTIVO = \'1\'',
+                (tok,)
+            )
+            for row in cur.fetchall():
+                candidatos[row[0]] = {"codigo_particular": row[0], "descripcion": row[1], "score": 1.0, "match": "codigo_exacto"}
+        # Fuzzy: candidatos por texto (cualquier token presente en DESCRIPCION), re-rankeados por similaridad
+        ors = " OR ".join(["UPPER(DESCRIPCION) CONTAINING UPPER(?)"] * len(tokens))
+        cur.execute(
+            f'SELECT FIRST 200 CODIGOPARTICULAR, DESCRIPCION FROM "ARTICULOS" '
+            f'WHERE ACTIVO = \'1\' AND ({ors})',
+            tuple(tokens)
+        )
+        texto_norm = _sin_tildes_cat(' '.join(tokens)).upper()
+        for row in cur.fetchall():
+            cp = (row[0] or '').strip()
+            if not cp or cp in candidatos:
+                continue
+            desc_norm = _sin_tildes_cat(row[1] or '').upper()
+            score = difflib.SequenceMatcher(None, texto_norm, desc_norm).ratio()
+            candidatos[cp] = {"codigo_particular": cp, "descripcion": row[1], "score": round(score, 3), "match": "texto"}
+    finally:
+        c.close()
+    ranked = sorted(candidatos.values(), key=lambda x: -x["score"])
+    return ranked[:limit]
+
+@app.get("/admin/imagenes/pendientes")
+def get_imagenes_pendientes(_u=Depends(get_admin_user)):
+    """Carpetas del catálogo sincronizado que todavía no están 100% vinculadas
+    a un código de artículo, con candidatos sugeridos por carpeta."""
+    c = _admin_db()
+    ya_vinculadas = {r[0] for r in c.execute(
+        "SELECT DISTINCT carpeta_origen FROM articulo_imagenes WHERE carpeta_origen IS NOT NULL"
+    ).fetchall()}
+    c.close()
+    resultado = []
+    for grupo in _catalogo_leaf_folders():
+        if grupo["carpeta"] in ya_vinculadas:
+            continue
+        resultado.append({
+            "carpeta": grupo["carpeta"],
+            "imagenes": grupo["imagenes"],
+            "candidatos": _candidatos_articulo_por_carpeta(grupo["carpeta"])
+        })
+    return resultado
+
+@app.get("/admin/imagenes/articulo/{codigo}")
+def get_imagenes_de_articulo(codigo: str, _u=Depends(get_admin_user)):
+    c = _admin_db()
+    rows = c.execute(
+        "SELECT id, ruta_imagen, carpeta_origen, orden FROM articulo_imagenes "
+        "WHERE codigo_particular = ? ORDER BY orden, id",
+        (codigo,)
+    ).fetchall()
+    c.close()
+    return [dict(r) for r in rows]
+
+class VincularImagenesBody(BaseModel):
+    codigo_particular: str
+    carpeta: str
+
+@app.post("/admin/imagenes/vincular")
+def post_vincular_imagenes(body: VincularImagenesBody, _u=Depends(get_admin_user)):
+    base = os.path.join(CATALOGO_IMG_DIR, body.carpeta)
+    if not os.path.isdir(base):
+        raise HTTPException(404, f"Carpeta no encontrada: {body.carpeta}")
+    imgs = sorted([f for f in os.listdir(base) if f.lower().endswith(_IMG_EXTS)])
+    if not imgs:
+        raise HTTPException(400, "La carpeta no tiene imágenes")
+    c = _admin_db()
+    cur = c.cursor()
+    # orden continúa desde el máximo ya existente para ese código (por si ya tenía otras imágenes)
+    row = cur.execute("SELECT COALESCE(MAX(orden), -1) FROM articulo_imagenes WHERE codigo_particular = ?",
+                       (body.codigo_particular,)).fetchone()
+    siguiente_orden = (row[0] or -1) + 1
+    for i, img in enumerate(imgs):
+        ruta = f"{body.carpeta}/{img}"
+        cur.execute(
+            "INSERT OR IGNORE INTO articulo_imagenes (codigo_particular, ruta_imagen, carpeta_origen, orden) "
+            "VALUES (?, ?, ?, ?)",
+            (body.codigo_particular, ruta, body.carpeta, siguiente_orden + i)
+        )
+    c.commit()
+    rows = cur.execute(
+        "SELECT id, ruta_imagen, carpeta_origen, orden FROM articulo_imagenes "
+        "WHERE codigo_particular = ? ORDER BY orden, id",
+        (body.codigo_particular,)
+    ).fetchall()
+    c.close()
+    return [dict(r) for r in rows]
+
+@app.delete("/admin/imagenes/{id}")
+def delete_imagen_vinculada(id: int, _u=Depends(get_admin_user)):
+    c = _admin_db()
+    c.execute("DELETE FROM articulo_imagenes WHERE id = ?", (id,))
+    c.commit()
+    c.close()
+    return {"ok": True}
+
+@app.get("/articulo-imagenes/{codigo}")
+def get_articulo_imagenes_publico(codigo: str, _u=Depends(get_current_user)):
+    """Imágenes de un artículo para el carrusel del vendedor en pedido/presupuesto."""
+    c = _admin_db()
+    rows = c.execute(
+        "SELECT ruta_imagen FROM articulo_imagenes WHERE codigo_particular = ? ORDER BY orden, id",
+        (codigo,)
+    ).fetchall()
+    c.close()
+    return [f"/catalogo-imagenes/{urllib.parse.quote(r[0])}" for r in rows]
+
+_codigos_con_imagenes_cache = {"ts": 0, "val": None}
+_CODIGOS_CON_IMAGENES_TTL = 60
+
+@app.get("/articulos-con-imagenes")
+def get_articulos_con_imagenes(_u=Depends(get_current_user)):
+    """Set de CODIGOPARTICULAR que tienen al menos una foto vinculada — para marcar
+    en rojo el código en el pedido/presupuesto y saber si conviene mostrar el carrusel."""
+    now = time.time()
+    if _codigos_con_imagenes_cache["val"] is not None and now - _codigos_con_imagenes_cache["ts"] < _CODIGOS_CON_IMAGENES_TTL:
+        return _codigos_con_imagenes_cache["val"]
+    c = _admin_db()
+    rows = c.execute("SELECT DISTINCT codigo_particular FROM articulo_imagenes").fetchall()
+    c.close()
+    val = [r[0] for r in rows]
+    _codigos_con_imagenes_cache["ts"] = now
+    _codigos_con_imagenes_cache["val"] = val
+    return val
 
 
 @app.get("/stock/{codigo}")
@@ -5918,12 +7589,14 @@ def get_articulo(codigo: str):
     except Exception:
         cambio_usd = 1.0
     _COLS = ('SELECT a.CODIGOARTICULO, a.DESCRIPCION, a.DESCRIPCIONADICIONAL, a.CODIGOMARCA, '
-             'a.PRECIOLISTA1, a.PRECIOLISTA2, a.PRECIOLISTA3, a.PRECIOLISTA5, a.ALICUOTAIVA, a.CODIGOUNIDADMEDIDA, '
+             'a.PRECIOLISTA1, a.PRECIOLISTA2, a.PRECIOLISTA3, a.PRECIOLISTA5, a.COEFICIENTESEGUNRUBRO, a.CODIGOUNIDADMEDIDA, '
              'a.CODIGOMONEDA, a.CODIGOPARTICULAR, a.DTOMAXIMO1, a.APLICABLEABONIFICACION, '
-             'a.CODIGORUBRO, r.CODIGOSUPERRUBRO, sr.CODIGOGRUPOSUPERRUBRO, a.PERMITESTOCKNEGATIVO, a.PARTECONJUNTO '
+             'a.CODIGORUBRO, r.CODIGOSUPERRUBRO, sr.CODIGOGRUPOSUPERRUBRO, a.PERMITESTOCKNEGATIVO, a.PARTECONJUNTO, '
+             'g.DESCRIPCION, a.COEFICIENTE, r.COEFICIENTE '
              'FROM "ARTICULOS" a '
              'LEFT JOIN "RUBROS" r ON r.CODIGORUBRO = a.CODIGORUBRO '
              'LEFT JOIN "SUPERRUBROS" sr ON sr.CODIGOSUPERRUBRO = r.CODIGOSUPERRUBRO '
+             'LEFT JOIN "GRUPOSUPERRUBROS" g ON g.CODIGOGRUPOSUPERRUBRO = sr.CODIGOGRUPOSUPERRUBRO '
              'WHERE ')
     # Buscar primero por CODIGOPARTICULAR (prioridad); si no existe, por CODIGOARTICULO.
     # El OR con una sola consulta puede devolver el artículo equivocado cuando un
@@ -5936,13 +7609,17 @@ def get_articulo(codigo: str):
     if not row:
         c.close()
         raise HTTPException(404, "Artículo no encontrado")
+    if (row[19] or '').strip().upper() in ('TERCEROS', 'SERVICIOS'):
+        c.close()
+        raise HTTPException(404, "Artículo no encontrado")
     moneda = (row[10] or '').strip().upper()
     factor = cambio_usd if moneda == 'DOLARES' else 1.0
-    def conv(v): return math.ceil(float(v) * factor * 100) / 100 if v else 0
+    def conv(v): return _redondear_precio(v, factor)
     codigoarticulo = row[0]
     c.close()
-    # Remanente por depósito — paralelo + caché TTL
-    _DEPS_ART = ['001', '002', '003', '005', '013', '016']
+    # Remanente por depósito — paralelo + caché TTL. Todos los depósitos activos
+    # (antes 6 fijos, dejaba afuera depósitos nuevos como 017 SARANDI).
+    _DEPS_ART = _deps_activos()
     rem_bulk = _fma_stock_parallel(_DEPS_ART)
     cod_key = str(codigoarticulo).strip()
     rem = {dep: rem_bulk[dep].get(codigoarticulo, rem_bulk[dep].get(cod_key, 0.0))
@@ -5956,10 +7633,8 @@ def get_articulo(codigo: str):
         "descripcion": row[1], "descripcion_adicional": row[2],
         "marca": (row[3] or '').strip(),
         "precio1": conv(row[4]), "precio2": conv(row[5]), "precio3": conv(row[6]), "precio5": conv(row[7]),
-        "iva": row[8], "unidad": row[9], "moneda": row[10],
-        "remanente_001": rem['001'], "remanente_002": rem['002'],
-        "remanente_003": rem['003'], "remanente_005": rem['005'],
-        "remanente_013": rem['013'], "remanente_016": rem['016'],
+        "iva": round((float(row[21] or 0) if str(row[8] or '0').strip() == '1' else float(row[20] or 0)) * 21, 2),
+        "unidad": row[9], "moneda": row[10],
         "codigo_rubro":           (row[14] or '').strip(),
         "codigo_superrubro":      (row[15] or '').strip(),
         "codigo_gruposuperrubro": (row[16] or '').strip(),
@@ -5967,6 +7642,8 @@ def get_articulo(codigo: str):
         "permite_stock_negativo": str(row[17] or '0').strip() == '1',
         "es_conjunto": str(row[18] or '').strip().upper() == 'C'
     }
+    for _d in _DEPS_ART:
+        item[f"remanente_{_d}"] = rem[_d]
     item.pop('codigo_rubro', None)
     item.pop('codigo_superrubro', None)
     item.pop('codigo_gruposuperrubro', None)
@@ -6025,6 +7702,15 @@ def debug_cliente_iva(codigo: str, db: str = Query("oficial")):
         resultado['error_conexion'] = str(e)
     return resultado
 
+# Caché corto para /clientes — cada letra que el vendedor escribe en el buscador de
+# cliente disparaba una consulta CONTAINING nueva a Firebird (a diferencia de
+# /buscar-articulos, que desde 2026-07-31 busca contra un catálogo en memoria — ver
+# _get_catalog — los clientes no tienen ese catálogo). TTL chico porque un cliente
+# puede darse de alta o editarse en cualquier momento, pero alcanza para no repetir
+# la misma búsqueda si el vendedor borra/reescribe o navega para atrás y adelante.
+_cli_cache: dict = {}   # (vendedor, buscar, limit, offset) -> (ts, resultado_ya_armado)
+_CLI_CACHE_TTL = int(os.getenv('CLI_CACHE_TTL', 25))
+
 @app.get("/clientes")
 def get_clientes(
     vendedor: Optional[str] = None,
@@ -6033,6 +7719,12 @@ def get_clientes(
     offset: int = 0,
     _user=Depends(get_current_user)
 ):
+    _cache_key = ((vendedor or '').upper(), (buscar or '').upper(), limit, offset)
+    _now = time.time()
+    _cached = _cli_cache.get(_cache_key)
+    if _cached and (_now - _cached[0]) < _CLI_CACHE_TTL:
+        return _cached[1]
+
     params = []
     where_vendedor = ""
     if vendedor:
@@ -6061,7 +7753,7 @@ def get_clientes(
         """, params)
         rows = cur1.fetchall()
         c1.close()
-        return [{
+        resultado = [{
             "codigo": r[0], "razonsocial": r[1], "fantasia": r[2],
             "cuit":   r[3], "telefono":   r[4], "celular":  r[5],
             "email":  r[6], "direccion":  r[7], "localidad": r[8],
@@ -6075,6 +7767,12 @@ def get_clientes(
             "limitecredito": float(r[15] or 0),
             "limitecreditodoc": float(r[16] or 0),
         } for r in rows]
+        _cli_cache[_cache_key] = (_now, resultado)
+        if len(_cli_cache) > 300:
+            _oldest = sorted(_cli_cache, key=lambda k: _cli_cache[k][0])[:100]
+            for _k in _oldest:
+                _cli_cache.pop(_k, None)
+        return resultado
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error clientes: {e}")
 
@@ -6616,9 +8314,16 @@ def _query_cta(db_path, codigos, limit, offset, vendedor=None):
         pass
     return result
 
+_credito_cache: dict = {}
+_CREDITO_CACHE_TTL = int(os.getenv('CREDITO_CACHE_TTL', 25))
+
 @app.get("/clientes/{codigo}/credito")
 def get_credito_cliente(codigo: str):
     """Retorna límites de crédito y saldo deudor actual del cliente."""
+    _now_cred = time.time()
+    _cached_cred = _credito_cache.get(codigo)
+    if _cached_cred and (_now_cred - _cached_cred[0]) < _CREDITO_CACHE_TTL:
+        return _cached_cred[1]
     DB_PROD     = DATABASE      # DB-Prueba.gdb
     DB_MLT_PROD = 'c:/flexxus/DB/DB-MLT-Microbell.gdb'  # SW producción
     lim_cred = lim_doc = 0.0
@@ -6649,19 +8354,25 @@ def get_credito_cliente(codigo: str):
                 break
         except Exception as _e:
             _db_errores[db_path] = str(_e)
-    # Saldo deudor: solo CODIGOCLIENTE (nunca mezclar con CODIGOPARTICULAR en CABEZACOMPROBANTES)
+    # Saldo deudor: solo CODIGOCLIENTE (nunca mezclar con CODIGOPARTICULAR en CABEZACOMPROBANTES).
+    # DB_PROD y DB_MLT_PROD son bases Firebird DISTINTAS — se consultan en paralelo
+    # (cada una abre su propia conexión de red) en vez de una tras otra, para no sumar
+    # el costo de conexión de ambas de forma secuencial.
+    from concurrent.futures import ThreadPoolExecutor as _TPE_credito
     saldo_deudor = 0.0
     seen_sd = set()
-    for db_path in [DB_PROD, DB_MLT_PROD]:
-        try:
-            rows = _query_cta(db_path, [cod_real], 500, 0)
+    with _TPE_credito(max_workers=2) as _ex_sd:
+        _futs_sd = {_ex_sd.submit(_query_cta, db_path, [cod_real], 500, 0): db_path for db_path in [DB_PROD, DB_MLT_PROD]}
+        for _fut in _futs_sd:
+            try:
+                rows = _fut.result()
+            except Exception:
+                rows = []
             for r in rows:
                 key = (r[0], r[1])
                 if key not in seen_sd:
                     seen_sd.add(key)
                     saldo_deudor += float(r[5] or 0)
-        except Exception:
-            pass
     saldo_deudor = round(saldo_deudor, 2)
     # Pedidos "A preparar": OPERACION='1' (Flexxus setea FECHATERMINADA al confirmar,
     # no al entregar — por eso filtramos por OPERACION, no por FECHATERMINADA IS NULL).
@@ -6694,7 +8405,7 @@ def get_credito_cliente(codigo: str):
             pass
     pedidos_pendientes = round(pedidos_pendientes, 2)
     disponible_total = round(max(0, lim_cred + lim_doc - saldo_deudor - pedidos_pendientes), 2)
-    return {
+    resultado = {
         "limitecredito":      lim_cred,
         "limitecreditodoc":   lim_doc,
         "saldo_deudor":       saldo_deudor,
@@ -6707,6 +8418,12 @@ def get_credito_cliente(codigo: str):
         "_db_fuente":         _db_fuente,
         "_db_errores":        _db_errores,
     }
+    _credito_cache[codigo] = (_now_cred, resultado)
+    if len(_credito_cache) > 300:
+        _oldest = sorted(_credito_cache, key=lambda k: _credito_cache[k][0])[:100]
+        for _k in _oldest:
+            _credito_cache.pop(_k, None)
+    return resultado
 
 
 @app.get("/clientes/{codigo}/cuenta_corriente")
@@ -7388,8 +9105,13 @@ def _ventas_query(vendedor: Optional[str], cliente: Optional[str],
 
         for r in result:
             cod = r['cod_articulo']
-            # Buscar en catálogo: primero por codigoparticular, luego por código interno
-            art = cat_by_part.get(cod) or cat_by_art.get(cod) or {}
+            # Buscar en catálogo: cod es CUERPOCOMPROBANTES.CODIGOARTICULO (código
+            # interno), por eso cat_by_art tiene que probarse PRIMERO. Si se probaba
+            # cat_by_part primero, un cod interno que coincidiera por casualidad con
+            # el codigoparticular de OTRO artículo traía la jerarquía (rubro/super
+            # rubro/grupo) de ese otro artículo — bug detectado en Reactivación con
+            # un artículo de rubro JUGUETES mostrando rubro TERMOS.
+            art = cat_by_art.get(cod) or cat_by_part.get(cod) or {}
             moneda = art.get('codigomoneda', '').upper()
 
             # Costo de venta — COSTOVENTA es el total de la línea (no unitario)
@@ -7397,13 +9119,22 @@ def _ventas_query(vendedor: Optional[str], cliente: Optional[str],
             r['costo_total']    = round(r['costo_venta'], 2)
             r['costo_unitario'] = round(r['costo_venta'] / _cant, 2)
 
-            # Jerarquía de categorías
+            # Jerarquía de categorías (descripciones, para mostrar)
             gsr  = art.get('gruposuperrubro', '').upper()
             sr   = art.get('superrubro',      '').upper()
             rubr = art.get('rubro',           '').upper()
             r['gruposuperrubro'] = gsr
             r['superrubro']      = sr
             r['rubro']           = rubr
+            # Códigos (para matchear contra offer_category_filters/filtros, que
+            # guardan código — NUNCA la descripción de arriba, que es distinta).
+            r['codigo_gruposuperrubro'] = art.get('codigo_gruposuperrubro', '')
+            r['codigo_superrubro']      = art.get('codigo_superrubro', '')
+            r['codigo_rubro']           = art.get('codigo_rubro', '')
+            # No hay descripción de marca separada en el catálogo — el código de
+            # marca ya es un nombre legible (ej. "HASBRO"), se usa tal cual.
+            r['marca']                  = (art.get('codigomarca', '') or '').upper()
+            r['codigomarca']            = art.get('codigomarca', '')
 
             # Comisión: usar vendedor del comprobante con fallback al vendedor del cliente
             vend_code   = r['codigovendedor'].upper() or cliente_vend_code
@@ -7424,6 +9155,11 @@ def _ventas_query(vendedor: Optional[str], cliente: Optional[str],
             r.setdefault('gruposuperrubro', '')
             r.setdefault('superrubro', '')
             r.setdefault('rubro', '')
+            r.setdefault('codigo_gruposuperrubro', '')
+            r.setdefault('codigo_superrubro', '')
+            r.setdefault('codigo_rubro', '')
+            r.setdefault('marca', '')
+            r.setdefault('codigomarca', '')
             r.setdefault('comision_pct', 0)
             r.setdefault('comision', 0)
             r.setdefault('vendedor_nombre', '')
@@ -7452,6 +9188,1177 @@ def _ventas_query(vendedor: Optional[str], cliente: Optional[str],
             print(f"[VENTAS CATFILT ERROR] {e}")
 
     return result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  REACTIVACIÓN DE CLIENTES (admin) — /admin/reactivacion/*
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Cuentas de vendedor que NO son corredores reales (casillas internas/house accounts)
+# — nunca deben generar detección ni notificación de reactivación de clientes.
+_REACTIVACION_VENDEDORES_EXCLUIDOS = {
+    'ECOMMERCE', 'JAVIER DIPPOLITO', 'DIPPOLITO JAVIER', 'FERNANDO LAJE', 'LAJE FERNANDO',
+    'MICROBELL', 'TTC', 'ADMINISTRACION DEL SISTEMA', 'ADMINISTRADOR SISTEMA',
+    'EDUARDO MORENO', 'GRECO EMILIANO', 'MARISA EMILIANA ACOSTA', 'MAZZUCHELI GERMAN',
+    'ROSSI JUAN MANUEL', 'VENDEDOR WEB'
+}
+
+# Notas de crédito: no cuentan ni como facturación (Periodo A) ni como actividad
+# reciente (Periodo B) para este análisis — a diferencia de /ventas, que las resta
+# del neto, acá se ignoran directamente (no son una venta nueva al cliente).
+_REACTIVACION_TIPOS_NC = {'NCA', 'NCB', 'NCCA', 'NCCB', 'NCE'}
+
+
+def _reactivacion_clientes_vendedor_map() -> dict:
+    """CODIGOCLIENTE -> {vendedor, vendedor_nombre, vendedor_activo}. Se usa para
+    resolver a qué corredor pertenece cada cliente (CLIENTES.CODIGOVENDEDOR),
+    independiente de quién haya procesado cada factura histórica. Solo incluye
+    clientes cuyo vendedor asignado tiene perfil VENDEDORES y está ACTIVO en
+    Flexxus, y excluye además cuentas de _REACTIVACION_VENDEDORES_EXCLUIDOS
+    (casillas de sistema/house accounts que puedan colarse con ese perfil)."""
+    DB_PROD = 'c:/flexxus/DB/DB-Microbell.gdb'
+    out = {}
+    try:
+        c = conn('WIN1252', DB_PROD)
+        cur = c.cursor()
+        cur.execute("""
+            SELECT cl.CODIGOCLIENTE, TRIM(cl.CODIGOVENDEDOR), u.RAZONSOCIAL, u.ACTIVO, u.CODIGOPERFIL,
+                   TRIM(cl.CODIGOPARTICULAR)
+            FROM "CLIENTES" cl
+            LEFT JOIN "USUARIOS" u ON u.CODIGOUSUARIO = cl.CODIGOVENDEDOR
+            WHERE cl.ACTIVO = '1'
+        """)
+        for r in cur.fetchall():
+            cod_cli = str(r[0] or '').strip()
+            if not cod_cli:
+                continue
+            vendedor_nombre = (r[2] or '').strip()
+            vendedor_activo = str(r[3] or '0').strip() == '1'
+            vendedor_perfil = str(r[4] or '').strip().upper()
+            if vendedor_nombre.upper() in _REACTIVACION_VENDEDORES_EXCLUIDOS:
+                continue
+            if vendedor_perfil != 'VENDEDORES' or not vendedor_activo:
+                continue
+            out[cod_cli] = {
+                'vendedor':        (r[1] or '').strip().upper(),
+                'vendedor_nombre': vendedor_nombre,
+                'vendedor_activo': vendedor_activo,
+                'codigoparticular': (r[5] or '').strip() or cod_cli,
+            }
+        c.close()
+    except Exception as e:
+        print(f"[REACTIVACION] error mapa cliente->vendedor: {e}")
+    return out
+
+
+def _reactivacion_calcular(cfg: dict) -> list:
+    """Corre UN análisis de reactivación y devuelve hasta 10 clientes POR VENDEDOR
+    (no 10 en total — si el análisis cubre "Todos" los vendedores activos, cada uno
+    recibe su propio top-10, no compiten entre sí por un cupo global), cada uno con
+    importe_total (Periodo A, ya filtrado por vendedor/categoría) y su detalle línea
+    a línea (factura+artículo), para clientes que además no tuvieron NINGUNA venta
+    (de ningún rubro) en los últimos N días.
+    No persiste nada — eso lo hace el llamador (endpoint /ejecutar)."""
+    from datetime import date, timedelta
+
+    gsr           = (cfg.get('gruposuperrubro') or '').strip() or None
+    sr            = (cfg.get('superrubro') or '').strip() or None
+    rubro         = (cfg.get('rubro') or '').strip() or None
+    periodo_a_desde = (cfg.get('periodo_a_desde') or '').strip() or None
+    periodo_a_hasta = (cfg.get('periodo_a_hasta') or '').strip() or None
+    periodo_b_dias  = int(cfg.get('periodo_b_dias') or 60)
+    vendedor_filtro = (cfg.get('vendedor_codigo') or '').strip().upper() or None
+
+    fecha_b_desde = (date.today() - timedelta(days=periodo_b_dias)).isoformat()
+
+    # Periodo A: líneas de facturación filtradas por categoría (el vendedor "dueño"
+    # del cliente se resuelve aparte, vía CLIENTES.CODIGOVENDEDOR — no por quién
+    # procesó cada factura, que es lo que filtraría vendedor= en _ventas_query).
+    lineas_a = _ventas_query(vendedor=None, cliente=None,
+                              desde=periodo_a_desde, hasta=periodo_a_hasta,
+                              grupo=gsr, superrubro=sr, rubro=rubro)
+
+    clientes_vend = _reactivacion_clientes_vendedor_map()
+
+    por_cliente = {}
+    for r in lineas_a:
+        if (r.get('tipo') or '').strip().upper() in _REACTIVACION_TIPOS_NC:
+            continue  # Notas de crédito: no cuentan como facturación para este análisis
+        cod_cli = r.get('codigocliente') or ''
+        if not cod_cli:
+            continue
+        info = clientes_vend.get(cod_cli)
+        if not info or not info.get('vendedor_activo') or not info.get('vendedor'):
+            continue  # cliente sin vendedor activo asignado: fuera de alcance
+        if vendedor_filtro and info['vendedor'] != vendedor_filtro:
+            continue
+        entry = por_cliente.get(cod_cli)
+        if entry is None:
+            entry = {
+                'codigocliente':    cod_cli,
+                'codigoparticular': info.get('codigoparticular') or cod_cli,
+                'razonsocial':      r.get('razonsocial') or '',
+                'vendedor_codigo':  info['vendedor'],
+                'vendedor_nombre':  info.get('vendedor_nombre', ''),
+                'importe_total':    0.0,
+                'detalle':          [],
+            }
+            por_cliente[cod_cli] = entry
+        entry['importe_total'] += r.get('total', 0)
+        entry['detalle'].append({
+            'tipo_comprobante':      r.get('tipo', ''),
+            'numero_comprobante':    r.get('numero', ''),
+            'fecha':                 r.get('fecha', ''),
+            'codigo_articulo':       r.get('cod_articulo', ''),
+            'descripcion_articulo':  r.get('descripcion', ''),
+            'rubro':                 r.get('rubro', ''),
+            'superrubro':            r.get('superrubro', ''),
+            # Códigos (no descripción) — para matchear contra offer_category_filters
+            # y contra el catálogo de stock (codigo_rubro/codigomarca), que usan
+            # código, no la descripción de arriba.
+            'codigo_rubro':          r.get('codigo_rubro', ''),
+            'codigo_superrubro':     r.get('codigo_superrubro', ''),
+            'codigomarca':           r.get('codigomarca', ''),
+            'cantidad':              r.get('cantidad', 0),
+            'importe':               r.get('total', 0),
+        })
+
+    if not por_cliente:
+        return []
+
+    # Periodo B: actividad GLOBAL (sin filtro de categoría) — un cliente que sigue
+    # comprando otras cosas no cuenta como "inactivo", aunque haya dejado de
+    # comprar específicamente en el rubro analizado. Las notas de crédito tampoco
+    # cuentan como "actividad" (no son una compra nueva).
+    lineas_b = _ventas_query(vendedor=None, cliente=None, desde=fecha_b_desde, hasta=None)
+    clientes_activos_b = set(
+        r.get('codigocliente') for r in lineas_b
+        if r.get('codigocliente') and (r.get('tipo') or '').strip().upper() not in _REACTIVACION_TIPOS_NC
+    )
+
+    candidatos = [e for cod, e in por_cliente.items() if cod not in clientes_activos_b]
+
+    # Top 10 POR VENDEDOR, no un top-10 global — así un análisis "Todos los
+    # vendedores" le da a cada corredor sus propios 10 clientes de mayor
+    # facturación inactivos, en vez de que unos pocos vendedores con clientes
+    # grandes acaparen el único cupo de 10 de todo el análisis.
+    por_vendedor = {}
+    for e in candidatos:
+        por_vendedor.setdefault(e['vendedor_codigo'], []).append(e)
+
+    resultado = []
+    for vend_cod, lst in por_vendedor.items():
+        lst.sort(key=lambda e: e['importe_total'], reverse=True)
+        resultado.extend(lst[:10])
+
+    for e in resultado:
+        e['importe_total'] = round(e['importe_total'], 2)
+    return resultado
+
+
+def _reactivacion_ofertas_sugeridas(rubros_vistos, superrubros_vistos, codigos_articulo_vistos=None, marcas_vistas=None) -> list:
+    """Ofertas activas (admin.db) que aplican a lo que el cliente compraba antes —
+    ya sea porque el ALCANCE DE CATEGORÍA de la oferta (rubro/superrubro/marca)
+    coincide, o porque alguno de los artículos que compró está puntualmente cargado
+    en la oferta (offer_product_details) — muchas promos (ej. "Bonifacion Jugueteria")
+    se cargan por SKU y no por rubro, así que matchear solo por categoría las deja
+    afuera. Para cada oferta devuelve también el % de bonificación representativo
+    y la condición comercial asociada (con su descripción resuelta en Firebird),
+    para que el PDF pueda mostrarlo. No valida stock remanente en vivo.
+    IMPORTANTE: rubros_vistos/superrubros_vistos/marcas_vistas van por CÓDIGO
+    (codigo_rubro/codigo_superrubro/codigomarca), no por descripción."""
+    import json as _json
+    from datetime import date
+    rubros_vistos       = sorted(set(r for r in (rubros_vistos or []) if r))
+    superrubros_vistos  = sorted(set(s for s in (superrubros_vistos or []) if s))
+    marcas_vistas        = sorted(set(m for m in (marcas_vistas or []) if m))
+    codigos_articulo    = set(a for a in (codigos_articulo_vistos or []) if a)
+    if not rubros_vistos and not superrubros_vistos and not marcas_vistas and not codigos_articulo:
+        return []
+    # offer_product_details.codigo_producto se carga como CODIGOPARTICULAR (así lo
+    # guarda el buscador de artículos del modal de Ofertas), mientras que
+    # codigos_articulo acá viene del CODIGOARTICULO interno (CUERPOCOMPROBANTES) —
+    # son esquemas de código distintos que pueden coincidir por casualidad (mismo
+    # bug de colisión que en _ventas_query). Traducimos a codigoparticular antes de
+    # matchear para no sugerir ofertas de un artículo distinto al que compró.
+    if codigos_articulo:
+        try:
+            catalog, _ = _get_catalog()
+            traducidos = set()
+            for cod in codigos_articulo:
+                art = catalog.get(cod)
+                traducidos.add((art.get('codigoparticular') or cod) if art else cod)
+            codigos_articulo = traducidos
+        except Exception:
+            pass
+    hoy = date.today().isoformat()
+    c = _admin_db()
+    ofertas_activas = c.execute("""
+        SELECT id, nombre, descripcion, fecha_hasta, financial_escalones
+        FROM offers
+        WHERE activo = 1 AND (fecha_hasta = '' OR fecha_hasta IS NULL OR fecha_hasta >= ?)
+    """, (hoy,)).fetchall()
+
+    matched = {}  # offer_id -> dict base
+    if rubros_vistos or superrubros_vistos or marcas_vistas:
+        conds, params = [], []
+        if rubros_vistos:
+            conds.append(f"(f.nivel='rubro' AND f.valor IN ({','.join('?'*len(rubros_vistos))}))")
+            params += rubros_vistos
+        if superrubros_vistos:
+            conds.append(f"(f.nivel='superrubro' AND f.valor IN ({','.join('?'*len(superrubros_vistos))}))")
+            params += superrubros_vistos
+        if marcas_vistas:
+            conds.append(f"(f.nivel='marca' AND f.valor IN ({','.join('?'*len(marcas_vistas))}))")
+            params += marcas_vistas
+        for r in c.execute(f"""
+            SELECT DISTINCT offer_id FROM offer_category_filters f WHERE {' OR '.join(conds)}
+        """, params).fetchall():
+            matched[r['offer_id']] = None
+
+    prod_pct_por_oferta = {}  # offer_id -> lista de bonificacion_pct de artículos que el cliente compró
+    if codigos_articulo:
+        ph = ','.join('?' * len(codigos_articulo))
+        for r in c.execute(f"""
+            SELECT offer_id, codigo_producto, bonificacion_pct FROM offer_product_details
+            WHERE codigo_producto IN ({ph})
+        """, list(codigos_articulo)).fetchall():
+            matched[r['offer_id']] = None
+            prod_pct_por_oferta.setdefault(r['offer_id'], []).append(r['bonificacion_pct'] or 0)
+
+    if not matched:
+        c.close()
+        return []
+
+    # Condición comercial cargada directo en la oferta (offer_conditions) — fallback
+    # si el escalón financiero no trae una propia.
+    cond_por_oferta = {}
+    ids = list(matched.keys())
+    ph_ids = ','.join('?' * len(ids))
+    for r in c.execute(f"SELECT offer_id, condicion_comercial FROM offer_conditions WHERE offer_id IN ({ph_ids})", ids).fetchall():
+        cond_por_oferta.setdefault(r['offer_id'], r['condicion_comercial'])
+    c.close()
+
+    resultado = []
+    codigos_condicion = set()
+    for o in ofertas_activas:
+        oid = o['id']
+        if oid not in matched:
+            continue
+        pct = 0.0
+        cond_codigo = cond_por_oferta.get(oid)
+        escalones_info = []
+        fe_raw = o['financial_escalones']
+        if fe_raw:
+            try:
+                escalones = _json.loads(fe_raw)
+                if escalones:
+                    # Se informan TODOS los escalones (no solo el más accesible) — cada
+                    # uno con su propio monto mínimo y % acumulado, para que el vendedor
+                    # sepa qué gana en cada nivel de facturación, no solo en el primero.
+                    escalones = sorted(escalones, key=lambda e: e.get('monto_minimo', 0))
+                    for esc in escalones:
+                        escalones_info.append({
+                            'monto_minimo': esc.get('monto_minimo', 0),
+                            'porcentajes': [float(p) for p in (esc.get('porcentajes') or [])],
+                            'condicion_comercial': esc.get('condicion_comercial'),
+                        })
+                        if esc.get('condicion_comercial'):
+                            codigos_condicion.add(str(esc['condicion_comercial']))
+                    if escalones[0].get('condicion_comercial'):
+                        cond_codigo = escalones[0]['condicion_comercial']
+            except Exception:
+                pass
+        if not escalones_info and prod_pct_por_oferta.get(oid):
+            pct = round(max(prod_pct_por_oferta[oid]), 2)
+        if cond_codigo:
+            codigos_condicion.add(str(cond_codigo))
+        resultado.append({
+            'id': oid, 'nombre': o['nombre'], 'descripcion': o['descripcion'],
+            'fecha_hasta': o['fecha_hasta'], 'bonificacion_pct': pct, 'escalones': escalones_info,
+            'condicion_codigo': cond_codigo, 'condicion_desc': None,
+        })
+
+    # Resolver descripción de las condiciones comerciales en Firebird (una sola conexión)
+    if codigos_condicion:
+        try:
+            fb = conn('WIN1252')
+            cur = fb.cursor()
+            ph = ','.join('?' * len(codigos_condicion))
+            desc_map = {}
+            cur.execute(f'SELECT CODIGOMULTIPLAZO, DESCRIPCION FROM "MULTIPLAZOS" WHERE CODIGOMULTIPLAZO IN ({ph})', list(codigos_condicion))
+            for row in cur.fetchall():
+                desc_map[str(row[0]).strip()] = str(row[1] or '').strip()
+            fb.close()
+            for o in resultado:
+                if o['condicion_codigo']:
+                    o['condicion_desc'] = desc_map.get(str(o['condicion_codigo']).strip())
+                for esc in o.get('escalones') or []:
+                    if esc.get('condicion_comercial'):
+                        esc['condicion_desc'] = desc_map.get(str(esc['condicion_comercial']).strip())
+        except Exception:
+            pass
+
+    return resultado
+
+
+def _reactivacion_generar_pdf(analisis_nombre: str, vendedor_nombre: str, clientes: list, ofertas_sugeridas: list,
+                               periodo_a_desde: str = None, periodo_a_hasta: str = None,
+                               descuento_pct: float = 0, oferta_vencimiento: str = None,
+                               periodo_b_dias: int = None, disponibilidad: dict = None,
+                               descuento_monto_minimo: float = 0) -> bytes:
+    """PDF para el corredor: código, razón social e importe total neto facturado por
+    cliente (orden desc) + por cada cliente con stock disponible, el detalle de esos
+    artículos (código/descripción/remanente/bonificación %, si tiene) con aviso de
+    urgencia porque el stock no está reservado + sección de ofertas generales
+    sugeridas + párrafo de descuento adicional propio de este análisis (solo si se
+    cargó uno). El detalle completo de facturas queda en el modal de auditoría."""
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.lib import colors
+    from reportlab.lib.styles import ParagraphStyle
+    from io import BytesIO
+
+    def _ddmmyyyy(s):
+        s = (s or '').strip()
+        if not s:
+            return None
+        try:
+            return datetime.strptime(s[:10], '%Y-%m-%d').strftime('%d/%m/%Y')
+        except Exception:
+            return s  # ya viene en otro formato: se muestra tal cual antes que romper
+
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=15*mm, rightMargin=15*mm, topMargin=12*mm, bottomMargin=12*mm)
+    azul = colors.HexColor('#1e429f')
+    AR = lambda v: f"{float(v or 0):,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
+    sTit = ParagraphStyle('tit', fontSize=13, fontName='Helvetica-Bold', leading=16)
+    sSub = ParagraphStyle('sub', fontSize=9,  fontName='Helvetica',      leading=12)
+    sHdr = ParagraphStyle('hdr', fontSize=8,  fontName='Helvetica-Bold', textColor=colors.white, leading=10)
+
+    story = []
+    if os.path.exists(LOGO_PATH):
+        story.append(Image(LOGO_PATH, width=38*mm, height=12*mm, kind='proportional'))
+    story.append(Spacer(1, 6))
+    story.append(Paragraph(f'Reactivación de clientes — {analisis_nombre}', sTit))
+    story.append(Paragraph(f'Vendedor: {vendedor_nombre}', sSub))
+    story.append(Paragraph(f'Emitido: {datetime.now().strftime("%d/%m/%Y %H:%M")}', sSub))
+    story.append(Spacer(1, 10))
+
+    primer_nombre = (vendedor_nombre or '').split(' ')[0].title()
+    if periodo_a_desde or periodo_a_hasta:
+        periodo_txt = f'el período {_ddmmyyyy(periodo_a_desde) or "…"} a {_ddmmyyyy(periodo_a_hasta) or "…"}'
+    else:
+        periodo_txt = 'toda la historia'
+    inactividad_txt = f'en los últimos {int(periodo_b_dias)} días' if periodo_b_dias else 'en el período de inactividad analizado'
+    story.append(Paragraph(
+        f'Estimado {primer_nombre}: observamos que en {periodo_txt} se registraron ventas a los '
+        f'siguientes clientes tuyos, que no registran operaciones {inactividad_txt}. '
+        'Te dejamos el detalle:', sSub))
+    story.append(Spacer(1, 10))
+
+    data = [[Paragraph('Código', sHdr), Paragraph('Cliente', sHdr), Paragraph('Facturación total', sHdr)]]
+    for cl in clientes:
+        data.append([cl.get('codigoparticular') or cl['codigocliente'], cl['razonsocial'], f"${AR(cl['importe_total'])}"])
+    t = Table(data, colWidths=[30*mm, 100*mm, 50*mm])
+    t.setStyle(TableStyle([
+        ('BACKGROUND',      (0,0), (-1,0), azul),
+        ('FONTNAME',        (0,1), (-1,-1), 'Helvetica'),
+        ('FONTSIZE',        (0,0), (-1,-1), 9),
+        ('ALIGN',           (2,0), (2,-1), 'RIGHT'),
+        ('GRID',            (0,0), (-1,-1), 0.3, colors.HexColor('#d1d5db')),
+        ('ROWBACKGROUNDS',  (0,1), (-1,-1), [colors.white, colors.HexColor('#f3f4f6')]),
+        ('TOPPADDING',      (0,0), (-1,-1), 4),
+        ('BOTTOMPADDING',   (0,0), (-1,-1), 4),
+    ]))
+    story.append(t)
+    story.append(Spacer(1, 10))
+
+    # Por cliente, artículos con stock disponible AHORA (remanente real, no
+    # reservado) dentro de los mismos rubros que ya le compraba — no se limita a
+    # los SKU puntuales facturados antes, para ofrecer variedad real.
+    disponibilidad = disponibilidad or {}
+    clientes_con_stock = [cl for cl in clientes if disponibilidad.get(cl['codigocliente'])]
+    if clientes_con_stock:
+        # Lista única de artículos (no se repite por cliente ni se muestra el
+        # cliente): solo código, descripción, precio unit. y bonificación activa,
+        # sin la cantidad de remanente.
+        vistos = {}
+        for cl in clientes_con_stock:
+            for it in disponibilidad[cl['codigocliente']]:
+                if it['codigo'] not in vistos:
+                    vistos[it['codigo']] = it
+        items_unicos = sorted(vistos.values(), key=lambda x: (-(x.get('bonificacion_pct') or 0), x['descripcion']))
+
+        story.append(Paragraph('Artículos con stock disponible para ofrecerles ya mismo', ParagraphStyle(
+            'h2', fontSize=10, fontName='Helvetica-Bold', textColor=azul, leading=13)))
+        story.append(Paragraph(
+            'Urgente: este remanente no está reservado — se puede agotar por otras ventas antes de que '
+            'contactes al cliente. Si el artículo tiene bonificación activa, se pierde la oportunidad si no '
+            'se concreta a tiempo.', ParagraphStyle('warn', fontSize=8.5, fontName='Helvetica-Oblique',
+                                                     textColor=colors.HexColor('#b91c1c'), leading=11)))
+        story.append(Spacer(1, 6))
+        for it in items_unicos:
+            partes = [f"{it['codigo']} — {it['descripcion']}", f"precio unit. ${AR(it['precio'])}"]
+            if it.get('bonificacion_pct'):
+                partes.append(f"bonificación activa {it['bonificacion_pct']:g}%")
+            story.append(Paragraph('&nbsp;&nbsp;• ' + ' — '.join(partes), sSub))
+        story.append(Spacer(1, 6))
+
+    story.append(Paragraph(
+        'Te sugerimos volver a comunicarte con ellos. Te informamos que contamos con las siguientes '
+        'promociones vigentes para ofrecerles:' if ofertas_sugeridas else
+        'Te sugerimos volver a comunicarte con ellos.', sSub))
+
+    if ofertas_sugeridas:
+        story.append(Spacer(1, 6))
+        for o in ofertas_sugeridas:
+            vto = _ddmmyyyy(o.get('fecha_hasta')) or 'sin vencimiento'
+            desc = o.get('descripcion') or ''
+            escalones = o.get('escalones') or []
+            partes = [f'<b>{o["nombre"]}</b>']
+            if desc:
+                partes.append(desc)
+            if not escalones and o.get('bonificacion_pct'):
+                partes.append(f'bonificación {o["bonificacion_pct"]:g}%')
+            if o.get('condicion_desc'):
+                partes.append(f'condición de venta: {o["condicion_desc"]}')
+            partes.append(f'vigente hasta {vto}')
+            story.append(Paragraph('• ' + ' — '.join(partes), sSub))
+            # Escalones por monto mínimo de facturación neta: se informa CADA nivel
+            # (no solo el más accesible), con el % acumulado de ese nivel — ej. primer
+            # escalón 5%, segundo escalón 5%+5%, etc.
+            for i, esc in enumerate(escalones, start=1):
+                pcts_txt = '+'.join(f'{p:g}%' for p in (esc.get('porcentajes') or [])) or '0%'
+                esc_cond = f", condición: {esc['condicion_desc']}" if esc.get('condicion_desc') else ''
+                story.append(Paragraph(
+                    f'&nbsp;&nbsp;&nbsp;&nbsp;– Escalón {i}: {pcts_txt} de descuento a partir de '
+                    f'${AR(esc.get("monto_minimo"))} de neto facturado{esc_cond}', sSub))
+
+    if descuento_pct and float(descuento_pct) > 0:
+        story.append(Spacer(1, 10))
+        minimo_txt = (f' y alcanza el mínimo de facturación de ${AR(descuento_monto_minimo)}'
+                      if descuento_monto_minimo and float(descuento_monto_minimo) > 0 else '')
+        texto_bonif = (
+            f'Si alcanza los objetivos previstos en las Listas informadas{minimo_txt}, podés ofrecerle a estos '
+            f'clientes una bonificación adicional: hasta el {_ddmmyyyy(oferta_vencimiento) or "—"}, el cliente '
+            f'obtiene un {float(descuento_pct):g}% de descuento sobre el total neto facturado.'
+        )
+        box_style = ParagraphStyle('box', fontSize=9.5, fontName='Helvetica-Bold',
+                                    textColor=colors.HexColor('#065f46'), leading=13)
+        box = Table([[Paragraph(texto_bonif, box_style)]], colWidths=[180*mm])
+        box.setStyle(TableStyle([
+            ('BOX',        (0,0), (-1,-1), 1.2, colors.HexColor('#059669')),
+            ('BACKGROUND', (0,0), (-1,-1), colors.HexColor('#ecfdf5')),
+            ('TOPPADDING',    (0,0), (-1,-1), 8),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 8),
+            ('LEFTPADDING',   (0,0), (-1,-1), 10),
+            ('RIGHTPADDING',  (0,0), (-1,-1), 10),
+        ]))
+        story.append(box)
+
+    doc.build(story)
+    buf.seek(0)
+    return buf.read()
+
+
+def _reactivacion_enviar_email(destinatario: str, asunto: str, cuerpo: str, pdf_bytes: bytes, pdf_filename: str) -> bool:
+    if not SMTP_HOST or not destinatario:
+        return False
+    msg = MIMEMultipart()
+    msg["From"] = SMTP_FROM or SMTP_USER
+    msg["To"] = destinatario
+    msg["Subject"] = asunto
+    msg.attach(MIMEText(cuerpo, "plain", "utf-8"))
+    part = MIMEBase("application", "octet-stream")
+    part.set_payload(pdf_bytes)
+    encoders.encode_base64(part)
+    part.add_header("Content-Disposition", "attachment", filename=pdf_filename)
+    msg.attach(part)
+    raw = msg.as_bytes()
+    remitente = msg["From"]
+    try:
+        if SMTP_PORT == 465:
+            with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=20) as srv:
+                srv.login(SMTP_USER, SMTP_PASS)
+                srv.sendmail(remitente, [destinatario], raw)
+        else:
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as srv:
+                srv.ehlo(); srv.starttls()
+                srv.login(SMTP_USER, SMTP_PASS)
+                srv.sendmail(remitente, [destinatario], raw)
+        return True
+    except Exception as e:
+        print(f"[REACTIVACION] error enviando mail a {destinatario}: {e}")
+        return False
+
+
+def _reactivacion_disponibilidad_stock(clientes: list, vendedor_codigo: str) -> dict:
+    """Para cada cliente detectado, arma la lista de artículos CON STOCK disponible
+    en los depósitos alcanzados por este vendedor (remanente real, no reservado),
+    dentro del/los mismo(s) RUBRO(S) y MARCA(S) que el cliente ya compraba (unión de
+    ambos criterios) — no se limita a los SKU puntuales que facturó antes, para
+    ofrecerle variedad real de todo lo que hay disponible, no siempre lo mismo.
+    Incluye precio unitario (Lista 1) y bonificación % activa si el SKU está en
+    alguna oferta vigente. Devuelve
+    {codigocliente: [{codigo, descripcion, precio, stock, bonificacion_pct}, ...]}
+    (máx. 8 artículos por cliente, priorizando bonificación activa y mayor stock)."""
+    from datetime import date
+    try:
+        flags = get_flags_for_vendor(vendedor_codigo)
+    except Exception:
+        flags = {}
+    dep_exclusivo = (flags.get('deposito_exclusivo') or '').strip()
+    dep_lista = [d.strip() for d in dep_exclusivo.split(',') if d.strip()] if dep_exclusivo else \
+        ['001', '002', '003', '005', '013', '016']  # sin restricción configurada → depósitos habituales
+    if not dep_lista:
+        return {cl['codigocliente']: [] for cl in clientes}
+
+    try:
+        catalog, cambio_usd = _get_catalog()
+        fma_data = _fma_stock_parallel(dep_lista)
+    except Exception:
+        return {cl['codigocliente']: [] for cl in clientes}
+
+    # Bonificación activa por codigoparticular (mismo criterio de vigencia que
+    # _reactivacion_ofertas_sugeridas).
+    hoy = date.today().isoformat()
+    bonif_por_sku = {}
+    try:
+        cdb = _admin_db()
+        for r in cdb.execute("""
+            SELECT pd.codigo_producto, pd.bonificacion_pct FROM offer_product_details pd
+            JOIN offers o ON o.id = pd.offer_id
+            WHERE o.activo=1 AND (o.fecha_hasta='' OR o.fecha_hasta IS NULL OR o.fecha_hasta>=?)
+              AND pd.bonificacion_pct > 0
+        """, (hoy,)).fetchall():
+            bonif_por_sku[r['codigo_producto']] = max(bonif_por_sku.get(r['codigo_producto'], 0), r['bonificacion_pct'])
+        cdb.close()
+    except Exception:
+        pass
+
+    # Una sola pasada del catálogo: indexado por rubro Y por marca (código), todos
+    # los artículos con stock>0 en los depósitos de este vendedor — independiente de
+    # si el cliente compró ESE SKU puntual antes.
+    por_rubro = {}
+    por_marca = {}
+    for art_id, art in catalog.items():
+        stock = sum(fma_data.get(dep, {}).get(art_id, 0) for dep in dep_lista)
+        if stock <= 0:
+            continue
+        factor = cambio_usd if (art.get('codigomoneda') or '').upper() == 'DOLARES' else 1.0
+        precio = _redondear_precio(art.get('precio1', 0), factor)
+        cod_part = art.get('codigoparticular') or art_id
+        item = {
+            'codigo': cod_part,
+            'descripcion': art.get('descripcion', ''),
+            'precio': precio,
+            'stock': stock,
+            'bonificacion_pct': bonif_por_sku.get(cod_part, 0),
+        }
+        rubro_cod = art.get('codigo_rubro')
+        if rubro_cod:
+            por_rubro.setdefault(rubro_cod, []).append(item)
+        marca_cod = art.get('codigomarca')
+        if marca_cod:
+            por_marca.setdefault(marca_cod, []).append(item)
+
+    resultado = {}
+    for cl in clientes:
+        rubros_cliente = {d.get('codigo_rubro') for d in cl.get('detalle', []) if d.get('codigo_rubro')}
+        marcas_cliente = {d.get('codigomarca') for d in cl.get('detalle', []) if d.get('codigomarca')}
+        vistos = set()
+        items = []
+        for rc in rubros_cliente:
+            for it in por_rubro.get(rc, []):
+                if it['codigo'] in vistos:
+                    continue
+                vistos.add(it['codigo']); items.append(it)
+        for mc in marcas_cliente:
+            for it in por_marca.get(mc, []):
+                if it['codigo'] in vistos:
+                    continue
+                vistos.add(it['codigo']); items.append(it)
+        items.sort(key=lambda x: (-x['bonificacion_pct'], -x['stock']))
+        resultado[cl['codigocliente']] = items[:8]
+    return resultado
+
+
+def _reactivacion_notificar(cfg: dict, candidatos: list) -> dict:
+    """Agrupa los clientes detectados por vendedor, genera UN pdf consolidado por
+    vendedor, lo manda por mail (adjunto) y avisa por WhatsApp (best-effort, requiere
+    plantilla ya aprobada por Meta — ver /admin/wa/crear-plantilla-reactivacion).
+    Devuelve {vendedor_codigo: {'mail_ok':bool,'wa_ok':bool}} para marcar estado."""
+    analisis_nombre = cfg['nombre']
+    por_vend = {}
+    for cand in candidatos:
+        por_vend.setdefault(cand['vendedor_codigo'], []).append(cand)
+
+    c = _admin_db()
+    contactos = {r['codigo']: dict(r) for r in c.execute(
+        "SELECT * FROM vendedores_contacto WHERE activo=1").fetchall()}
+    c.close()
+
+    resultado = {}
+    for vend_cod, clientes in por_vend.items():
+        vend_nombre = clientes[0]['vendedor_nombre']
+        contacto = contactos.get(vend_cod)
+        rubros, superrubros, marcas, codigos_articulo = [], [], [], []
+        for cl in clientes:
+            for d in cl.get('detalle', []):
+                if d.get('codigo_rubro'): rubros.append(d['codigo_rubro'])
+                if d.get('codigo_superrubro'): superrubros.append(d['codigo_superrubro'])
+                if d.get('codigomarca'): marcas.append(d['codigomarca'])
+                if d.get('codigo_articulo'): codigos_articulo.append(d['codigo_articulo'])
+        ofertas = _reactivacion_ofertas_sugeridas(rubros, superrubros, codigos_articulo, marcas)
+        try:
+            disponibilidad = _reactivacion_disponibilidad_stock(clientes, vend_cod)
+        except Exception as e:
+            print(f"[REACTIVACION] error calculando disponibilidad de stock: {e}")
+            disponibilidad = {}
+        pdf_bytes = _reactivacion_generar_pdf(
+            analisis_nombre, vend_nombre, clientes, ofertas,
+            periodo_a_desde=cfg.get('periodo_a_desde'), periodo_a_hasta=cfg.get('periodo_a_hasta'),
+            descuento_pct=cfg.get('descuento_pct') or 0, oferta_vencimiento=cfg.get('oferta_vencimiento'),
+            periodo_b_dias=cfg.get('periodo_b_dias'), disponibilidad=disponibilidad,
+            descuento_monto_minimo=cfg.get('descuento_monto_minimo') or 0)
+
+        mail_ok = False
+        if contacto and contacto.get('mail'):
+            cuerpo = (f"Hola {vend_nombre},\n\n"
+                      f"Adjuntamos el detalle de {len(clientes)} cliente(s) con alta facturación "
+                      f"histórica que no registran ventas en el período analizado.\n\n"
+                      f"Saludos,\nMicrobell S.A.")
+            mail_ok = _reactivacion_enviar_email(
+                contacto['mail'], f"Reactivación de clientes — {analisis_nombre}",
+                cuerpo, pdf_bytes, f"reactivacion_{vend_cod}.pdf")
+
+        wa_ok = False
+        wa_err = ''
+        if contacto and contacto.get('celular'):
+            wa_ok, wa_err = _send_whatsapp_reactivacion(contacto['celular'], vend_nombre, len(clientes))
+        elif contacto:
+            wa_err = 'sin celular cargado en Contactos de Vendedores'
+
+        resultado[vend_cod] = {'mail_ok': mail_ok, 'wa_ok': wa_ok, 'wa_err': wa_err}
+    return resultado
+
+
+class ReactivacionAnalisisBody(BaseModel):
+    nombre: str
+    vendedor_codigo: Optional[str] = ''
+    gruposuperrubro: Optional[str] = ''
+    superrubro: Optional[str] = ''
+    rubro: Optional[str] = ''
+    periodo_a_desde: Optional[str] = ''
+    periodo_a_hasta: Optional[str] = ''
+    periodo_b_dias: int = 60
+    descuento_pct: float = 0
+    oferta_vencimiento: Optional[str] = ''
+    descuento_monto_minimo: float = 0
+    condicion_comercial_extra: Optional[str] = ''
+    dia_semana: int = 0
+    hora: str = '09:00'
+    activo: int = 1
+
+
+@app.get("/admin/reactivacion")
+def reactivacion_listar(_u=Depends(get_admin_user)):
+    c = _admin_db()
+    rows = c.execute("SELECT * FROM reactivacion_analisis ORDER BY id DESC").fetchall()
+    c.close()
+    return [dict(r) for r in rows]
+
+
+@app.post("/admin/reactivacion")
+def reactivacion_crear(body: ReactivacionAnalisisBody, _u=Depends(get_admin_user)):
+    c = _admin_db()
+    cur = c.cursor()
+    cur.execute("""
+        INSERT INTO reactivacion_analisis
+            (nombre, vendedor_codigo, gruposuperrubro, superrubro, rubro,
+             periodo_a_desde, periodo_a_hasta, periodo_b_dias,
+             descuento_pct, oferta_vencimiento, descuento_monto_minimo, condicion_comercial_extra, dia_semana, hora, activo)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    """, (body.nombre, body.vendedor_codigo, body.gruposuperrubro, body.superrubro, body.rubro,
+          body.periodo_a_desde, body.periodo_a_hasta, body.periodo_b_dias,
+          body.descuento_pct, body.oferta_vencimiento, body.descuento_monto_minimo, body.condicion_comercial_extra, body.dia_semana, body.hora, body.activo))
+    new_id = cur.lastrowid
+    c.commit(); c.close()
+    return {"id": new_id}
+
+
+@app.put("/admin/reactivacion/{analisis_id}")
+def reactivacion_editar(analisis_id: int, body: ReactivacionAnalisisBody, _u=Depends(get_admin_user)):
+    c = _admin_db()
+    cur = c.cursor()
+    cur.execute("""
+        UPDATE reactivacion_analisis SET
+            nombre=?, vendedor_codigo=?, gruposuperrubro=?, superrubro=?, rubro=?,
+            periodo_a_desde=?, periodo_a_hasta=?, periodo_b_dias=?,
+            descuento_pct=?, oferta_vencimiento=?, descuento_monto_minimo=?, condicion_comercial_extra=?, dia_semana=?, hora=?, activo=?
+        WHERE id=?
+    """, (body.nombre, body.vendedor_codigo, body.gruposuperrubro, body.superrubro, body.rubro,
+          body.periodo_a_desde, body.periodo_a_hasta, body.periodo_b_dias,
+          body.descuento_pct, body.oferta_vencimiento, body.descuento_monto_minimo, body.condicion_comercial_extra, body.dia_semana, body.hora, body.activo,
+          analisis_id))
+    if cur.rowcount == 0:
+        c.close()
+        raise HTTPException(404, "Análisis no encontrado")
+    c.commit(); c.close()
+    return {"ok": True}
+
+
+@app.delete("/admin/reactivacion/{analisis_id}")
+def reactivacion_borrar(analisis_id: int, _u=Depends(get_admin_user)):
+    c = _admin_db()
+    cur = c.cursor()
+    cur.execute("DELETE FROM reactivacion_analisis WHERE id=?", (analisis_id,))
+    c.commit(); c.close()
+    return {"ok": True}
+
+
+def _reactivacion_matched_offer_ids(c, rubros_vistos, superrubros_vistos, codigos_articulo, marcas_vistas=None) -> list:
+    """Devuelve los ids de oferta activa que matchean por categoría (offer_category_filters,
+    incluye rubro/superrubro/marca) o por SKU puntual (offer_product_details) — misma
+    lógica de _reactivacion_ofertas_sugeridas, extraída acá para reutilizarla también al
+    vincular el cliente de recupero. Traduce codigos_articulo (interno) a codigoparticular
+    antes de matchear por SKU. IMPORTANTE: rubros_vistos/superrubros_vistos/marcas_vistas
+    tienen que ser CÓDIGOS (codigo_rubro/codigo_superrubro/codigomarca), no la descripción."""
+    marcas_vistas = marcas_vistas or []
+    matched = set()
+    if rubros_vistos or superrubros_vistos or marcas_vistas:
+        conds, params = [], []
+        if rubros_vistos:
+            conds.append(f"(f.nivel='rubro' AND f.valor IN ({','.join('?'*len(rubros_vistos))}))")
+            params += list(rubros_vistos)
+        if superrubros_vistos:
+            conds.append(f"(f.nivel='superrubro' AND f.valor IN ({','.join('?'*len(superrubros_vistos))}))")
+            params += list(superrubros_vistos)
+        if marcas_vistas:
+            conds.append(f"(f.nivel='marca' AND f.valor IN ({','.join('?'*len(marcas_vistas))}))")
+            params += list(marcas_vistas)
+        for r in c.execute(f"SELECT DISTINCT offer_id FROM offer_category_filters f WHERE {' OR '.join(conds)}", params).fetchall():
+            matched.add(r['offer_id'])
+    if codigos_articulo:
+        try:
+            catalog, _ = _get_catalog()
+            traducidos = set()
+            for cod in codigos_articulo:
+                art = catalog.get(cod)
+                traducidos.add((art.get('codigoparticular') or cod) if art else cod)
+        except Exception:
+            traducidos = set(codigos_articulo)
+        if traducidos:
+            ph = ','.join('?' * len(traducidos))
+            for r in c.execute(f"SELECT DISTINCT offer_id FROM offer_product_details WHERE codigo_producto IN ({ph})", list(traducidos)).fetchall():
+                matched.add(r['offer_id'])
+    if not matched:
+        return []
+    ph_ids = ','.join('?' * len(matched))
+    ids_activas = {r['id'] for r in c.execute(
+        f"SELECT id FROM offers WHERE id IN ({ph_ids}) AND activo=1", list(matched)).fetchall()}
+    return [i for i in matched if i in ids_activas]
+
+
+def _reactivacion_vincular_cliente_recupero(cfg: dict, cand: dict) -> list:
+    """'Recupero de cartera': en vez de crear una oferta aparte, guarda el % de
+    descuento adicional + vencimiento DENTRO de la(s) oferta(s) de categoría que ya
+    le aplican a este cliente (Jugueteria/Outdoors/Tecnologia/etc, según lo que
+    compró) — como una fila extra en offer_clients de ESA oferta. El % solo se
+    inyecta en /ofertas dentro del escalón ya alcanzado (ver get_ofertas_for_vendor) —
+    nunca destraba el escalón por sí solo. Devuelve la lista de offer_ids vinculados
+    (vacía si no hay descuento cargado o no matcheó ninguna oferta existente)."""
+    descuento_pct = float(cfg.get('descuento_pct') or 0)
+    condicion_extra = (cfg.get('condicion_comercial_extra') or '').strip()
+    # La recompensa puede ser % de descuento, condición comercial distinta, o ambas a
+    # la vez — no son excluyentes (así se puede reactivar con una condición de venta
+    # distinta cuando el % queda en 0, o sumar las dos cosas si corresponde).
+    tipo_cartera = 'ambos' if (descuento_pct > 0 and condicion_extra) else ('condicion' if condicion_extra else 'descuento')
+    if descuento_pct <= 0 and not condicion_extra:
+        return []
+    rubros, superrubros, marcas, codigos_articulo = [], [], [], []
+    for d in cand.get('detalle', []):
+        if d.get('codigo_rubro'): rubros.append(d['codigo_rubro'])
+        if d.get('codigo_superrubro'): superrubros.append(d['codigo_superrubro'])
+        if d.get('codigomarca'): marcas.append(d['codigomarca'])
+        if d.get('codigo_articulo'): codigos_articulo.append(d['codigo_articulo'])
+    c = _admin_db()
+    offer_ids = _reactivacion_matched_offer_ids(c, rubros, superrubros, codigos_articulo, marcas)
+    if not offer_ids:
+        c.close()
+        return []
+    monto_minimo_extra = float(cfg.get('descuento_monto_minimo') or 0)
+    for oid in offer_ids:
+        c.execute("""
+            INSERT INTO offer_clients (offer_id, codigocliente, razonsocial, descuento_extra_pct, vencimiento_extra, monto_minimo_extra, tipo_cartera, condicion_comercial_extra)
+            VALUES (?,?,?,?,?,?,?,?)
+            ON CONFLICT(offer_id, codigocliente) DO UPDATE SET
+                razonsocial=excluded.razonsocial,
+                descuento_extra_pct=excluded.descuento_extra_pct,
+                vencimiento_extra=excluded.vencimiento_extra,
+                monto_minimo_extra=excluded.monto_minimo_extra,
+                tipo_cartera=excluded.tipo_cartera,
+                condicion_comercial_extra=excluded.condicion_comercial_extra
+        """, (oid, cand['codigocliente'], cand['razonsocial'],
+              descuento_pct,
+              cfg.get('oferta_vencimiento') or '', monto_minimo_extra,
+              tipo_cartera, condicion_extra))
+    c.commit()
+    c.close()
+    return offer_ids
+
+
+def _reactivacion_ejecutar_analisis(analisis_id: int) -> dict:
+    """Lógica compartida por el endpoint manual y el scheduler automático."""
+    c = _admin_db()
+    row = c.execute("SELECT * FROM reactivacion_analisis WHERE id=?", (analisis_id,)).fetchone()
+    if not row:
+        c.close()
+        raise HTTPException(404, "Análisis no encontrado")
+    cfg = dict(row)
+
+    # Oferta especial vencida: se cierra la campaña — se sigue registrando el
+    # detectado para auditoría, pero no se vuelve a notificar a nadie.
+    oferta_vencida = bool(cfg.get('oferta_vencimiento')) and datetime.now().date().isoformat() > cfg['oferta_vencimiento']
+    if oferta_vencida:
+        c.execute("""
+            UPDATE reactivacion_resultados SET estado='cerrado'
+            WHERE analisis_id=? AND estado IN ('pendiente','notificado')
+        """, (analisis_id,))
+
+    candidatos = _reactivacion_calcular(cfg)
+
+    errores = []  # se persisten en reactivacion_analisis.ultimo_error para poder
+                  # diagnosticar sin necesitar acceso a la consola del servidor.
+
+    fecha_corrida = datetime.now().isoformat(timespec='seconds')
+    cur = c.cursor()
+    for cand in candidatos:
+        cur.execute("""
+            INSERT INTO reactivacion_resultados
+                (analisis_id, fecha_corrida, codigocliente, codigoparticular, razonsocial,
+                 vendedor_codigo, vendedor_nombre, importe_total, estado)
+            VALUES (?,?,?,?,?,?,?,?, 'pendiente')
+        """, (analisis_id, fecha_corrida, cand['codigocliente'], cand.get('codigoparticular') or cand['codigocliente'],
+              cand['razonsocial'], cand['vendedor_codigo'], cand['vendedor_nombre'], cand['importe_total']))
+        cand['resultado_id'] = cur.lastrowid
+        for d in cand['detalle']:
+            cur.execute("""
+                INSERT INTO reactivacion_resultado_detalle
+                    (resultado_id, tipo_comprobante, numero_comprobante, fecha,
+                     codigo_articulo, descripcion_articulo, rubro, superrubro, cantidad, importe)
+                VALUES (?,?,?,?,?,?,?,?,?,?)
+            """, (cand['resultado_id'], d['tipo_comprobante'], d['numero_comprobante'], d['fecha'],
+                  d['codigo_articulo'], d['descripcion_articulo'], d['rubro'], d['superrubro'],
+                  d['cantidad'], d['importe']))
+    cur.execute("UPDATE reactivacion_analisis SET ultima_corrida=? WHERE id=?", (fecha_corrida, analisis_id))
+    c.commit(); c.close()
+
+    # Vinculación del descuento adicional (recupero de cartera) al cliente puntual,
+    # DENTRO de la(s) oferta(s) de categoría que ya le aplican (Jugueteria/Outdoors/
+    # Tecnologia/etc, según lo que compró) — se hace en una pasada APARTE, ya con la
+    # transacción de arriba commiteada y cerrada, para no pelear por el lock de
+    # SQLite con esa misma conexión.
+    if not oferta_vencida:
+        c3 = _admin_db()
+        for cand in candidatos:
+            try:
+                offer_ids = _reactivacion_vincular_cliente_recupero(cfg, cand)
+                if offer_ids:
+                    c3.execute("UPDATE reactivacion_resultados SET offer_id=? WHERE id=?", (offer_ids[0], cand['resultado_id']))
+                    c3.commit()
+                elif float(cfg.get('descuento_pct') or 0) > 0 or (cfg.get('condicion_comercial_extra') or '').strip():
+                    errores.append(f"cliente {cand['codigocliente']}: descuento adicional cargado pero no matcheó "
+                                    f"ninguna oferta existente (Jugueteria/Outdoors/Tecnologia/etc) para vincularlo")
+            except Exception as e:
+                msg = f"vinculando recupero cliente {cand['codigocliente']}: {e}"
+                print(f"[REACTIVACION] error {msg}")
+                errores.append(msg)
+        c3.close()
+
+    notificados = 0
+    if candidatos and not oferta_vencida:
+        try:
+            resultado_envio = _reactivacion_notificar(cfg, candidatos)
+            c2 = _admin_db()
+            vend_sin_contacto = set()
+            vend_wa_error = {}
+            for cand in candidatos:
+                info = resultado_envio.get(cand['vendedor_codigo'], {})
+                if info.get('mail_ok') or info.get('wa_ok'):
+                    notificados += 1
+                    c2.execute(
+                        "UPDATE reactivacion_resultados SET estado='notificado', fecha_ultima_notificacion=? WHERE id=?",
+                        (fecha_corrida, cand['resultado_id']))
+                else:
+                    vend_sin_contacto.add(cand['vendedor_codigo'])
+                if not info.get('wa_ok') and info.get('wa_err'):
+                    vend_wa_error[cand['vendedor_codigo']] = info['wa_err']
+            for vc in vend_sin_contacto:
+                errores.append(f"vendedor {vc}: no se pudo notificar (sin mail/celular cargado en Contactos, o falló el envío)")
+            for vc, werr in vend_wa_error.items():
+                errores.append(f"vendedor {vc}: WhatsApp de reactivación falló — {werr}")
+            c2.commit(); c2.close()
+        except Exception as e:
+            msg = f"notificando: {e}"
+            print(f"[REACTIVACION] error {msg}")
+            errores.append(msg)
+
+    c4 = _admin_db()
+    c4.execute("UPDATE reactivacion_analisis SET ultimo_error=? WHERE id=?",
+               ('; '.join(errores[:20]) if errores else '', analisis_id))
+    c4.commit(); c4.close()
+
+    return {"fecha_corrida": fecha_corrida, "detectados": len(candidatos), "notificados": notificados,
+            "oferta_vencida": oferta_vencida, "errores": errores}
+
+
+@app.post("/admin/reactivacion/{analisis_id}/ejecutar")
+def reactivacion_ejecutar(analisis_id: int, _u=Depends(get_admin_user)):
+    """Corre el análisis AHORA (recalcula todo desde cero), persiste el resultado y
+    notifica a cada vendedor (mail con PDF + WhatsApp best-effort). Uso: botón manual
+    en el panel — el scheduler automático llama _reactivacion_ejecutar_analisis directo."""
+    return _reactivacion_ejecutar_analisis(analisis_id)
+
+
+# ── Scheduler automático: corre cada análisis activo en su día/hora configurados ──
+_REACTIVACION_SCHEDULER_ULTIMA = {}  # analisis_id -> 'YYYY-MM-DD' de la última corrida disparada
+
+def _reactivacion_scheduler_loop():
+    import time as _time
+    while True:
+        try:
+            ahora = datetime.now()
+            hoy_str = ahora.date().isoformat()
+            hora_str = ahora.strftime('%H:%M')
+            dia_actual = ahora.weekday()  # Monday=0 ... Sunday=6, mismo criterio que dia_semana
+            c = _admin_db()
+            activos = c.execute(
+                "SELECT id, dia_semana, hora FROM reactivacion_analisis WHERE activo=1"
+            ).fetchall()
+            c.close()
+            for a in activos:
+                if a['dia_semana'] != dia_actual or a['hora'] != hora_str:
+                    continue
+                if _REACTIVACION_SCHEDULER_ULTIMA.get(a['id']) == hoy_str:
+                    continue  # ya se disparó hoy, no repetir dentro del mismo minuto/hora
+                _REACTIVACION_SCHEDULER_ULTIMA[a['id']] = hoy_str
+                try:
+                    print(f"[REACTIVACION SCHEDULER] corriendo análisis {a['id']}")
+                    _reactivacion_ejecutar_analisis(a['id'])
+                except Exception as e:
+                    print(f"[REACTIVACION SCHEDULER] error en análisis {a['id']}: {e}")
+        except Exception as e:
+            print(f"[REACTIVACION SCHEDULER] error de loop: {e}")
+        _time.sleep(60)
+
+threading.Thread(target=_reactivacion_scheduler_loop, daemon=True).start()
+
+
+def _reactivacion_obtener_resultados(analisis_id: int) -> dict:
+    """Última corrida de este análisis, agrupada Vendedor -> Cliente -> Importe,
+    con el detalle expandible (facturas/artículos). Reutilizado por el endpoint JSON
+    del modal de auditoría y por las exportaciones a PDF/Excel."""
+    c = _admin_db()
+    ultima = c.execute(
+        "SELECT MAX(fecha_corrida) FROM reactivacion_resultados WHERE analisis_id=?",
+        (analisis_id,)
+    ).fetchone()
+    fecha_corrida = ultima[0] if ultima else None
+    if not fecha_corrida:
+        c.close()
+        return {"fecha_corrida": None, "vendedores": []}
+
+    resultados = c.execute("""
+        SELECT * FROM reactivacion_resultados
+        WHERE analisis_id=? AND fecha_corrida=?
+        ORDER BY vendedor_nombre, importe_total DESC
+    """, (analisis_id, fecha_corrida)).fetchall()
+
+    por_vendedor = {}
+    for r in resultados:
+        r = dict(r)
+        r['detalle'] = [dict(d) for d in c.execute(
+            "SELECT * FROM reactivacion_resultado_detalle WHERE resultado_id=? ORDER BY fecha DESC",
+            (r['id'],)
+        ).fetchall()]
+        vend = por_vendedor.setdefault(r['vendedor_codigo'], {
+            'vendedor_codigo': r['vendedor_codigo'],
+            'vendedor_nombre': r['vendedor_nombre'],
+            'clientes': [],
+        })
+        vend['clientes'].append(r)
+    c.close()
+    return {"fecha_corrida": fecha_corrida, "vendedores": list(por_vendedor.values())}
+
+
+@app.get("/admin/reactivacion/{analisis_id}/resultados")
+def reactivacion_resultados(analisis_id: int, _u=Depends(get_admin_user)):
+    """Última corrida de este análisis, agrupada Vendedor -> Cliente -> Importe,
+    con el detalle expandible (facturas/artículos) para el modal de auditoría.
+    Nunca se envía a los corredores — es solo para consulta interna."""
+    return _reactivacion_obtener_resultados(analisis_id)
+
+
+@app.get("/admin/reactivacion/{analisis_id}/resultados/exportar-excel")
+def reactivacion_resultados_exportar_excel(analisis_id: int, _u=Depends(get_admin_download_auth)):
+    """Excel de auditoría interna: hoja Resumen (vendedor/cliente/importe) + hoja
+    Detalle (facturas/artículos). Usa CODIGOPARTICULAR como código de cliente."""
+    import io
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment
+
+    data = _reactivacion_obtener_resultados(analisis_id)
+    if not data['vendedores']:
+        raise HTTPException(404, "Este análisis todavía no se corrió, o no detectó clientes")
+
+    _c_an = _admin_db()
+    an = _c_an.execute("SELECT nombre FROM reactivacion_analisis WHERE id=?", (analisis_id,)).fetchone()
+    _c_an.close()
+    nombre_analisis = an['nombre'] if an else f"analisis_{analisis_id}"
+
+    wb = openpyxl.Workbook()
+    hdr_fill  = PatternFill("solid", fgColor="1A56DB")
+    hdr_font  = Font(bold=True, color="FFFFFFFF", size=10)
+    alt_fill  = PatternFill("solid", fgColor="EFF6FF")
+    right_al  = Alignment(horizontal="right", vertical="center")
+    left_al   = Alignment(horizontal="left", vertical="center", wrap_text=True)
+
+    ws1 = wb.active
+    ws1.title = "Resumen"
+    headers1 = ["Vendedor", "Código cliente", "Razón social", "Facturación total"]
+    for ci, h in enumerate(headers1, 1):
+        cell = ws1.cell(1, ci, h); cell.font = hdr_font; cell.fill = hdr_fill
+    ri = 2
+    for v in data['vendedores']:
+        for cl in v['clientes']:
+            fill = alt_fill if ri % 2 == 0 else None
+            vals = [v['vendedor_nombre'] or v['vendedor_codigo'],
+                     cl.get('codigoparticular') or cl['codigocliente'],
+                     cl['razonsocial'], round(cl['importe_total'], 2)]
+            for ci, val in enumerate(vals, 1):
+                cell = ws1.cell(ri, ci, val)
+                if fill: cell.fill = fill
+                cell.alignment = right_al if ci == 4 else left_al
+            ri += 1
+    for i, w in enumerate([28, 14, 40, 18], 1):
+        ws1.column_dimensions[chr(64 + i)].width = w
+
+    ws2 = wb.create_sheet("Detalle")
+    headers2 = ["Vendedor", "Código cliente", "Razón social", "Fecha", "Comprobante",
+                "Artículo", "Rubro", "Cantidad", "Importe"]
+    for ci, h in enumerate(headers2, 1):
+        cell = ws2.cell(1, ci, h); cell.font = hdr_font; cell.fill = hdr_fill
+    ri = 2
+    for v in data['vendedores']:
+        for cl in v['clientes']:
+            for d in cl['detalle']:
+                fill = alt_fill if ri % 2 == 0 else None
+                vals = [v['vendedor_nombre'] or v['vendedor_codigo'],
+                         cl.get('codigoparticular') or cl['codigocliente'], cl['razonsocial'],
+                         _fecha_ddmmyyyy(d['fecha']), f"{d['tipo_comprobante']} {d['numero_comprobante']}",
+                         f"{d['codigo_articulo']} — {d['descripcion_articulo']}", d['rubro'] or '',
+                         d['cantidad'], round(d['importe'], 2)]
+                for ci, val in enumerate(vals, 1):
+                    cell = ws2.cell(ri, ci, val)
+                    if fill: cell.fill = fill
+                    if ci in (8, 9): cell.alignment = right_al
+                    elif ci in (6,): cell.alignment = left_al
+                ri += 1
+    for i, w in enumerate([28, 14, 30, 12, 16, 40, 16, 10, 14], 1):
+        ws2.column_dimensions[chr(64 + i)].width = w
+
+    buf = io.BytesIO()
+    wb.save(buf); buf.seek(0)
+    from fastapi.responses import StreamingResponse
+    fname = f"reactivacion_{nombre_analisis}_{data['fecha_corrida'][:10]}.xlsx".replace(' ', '_')
+    return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                              headers={"Content-Disposition": f"attachment; filename={fname}"})
+
+
+@app.get("/admin/reactivacion/{analisis_id}/resultados/exportar-pdf")
+def reactivacion_resultados_exportar_pdf(analisis_id: int, _u=Depends(get_admin_download_auth)):
+    """PDF de auditoría interna: mismo contenido que el modal (Vendedor -> Cliente
+    -> detalle de facturas/artículos), con CODIGOPARTICULAR como código de cliente."""
+    import io
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib import colors
+    from reportlab.lib.units import mm
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+
+    data = _reactivacion_obtener_resultados(analisis_id)
+    if not data['vendedores']:
+        raise HTTPException(404, "Este análisis todavía no se corrió, o no detectó clientes")
+
+    _c_an = _admin_db()
+    an = _c_an.execute("SELECT nombre FROM reactivacion_analisis WHERE id=?", (analisis_id,)).fetchone()
+    _c_an.close()
+    nombre_analisis = an['nombre'] if an else f"análisis {analisis_id}"
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=12*mm, rightMargin=12*mm, topMargin=12*mm, bottomMargin=12*mm)
+    azul = colors.HexColor('#1e429f')
+    AR = lambda v: f"{float(v or 0):,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
+    sTit = ParagraphStyle('tit', fontSize=13, fontName='Helvetica-Bold', leading=16)
+    sSub = ParagraphStyle('sub', fontSize=9,  fontName='Helvetica',      leading=12)
+    sVend = ParagraphStyle('vend', fontSize=10, fontName='Helvetica-Bold', textColor=azul, leading=13, spaceBefore=10, spaceAfter=4)
+    sHdr = ParagraphStyle('hdr', fontSize=7.5, fontName='Helvetica-Bold', textColor=colors.white, leading=9)
+    sCell = ParagraphStyle('cell', fontSize=7.5, fontName='Helvetica', leading=9)
+
+    story = [
+        Paragraph(f'Reactivación de clientes — {nombre_analisis}', sTit),
+        Paragraph(f'Corrida: {_fecha_ddmmyyyy(data["fecha_corrida"])} {data["fecha_corrida"][11:16]}  ·  Solo para consulta interna, nunca se envía a los corredores', sSub),
+        Spacer(1, 8),
+    ]
+    for v in data['vendedores']:
+        story.append(Paragraph(f'👤 {v["vendedor_nombre"] or v["vendedor_codigo"]}', sVend))
+        resumen = [[Paragraph('Código', sHdr), Paragraph('Cliente', sHdr), Paragraph('Facturación', sHdr)]]
+        for cl in v['clientes']:
+            resumen.append([cl.get('codigoparticular') or cl['codigocliente'], cl['razonsocial'], f"${AR(cl['importe_total'])}"])
+        t = Table(resumen, colWidths=[25*mm, 100*mm, 35*mm])
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), azul),
+            ('FONTSIZE', (0,1), (-1,-1), 8),
+            ('ALIGN', (2,0), (2,-1), 'RIGHT'),
+            ('GRID', (0,0), (-1,-1), 0.3, colors.HexColor('#d1d5db')),
+            ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, colors.HexColor('#f3f4f6')]),
+            ('TOPPADDING', (0,0), (-1,-1), 3), ('BOTTOMPADDING', (0,0), (-1,-1), 3),
+        ]))
+        story.append(t)
+        for cl in v['clientes']:
+            if not cl['detalle']:
+                continue
+            story.append(Spacer(1, 3))
+            story.append(Paragraph(f'Detalle — {cl.get("codigoparticular") or cl["codigocliente"]} · {cl["razonsocial"]}', sSub))
+            det = [[Paragraph(h, sHdr) for h in ('Fecha', 'Comprobante', 'Artículo', 'Rubro', 'Cant.', 'Importe')]]
+            for d in cl['detalle']:
+                det.append([
+                    Paragraph(_fecha_ddmmyyyy(d['fecha']), sCell),
+                    Paragraph(f"{d['tipo_comprobante']} {d['numero_comprobante']}", sCell),
+                    Paragraph(f"{d['codigo_articulo']} — {d['descripcion_articulo']}", sCell),
+                    Paragraph(d['rubro'] or '', sCell),
+                    Paragraph(str(d['cantidad']), sCell),
+                    Paragraph(f"${AR(d['importe'])}", sCell),
+                ])
+            td = Table(det, colWidths=[18*mm, 25*mm, 65*mm, 22*mm, 15*mm, 20*mm])
+            td.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#6b7280')),
+                ('ALIGN', (4,0), (5,-1), 'RIGHT'),
+                ('GRID', (0,0), (-1,-1), 0.25, colors.HexColor('#e5e7eb')),
+                ('TOPPADDING', (0,0), (-1,-1), 2), ('BOTTOMPADDING', (0,0), (-1,-1), 2),
+            ]))
+            story.append(td)
+            story.append(Spacer(1, 6))
+
+    doc.build(story)
+    buf.seek(0)
+    from fastapi.responses import StreamingResponse
+    fname = f"reactivacion_{nombre_analisis}_{data['fecha_corrida'][:10]}.pdf".replace(' ', '_')
+    return StreamingResponse(buf, media_type="application/pdf",
+                              headers={"Content-Disposition": f"attachment; filename={fname}"})
 
 
 @app.get("/ventas")
@@ -8208,26 +11115,42 @@ def cuenta_corriente_pdf(codigo: str, limit: int = Query(500, le=2000), offset: 
 
 
 # ─── Transportes / Sucursales ────────────────────────────────────────────────
+_transportes_cache: dict = {"ts": 0, "val": None}
+_TRANSPORTES_CACHE_TTL = int(os.getenv('TRANSPORTES_CACHE_TTL', 300))  # dato casi estático
+
 @app.get("/transportes")
 def get_transportes():
+    _now = time.time()
+    if _transportes_cache["val"] is not None and (_now - _transportes_cache["ts"]) < _TRANSPORTES_CACHE_TTL:
+        return _transportes_cache["val"]
     DB_PROD = 'c:/flexxus/DB/DB-Microbell.gdb'
     rows_map: dict = {}
-    for db_path in [DATABASE, DB_PROD]:
+    from concurrent.futures import ThreadPoolExecutor as _TPE_transp
+
+    def _fetch_transp(db_path):
         try:
             c = conn('WIN1252', db=db_path)
             cur = c.cursor()
             cur.execute('SELECT CODIGOTRANSPORTE, DESCRIPCION FROM "TRANSPORTES" ORDER BY DESCRIPCION')
-            for r in cur.fetchall():
+            data = cur.fetchall()
+            c.close()
+            return data
+        except Exception:
+            return []
+
+    with _TPE_transp(max_workers=2) as _ex_transp:
+        for rows in _ex_transp.map(_fetch_transp, [DATABASE, DB_PROD]):
+            for r in rows:
                 cod = r[0]
                 if cod is not None and str(cod).strip() not in ('', '0') and cod not in rows_map:
                     rows_map[cod] = (r[1] or '').strip()
-            c.close()
-        except Exception:
-            pass
-    return sorted(
+    resultado = sorted(
         [{"codigo": cod, "descripcion": desc} for cod, desc in rows_map.items()],
         key=lambda x: x["descripcion"]
     )
+    _transportes_cache["ts"] = _now
+    _transportes_cache["val"] = resultado
+    return resultado
 
 @app.get("/clientes/{codigo}/sucursales")
 def get_sucursales_cliente(codigo: str):
@@ -8265,7 +11188,11 @@ def get_sucursales_cliente(codigo: str):
             partes_dir = [p for p in [(row_pru[1] or '').strip(),
                                       (row_pru[2] or '').strip()] if p]
             if partes_dir:
-                direccion_principal = ' — '.join(partes_dir)
+                # Separador simple (no em dash): este texto se puede reenviar tal
+                # cual como domicilio_entrega al guardar pedido/presupuesto, y esos
+                # INSERT usan conexión Firebird LATIN1 — el em dash (—, U+2014) no
+                # es codificable en latin-1 y rompía el guardado.
+                direccion_principal = ' - '.join(partes_dir)
     except Exception:
         pass
 
@@ -8287,7 +11214,7 @@ def get_sucursales_cliente(codigo: str):
             partes_mb = [p for p in [str(row_mb[1] or '').strip(),
                                      str(row_mb[2] or '').strip()] if p]
             if partes_mb:
-                direccion_principal = ' — '.join(partes_mb)
+                direccion_principal = ' - '.join(partes_mb)
         else:
             cod_mb = codigoparticular
 
@@ -8404,7 +11331,7 @@ def get_sucursales_cliente(codigo: str):
                 row_d = cur_fb2.fetchone()
                 if row_d:
                     partes = [p for p in [(row_d[0] or '').strip(), (row_d[1] or '').strip()] if p]
-                    direccion_principal = ' — '.join(partes)
+                    direccion_principal = ' - '.join(partes)
         except Exception:
             pass
 
@@ -8716,6 +11643,56 @@ def get_presupuesto_copia(numero: str, _u=Depends(get_current_user)):
     except Exception as e:
         raise HTTPException(500, f"Error interno al obtener presupuesto {numero}: {type(e).__name__}: {e}")
 
+def _domicilio_con_localidad(db_path_dom, cod_cliente, direccion_texto):
+    """Agrega ' - Loc. X - Prov. Y' a una dirección de entrega de pedido/presupuesto,
+    igual que lo hace Flexxus ERP en sus propios comprobantes. CABEZAPEDIDOS/
+    CABEZAPRESUPUESTOS solo guardan la dirección como texto plano (sin localidad ni
+    provincia), así que se busca la sucursal de SUCURSALESXCLIENTES cuya DIRECCION
+    coincida con ese texto (mismo criterio que /clientes/{codigo}/sucursales), y si
+    no hay match se cae a la dirección principal del cliente en CLIENTES."""
+    direccion_texto = (direccion_texto or '').strip()
+    if not direccion_texto or not cod_cliente:
+        return direccion_texto
+    def _norm(s):
+        return ' '.join(str(s or '').split()).upper()
+    localidad = provincia = ''
+    try:
+        c = conn('WIN1252', db=db_path_dom)
+        cur = c.cursor()
+        cur.execute(
+            'SELECT s.DIRECCION, l.NOMBRE, p.NOMBRE '
+            'FROM "SUCURSALESXCLIENTES" s '
+            'LEFT JOIN "PROVINCIAS" p ON p.CODIGOPROVINCIA = s.CODIGOPROVINCIA '
+            'LEFT JOIN "LOCALIDADES" l ON l.CODIGOPROVINCIA = s.CODIGOPROVINCIA '
+            '   AND l.CODIGOLOCALIDAD = s.CODIGOLOCALIDAD '
+            'WHERE s.CODIGOCLIENTE = ?', (cod_cliente,)
+        )
+        for r in cur.fetchall():
+            if _norm(r[0]) == _norm(direccion_texto):
+                localidad = (r[1] or '').strip()
+                provincia = (r[2] or '').strip()
+                break
+        if not localidad and not provincia:
+            cur.execute(
+                'SELECT DIRECCION, LOCALIDAD, CODIGOPROVINCIA FROM "CLIENTES" WHERE CODIGOCLIENTE = ?',
+                (cod_cliente,)
+            )
+            r_cli = cur.fetchone()
+            if r_cli and _norm(r_cli[0]) == _norm(direccion_texto):
+                localidad = (r_cli[1] or '').strip()
+                cod_prov = (r_cli[2] or '').strip()
+                if cod_prov:
+                    cur.execute('SELECT NOMBRE FROM "PROVINCIAS" WHERE CODIGOPROVINCIA = ?', (cod_prov,))
+                    r_p = cur.fetchone()
+                    if r_p: provincia = (r_p[0] or '').strip()
+        c.close()
+    except Exception:
+        pass
+    extra = ''
+    if localidad: extra += f' - Loc. {localidad}'
+    if provincia: extra += f' - Prov. {provincia}'
+    return direccion_texto + extra
+
 # ─── PDF Nota de Pedido ────────────────────────────────────────────────────────
 @app.get("/pedidos/{numero}/pdf")
 def pedido_pdf(numero: str, db: str = Query("oficial"),
@@ -8725,7 +11702,7 @@ def pedido_pdf(numero: str, db: str = Query("oficial"),
 
     # ── 1. Datos empresa ───────────────────────────────────────────────────────
     razon_soc = 'MICROBELL S.A.'
-    dir_emp   = 'AV. MONROE 5088 PISO 2'
+    dir_emp   = 'PATAGONES 2675 PISO 3 - CABA - C1437JEA'
     tel_emp   = '+54 11 3988-0024'
     email_emp = 'info@microbellsa.com.ar'
     web_emp   = 'www.microbellsa.com'
@@ -8770,6 +11747,7 @@ def pedido_pdf(numero: str, db: str = Query("oficial"),
 
     cod_cli, rs_cli, fec_comp, fec_entrega, total_cab, iva1_cab, \
     comentarios, cod_usu, cod_multi, cod_transp, dir_cli, tipo_iva, tel_cli = cab
+    dir_cli = _domicilio_con_localidad(DATABASE, cod_cli, dir_cli)
 
     subtotal_cab = float(total_cab or 0)
     iva1_val     = float(iva1_cab or 0)
@@ -8865,16 +11843,16 @@ def pedido_pdf(numero: str, db: str = Query("oficial"),
     # ── 7. Depósito ────────────────────────────────────────────────────────────
     deposito_desc = ''
     try:
-        c_dep = conn('WIN1252', db=db_path)
+        c_dep = conn('WIN1252', db=DATABASE)
         cur_dep = c_dep.cursor()
         cur_dep.execute(
-            f'SELECT FIRST 1 CODIGODEPOSITO FROM {item_table} WHERE NUMEROCOMPROBANTE = ?{extra_where}',
+            f'SELECT FIRST 1 CODIGODEPOSITO FROM "CUERPOPEDIDOS" WHERE NUMEROCOMPROBANTE = ?{extra_where}',
             (numero,)
         )
         r_dep = cur_dep.fetchone()
         if r_dep:
             cod_dep = str(r_dep[0] or '').strip()
-            cur_dep.execute('SELECT NOMBRE FROM "DEPOSITOS" WHERE CODIGODEPOSITO = ?', (cod_dep,))
+            cur_dep.execute('SELECT DESCRIPCION FROM "DEPOSITOS" WHERE CODIGODEPOSITO = ?', (cod_dep,))
             r_dn = cur_dep.fetchone()
             deposito_desc = (r_dn[0] or cod_dep).strip() if r_dn else cod_dep
         c_dep.close()
@@ -9148,6 +12126,9 @@ class NuevoPedido(BaseModel):
     descuento_general: float = 0.0
     descuento_promo_pct: float = 0.0      # descuento por escalón de combos (tipo producto)
     descuento_promo_nombre: str = ""       # nombre del escalón aplicado
+    alerta_cobranzas: bool = False   # cliente tenía observación en el ABM y el corredor confirmó cargar igual
+    motivo_alerta: str = ""          # texto original de la observación del cliente (CLIENTES.COMENTARIOS)
+    nombre_vendedor: str = ""        # nombre del corredor logueado, para el aviso a Cobranzas
     items: list[ItemDoc]
 
 @app.post("/pedidos")
@@ -9242,6 +12223,13 @@ def crear_pedido(body: NuevoPedido, db: str = Query("oficial")):
     dto_gral = max(0.0, min(float(body.descuento_general or 0), 100.0))
     dto_promo = max(0.0, min(float(body.descuento_promo_pct or 0), 100.0))
     total = subtotal * (1 - dto_gral / 100) * (1 - dto_promo / 100)
+    # DESCUENTOPORCENTAJE/DESCUENTOMONTO/DESCUENTODESCRIPCION (CABEZAPEDIDOS): mismo
+    # criterio que en crear_presupuesto — dto_gral (admin) y dto_promo (combo/escalón,
+    # incluye recupero de cartera) son mutuamente excluyentes, se graba el que esté activo.
+    _dto_pct_final = dto_gral if dto_gral > 0 else dto_promo
+    _dto_monto_final = round(subtotal * dto_gral / 100, 2) if dto_gral > 0 else round(subtotal * dto_promo / 100, 2)
+    _dto_desc_final = (f'{dto_gral:.6f} %' if dto_gral > 0
+                        else (f'{dto_promo:.6f} %' if dto_promo > 0 else '0,000000 %'))
 
     # Resolver CODIGOCLIENTE correcto según BD destino
     # body.codigocliente viene siempre en código L1; para SW hay que traducirlo via CODIGOPARTICULAR
@@ -9333,8 +12321,7 @@ def crear_pedido(body: NuevoPedido, db: str = Query("oficial")):
               transp_final,
               int(body.codigomultiplazo) if body.codigomultiplazo else 0,
               cuit_cli,
-              -round(dto_gral, 6), -round(subtotal * dto_gral / 100, 2),
-              f'{dto_gral:.6f} %' if dto_gral > 0 else '0,000000 %',
+              -round(_dto_pct_final, 6), -_dto_monto_final, _dto_desc_final,
               body.codigousuario.upper(), fecha,
               0.0 if db == 'sw' else None,
               '0' if db == 'sw' else None))
@@ -9396,12 +12383,105 @@ def crear_pedido(body: NuevoPedido, db: str = Query("oficial")):
 
         # Invalidar caché del depósito afectado para que otros vendedores vean stock actualizado
         threading.Thread(target=_fma_cache_invalidate, args=([body.codigodeposito],), daemon=True).start()
+        # Avisar a Cobranzas si el cliente tenía observación en el ABM y el corredor confirmó cargar igual
+        if body.alerta_cobranzas:
+            threading.Thread(target=_send_whatsapp_cobranzas, args=(
+                'pedido', nuevo_num, body.nombre_vendedor, body.codigocliente,
+                body.razonsocial, body.motivo_alerta
+            ), daemon=True).start()
         return {"ok": True, "numero": nuevo_num, "total": round(total + iva1, 2), "_db_usado": db, "_db_path": db_path}
     except Exception as e:
         c.rollback()
         raise HTTPException(500, str(e))
     finally:
         c.close()
+
+
+class CreditoInternoBody(BaseModel):
+    codigocliente: str
+    codigousuario: str
+    cliente_razonsocial: str = ""
+    monto: float
+    oferta_id: Optional[int] = None
+    oferta_nombre: str = ""
+    escalon_monto_minimo: Optional[float] = None
+
+@app.post("/pedidos/{numero}/credito_interno")
+def generar_credito_interno_pedido(numero: str, body: CreditoInternoBody, db: str = Query("oficial"), _u=Depends(get_current_user)):
+    """Genera el comprobante CI (crédito interno) real en Firebird para un Pedido YA
+    CONFIRMADO, cuando el corredor eligió 'crédito' en vez de 'bonificación %' para un
+    escalón de oferta que tenía ambos beneficios cargados (admin.html →
+    financial_escalones[].monto_credito). Se llama SIEMPRE después de que /pedidos ya
+    confirmó el pedido en Firebird, nunca antes — y si esto falla, el pedido NO se
+    revierte (ya es una venta real; ver decisión de Eduardo 2026-07-31): se le informa
+    al corredor con el número de pedido para que se resuelva aparte."""
+    db_path = DATABASE_MLT if db == 'sw' else DATABASE
+    partes_desc = [f"CREDITO POR PROMOCION - {body.oferta_nombre or 'Oferta'}"]
+    if body.escalon_monto_minimo:
+        partes_desc.append(f"(Escalon ${body.escalon_monto_minimo:,.0f})".replace(',', '.'))
+    partes_desc.append(f"- Pedido Nro {numero}")
+    descripcion = " ".join(partes_desc)
+
+    admin_c = _admin_db()
+    try:
+        resultado = _generar_credito_interno_ci(
+            codigo_cliente=body.codigocliente,
+            codigo_usuario=body.codigousuario,
+            monto=body.monto,
+            descripcion=descripcion,
+            db_path=db_path,
+        )
+    except Exception as e:
+        try:
+            admin_c.execute(
+                "INSERT INTO creditos_internos_log "
+                "(codigousuario, codigocliente, cliente_razonsocial, oferta_id, oferta_nombre, "
+                "escalon_monto_minimo, monto, pedido_numero, pedido_db, estado, error_detalle) "
+                "VALUES (?,?,?,?,?,?,?,?,?,'error',?)",
+                (body.codigousuario, body.codigocliente, body.cliente_razonsocial, body.oferta_id,
+                 body.oferta_nombre, body.escalon_monto_minimo, body.monto, numero, db, str(e))
+            )
+            admin_c.commit()
+        except Exception:
+            pass
+        finally:
+            admin_c.close()
+        raise HTTPException(
+            500,
+            f"El pedido {numero} se confirmó correctamente, pero el crédito interno de "
+            f"${body.monto:,.0f} NO se pudo generar en Firebird ({e}). El pedido queda "
+            f"en pie — avisá para que el crédito se cargue manualmente."
+        )
+
+    try:
+        admin_c.execute(
+            "INSERT INTO creditos_internos_log "
+            "(codigousuario, codigocliente, cliente_razonsocial, oferta_id, oferta_nombre, "
+            "escalon_monto_minimo, monto, pedido_numero, pedido_db, numero_ci, codigo_asiento, estado) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,'ok')",
+            (body.codigousuario, body.codigocliente, body.cliente_razonsocial, body.oferta_id,
+             body.oferta_nombre, body.escalon_monto_minimo, body.monto, numero, db,
+             resultado["numero_ci"], resultado["codigo_asiento"])
+        )
+        admin_c.commit()
+    except Exception:
+        pass  # el CI ya se generó en Firebird; que falle el log de auditoría no debe romper la respuesta
+    finally:
+        admin_c.close()
+
+    from datetime import datetime
+    return {
+        "ok": True,
+        "numero_ci": resultado["numero_ci"],
+        "codigo_asiento": resultado["codigo_asiento"],
+        "monto": body.monto,
+        "fecha": datetime.now().strftime('%d/%m/%Y'),
+        "oferta_nombre": body.oferta_nombre,
+        "cliente_razonsocial": body.cliente_razonsocial,
+        "codigocliente": body.codigocliente,
+        "pedido_numero": numero,
+        "descripcion": descripcion,
+    }
 
 @app.get("/debug/cab_full/{numero}")
 def debug_cab_full(numero: str):
@@ -9423,9 +12503,16 @@ def debug_cab_full(numero: str):
     except Exception as e:
         return {"error": str(e)}
 
+_PROXIMO_CACHE_TTL = int(os.getenv('PROXIMO_CACHE_TTL', 5))  # solo texto de previsualización
+_proximo_np_cache: dict = {"ts": 0, "val": None}
+_proximo_pr_cache: dict = {}
+
 @app.get("/pedidos/proximo")
 def get_proximo_pedido(db: str = Query("oficial")):
     # El contador NP siempre está en DATABASE (BD principal), sin importar si es SW u oficial
+    _now = time.time()
+    if _proximo_np_cache["val"] is not None and (_now - _proximo_np_cache["ts"]) < _PROXIMO_CACHE_TTL:
+        return _proximo_np_cache["val"]
     try:
         c = conn('LATIN1', db=DATABASE)
         cur = c.cursor()
@@ -9434,7 +12521,10 @@ def get_proximo_pedido(db: str = Query("oficial")):
         c.close()
         if not row:
             raise HTTPException(500, "No se encontró parámetro de numeración NP")
-        return {"proximo": int(float(row[0]))}
+        resultado = {"proximo": int(float(row[0]))}
+        _proximo_np_cache["ts"] = _now
+        _proximo_np_cache["val"] = resultado
+        return resultado
     except HTTPException:
         raise
     except Exception as e:
@@ -9443,6 +12533,10 @@ def get_proximo_pedido(db: str = Query("oficial")):
 @app.get("/presupuestos/proximo")
 def get_proximo_presupuesto(db: str = Query("oficial")):
     db_path = DATABASE_MLT if db == 'sw' else DATABASE
+    _now = time.time()
+    _cached = _proximo_pr_cache.get(db_path)
+    if _cached and (_now - _cached[0]) < _PROXIMO_CACHE_TTL:
+        return _cached[1]
     try:
         c = conn('LATIN1', db=db_path)
         cur = c.cursor()
@@ -9451,7 +12545,9 @@ def get_proximo_presupuesto(db: str = Query("oficial")):
         c.close()
         if not row:
             raise HTTPException(500, "No se encontró parámetro de numeración PR")
-        return {"proximo": int(float(row[0]))}
+        resultado = {"proximo": int(float(row[0]))}
+        _proximo_pr_cache[db_path] = (_now, resultado)
+        return resultado
     except HTTPException:
         raise
     except Exception as e:
@@ -9511,6 +12607,19 @@ def get_presupuestos_pendientes(codigocliente: str, db: str = Query("oficial")):
         ORDER BY cp.NUMEROCOMPROBANTE DESC
     """, (codigocliente,))
     cabezas = cur.fetchall()
+    # Descripción de la condición de venta de cada presupuesto — incluye MULTIPLAZOS
+    # inactivos/dados de baja desde entonces, porque el presupuesto puede ser viejo y
+    # la condición ya no estar vigente hoy (igual se necesita mostrarla/copiarla).
+    multi_desc = {}
+    codigos_mp = list({str(cab[4]).strip() for cab in cabezas if cab[4]})
+    if codigos_mp:
+        try:
+            ph = ','.join('?' * len(codigos_mp))
+            cur_mp = c.cursor()
+            cur_mp.execute(f'SELECT CODIGOMULTIPLAZO, DESCRIPCION FROM "MULTIPLAZOS" WHERE CODIGOMULTIPLAZO IN ({ph})', codigos_mp)
+            multi_desc = {str(r[0]).strip(): (r[1] or '').strip() for r in cur_mp.fetchall()}
+        except Exception:
+            pass
     result = []
     for cab in cabezas:
         numero = cab[0]
@@ -9530,7 +12639,13 @@ def get_presupuestos_pendientes(codigocliente: str, db: str = Query("oficial")):
             pendiente = float(r[3]) - float(r[4])
             cod_particular = (r[8] or '').strip() or (r[1] or '').strip()
             items.append({
-                "linea": r[0], "codigo": r[1], "codigoparticular": cod_particular,
+                # "codigo" = CODIGOPARTICULAR (código de negocio), igual que en el resto
+                # de la app — antes era r[1] (CODIGOARTICULO interno de Firebird), lo que
+                # hacía que incorporarAlPedido() pidiera /stock/batch con el código interno
+                # y a veces trajera el stock de OTRO artículo (coincidencia numérica entre
+                # CODIGOARTICULO de uno y CODIGOPARTICULAR de otro).
+                "linea": r[0], "codigo": cod_particular, "codigoparticular": cod_particular,
+                "codigo_interno": r[1],
                 "descripcion": r[2],
                 "cantidad_total": float(r[3]),
                 "cantidad_remitida": float(r[4]),
@@ -9545,6 +12660,7 @@ def get_presupuestos_pendientes(codigocliente: str, db: str = Query("oficial")):
             "total": float(cab[2]) if cab[2] else 0,
             "comentarios": cab[3] or "",
             "codigomultiplazo": str(cab[4] or '0'),
+            "multiplazo_descripcion": multi_desc.get(str(cab[4]).strip(), '') if cab[4] else '',
             "codigotransporte": str(cab[5] or '0'),
             "direccion": cab[6] or "",
             "codigodeposito": "001",
@@ -9552,6 +12668,79 @@ def get_presupuestos_pendientes(codigocliente: str, db: str = Query("oficial")):
         })
     c.close()
     return result
+
+@app.get("/debug/presupuesto/{numero}/multiplazo")
+def debug_presupuesto_multiplazo(numero: str):
+    """DIAGNÓSTICO TEMPORAL — no usado por el frontend. Muestra el valor y tipo crudo de
+    CODIGOMULTIPLAZO en CABEZAPRESUPUESTOS para este presupuesto, lo compara contra
+    MULTIPLAZOS con distintos casteos, y muestra cómo está guardado el código 51 para
+    poder comparar tipos/formato exacto. Borrar una vez resuelto el problema de matching."""
+    c = conn('LATIN1', db=DATABASE)
+    cur = c.cursor()
+    cur.execute('SELECT CODIGOMULTIPLAZO FROM "CABEZAPRESUPUESTOS" WHERE NUMEROCOMPROBANTE = ?', (numero,))
+    row = cur.fetchone()
+    raw = row[0] if row else None
+    info = {
+        "numero": numero,
+        "raw_value": raw,
+        "raw_repr": repr(raw),
+        "raw_type": type(raw).__name__,
+    }
+    candidatos = []
+    if raw is not None:
+        candidatos.append(("str_stripped", str(raw).strip()))
+        try:
+            candidatos.append(("int", int(raw)))
+        except Exception:
+            pass
+    intentos = {}
+    for etiqueta, valor in candidatos:
+        try:
+            cur2 = c.cursor()
+            cur2.execute('SELECT CODIGOMULTIPLAZO, DESCRIPCION FROM "MULTIPLAZOS" WHERE CODIGOMULTIPLAZO = ?', (valor,))
+            r = cur2.fetchone()
+            intentos[etiqueta] = {"parametro_usado": repr(valor), "match": {"codigo": r[0], "descripcion": r[1]} if r else None}
+        except Exception as e:
+            intentos[etiqueta] = {"parametro_usado": repr(valor), "error": str(e)}
+    # Cómo está guardado el código 51 en MULTIPLAZOS, para comparar tipo/formato
+    try:
+        cur3 = c.cursor()
+        cur3.execute('SELECT CODIGOMULTIPLAZO, DESCRIPCION FROM "MULTIPLAZOS" WHERE CODIGOMULTIPLAZO = ?', ('51',))
+        r3 = cur3.fetchone()
+        info["multiplazo_51_via_str"] = {"codigo": r3[0], "codigo_repr": repr(r3[0]), "codigo_type": type(r3[0]).__name__, "descripcion": r3[1]} if r3 else None
+    except Exception as e:
+        info["multiplazo_51_via_str_error"] = str(e)
+    try:
+        cur4 = c.cursor()
+        cur4.execute('SELECT CODIGOMULTIPLAZO, DESCRIPCION FROM "MULTIPLAZOS" WHERE CODIGOMULTIPLAZO = ?', (51,))
+        r4 = cur4.fetchone()
+        info["multiplazo_51_via_int"] = {"codigo": r4[0], "codigo_repr": repr(r4[0]), "codigo_type": type(r4[0]).__name__, "descripcion": r4[1]} if r4 else None
+    except Exception as e:
+        info["multiplazo_51_via_int_error"] = str(e)
+    info["intentos_match"] = intentos
+    c.close()
+    return info
+
+@app.get("/presupuestos/{numero}/cabecera")
+def get_presupuesto_cabecera(numero: str):
+    """Condición de venta (multiplazo) de un presupuesto puntual — para mostrar en el
+    modal de 'Últimos presupuestos' sin cambiar la forma de /detalle (lista de ítems)."""
+    c = conn('LATIN1', db=DATABASE)
+    cur = c.cursor()
+    cur.execute('SELECT CODIGOMULTIPLAZO FROM "CABEZAPRESUPUESTOS" WHERE NUMEROCOMPROBANTE = ?', (numero,))
+    row = cur.fetchone()
+    codigomultiplazo = str(row[0]).strip() if row and row[0] else ''
+    descripcion = ''
+    if codigomultiplazo:
+        try:
+            cur2 = c.cursor()
+            cur2.execute('SELECT DESCRIPCION FROM "MULTIPLAZOS" WHERE CODIGOMULTIPLAZO = ?', (codigomultiplazo,))
+            r2 = cur2.fetchone()
+            descripcion = (r2[0] or '').strip() if r2 else ''
+        except Exception:
+            pass
+    c.close()
+    return {"codigomultiplazo": codigomultiplazo, "multiplazo_descripcion": descripcion}
 
 @app.get("/presupuestos/{numero}/detalle")
 def get_presupuesto_detalle(numero: str):
@@ -9586,6 +12775,9 @@ class NuevoPresupuesto(BaseModel):
     descuento_general: float = 0.0
     descuento_promo_pct: float = 0.0
     descuento_promo_nombre: str = ""
+    alerta_cobranzas: bool = False
+    motivo_alerta: str = ""
+    nombre_vendedor: str = ""
     items: list[ItemDoc]
 
 @app.post("/presupuestos")
@@ -9658,6 +12850,16 @@ def crear_presupuesto(body: NuevoPresupuesto, db: str = Query("oficial")):
     _factor_dto = (1 - dto_gral / 100) * (1 - dto_promo / 100)
     iva1 = sum(it.cantidad * it.preciounitario * (1 - it.descuento / 100) * (it.porcentajeiva / 100) for it in body.items) * _factor_dto
     total = subtotal * _factor_dto
+    # DESCUENTOPORCENTAJE/DESCUENTOMONTO/DESCUENTODESCRIPCION (CABEZAPRESUPUESTOS): antes
+    # solo se grababa dto_gral (descuento manual de admin) — dto_promo (combo, bonif. por
+    # monto, o descuento por escalón/recupero de cartera) afectaba el TOTAL pero nunca
+    # quedaba registrado en estos campos, así que Flexxus nunca lo mostraba en su propio
+    # PDF/pantalla. Son mutuamente excluyentes en el frontend (nunca se envían los dos a
+    # la vez), así que se graba el que esté activo.
+    _dto_pct_final = dto_gral if dto_gral > 0 else dto_promo
+    _dto_monto_final = round(subtotal * dto_gral / 100, 2) if dto_gral > 0 else round(subtotal * dto_promo / 100, 2)
+    _dto_desc_final = (f'{dto_gral:.6f} %' if dto_gral > 0
+                        else (f'{dto_promo:.6f} %' if dto_promo > 0 else '0,000000 %'))
 
     c = conn('LATIN1', db=db_path)
     cur = c.cursor()
@@ -9703,8 +12905,7 @@ def crear_presupuesto(body: NuevoPresupuesto, db: str = Query("oficial")):
                   int(body.codigomultiplazo) if body.codigomultiplazo else 0,
                   body.codigotransporte if body.codigotransporte and body.codigotransporte != '0'
                   else (cli_transp if cli_transp and cli_transp != '0' else '0'),
-                  -round(dto_gral, 6), -round(subtotal * dto_gral / 100, 2),
-                  f'{dto_gral:.6f} %' if dto_gral > 0 else '0,000000 %'))
+                  -round(_dto_pct_final, 6), -_dto_monto_final, _dto_desc_final))
 
         # Resolver codigoparticular → CODIGOARTICULO real en Firebird
         _cod_parts_p = list({(it.codigoparticular or it.codigoarticulo).strip() for it in body.items if it.codigoarticulo})
@@ -9749,12 +12950,151 @@ def crear_presupuesto(body: NuevoPresupuesto, db: str = Query("oficial")):
         c.close()
         # Invalidar caché (presupuesto no tiene deposito en modelo, invalidar todos)
         threading.Thread(target=_fma_cache_invalidate, daemon=True).start()
+        # Avisar a Cobranzas si el cliente tenía observación en el ABM y el corredor confirmó cargar igual
+        if body.alerta_cobranzas:
+            threading.Thread(target=_send_whatsapp_cobranzas, args=(
+                'presupuesto', nuevo_num, body.nombre_vendedor, body.codigocliente,
+                body.razonsocial, body.motivo_alerta
+            ), daemon=True).start()
         return {"ok": True, "numero": nuevo_num, "total": round(total + iva1, 2)}
 
     except Exception as e:
         c.rollback()
         c.close()
         raise HTTPException(500, str(e))
+
+# ─── PDF Simulación de Presupuesto (Modo Simulador) ────────────────────────────
+# A diferencia de /presupuestos/{numero}/pdf (que lee CABEZAPRESUPUESTOS/CUERPOPRESUPUESTOS
+# de Firebird por número de comprobante), este endpoint NO toca Firebird para nada —
+# ni lectura ni escritura. Recibe los datos ya resueltos por el frontend (nombre de
+# cliente, condición de venta, ítems) y arma un PDF autocontenido, rotulado como
+# SIMULACIÓN, para que el corredor pueda probar escenarios de bonificación sin que
+# quede ningún rastro en el ERP.
+class SimuladorItem(BaseModel):
+    codigo: str = ''
+    descripcion: str = ''
+    cantidad: float = 0
+    precio: float = 0
+    descuento: float = 0
+    iva: float = 21
+
+class SimuladorPresupuestoBody(BaseModel):
+    cliente_codigo: str = ''
+    cliente_nombre: str = ''
+    vendedor_nombre: str = ''
+    condicion_venta_texto: str = ''
+    comentarios: str = ''
+    discrimina_iva: bool = True
+    items: List[SimuladorItem] = []
+
+@app.post("/presupuestos/simular/pdf")
+def presupuesto_simular_pdf(body: SimuladorPresupuestoBody):
+    from datetime import datetime
+    if not body.items:
+        raise HTTPException(400, "Sin ítems para simular")
+
+    razon_soc = 'MICROBELL S.A.'
+    dir_emp   = 'PATAGONES 2675 PISO 3 - CABA - C1437JEA'
+    tel_emp   = '+54 11 3988-0024'
+    email_emp = 'info@microbellsa.com.ar'
+
+    discIva = body.discrimina_iva
+    subtotal_neto = 0.0
+    iva_monto = 0.0
+    rows = [['Cód.', 'Descripción', 'Cant.', 'Precio $', 'Bon%', 'IVA%', 'Subtotal']]
+    for it in body.items:
+        sub = it.cantidad * it.precio * (1 - (it.descuento or 0) / 100)
+        subtotal_neto += sub
+        iva_item = sub * (it.iva or 0) / 100 if discIva else 0
+        iva_monto += iva_item
+        rows.append([
+            it.codigo, it.descripcion,
+            f"{it.cantidad:g}", f"${it.precio:,.2f}".replace(',', '.'),
+            f"{it.descuento:g}%", f"{it.iva:g}%" if discIva else '—',
+            f"${sub:,.2f}".replace(',', '.'),
+        ])
+    total_final = subtotal_neto + iva_monto
+
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=12*mm, rightMargin=12*mm, topMargin=10*mm, bottomMargin=12*mm)
+    styles = getSampleStyleSheet()
+    s_title  = ParagraphStyle('title', fontSize=14, fontName='Helvetica-Bold', alignment=TA_CENTER)
+    s_watermark = ParagraphStyle('wm', fontSize=11, fontName='Helvetica-Bold', alignment=TA_CENTER, textColor=colors.HexColor('#dc2626'))
+    s_norm   = ParagraphStyle('norm', fontSize=8, leading=10, fontName='Helvetica')
+    s_bold   = ParagraphStyle('bold', fontSize=8, leading=10, fontName='Helvetica-Bold')
+    s_small  = ParagraphStyle('small', fontSize=7, leading=9, fontName='Helvetica', textColor=colors.HexColor('#6b7280'))
+    s_r      = ParagraphStyle('r', fontSize=9, leading=11, fontName='Helvetica', alignment=TA_RIGHT)
+    s_rb     = ParagraphStyle('rb', fontSize=10, leading=13, fontName='Helvetica-Bold', alignment=TA_RIGHT)
+
+    story = []
+    if os.path.exists(LOGO_PATH):
+        try:
+            _logo = Image(LOGO_PATH, width=36*mm, height=36*0.32*mm)
+            _logo.hAlign = 'CENTER'
+            story.append(_logo)
+        except Exception:
+            pass
+    story.append(Paragraph(razon_soc, s_title))
+    story.append(Spacer(1, 4))
+    story.append(Paragraph('SIMULACIÓN DE PRESUPUESTO — NO VÁLIDO COMO PRESUPUESTO NI FACTURA', s_watermark))
+    story.append(Paragraph('Documento generado solo a modo de prueba de escenario. No fue registrado en Flexxus ERP.', s_small))
+    story.append(Spacer(1, 8))
+    story.append(HRFlowable(width='100%', color=colors.HexColor('#dc2626'), thickness=1))
+    story.append(Spacer(1, 8))
+
+    info_lines = (
+        f"<b>Cliente:</b> {body.cliente_nombre or '—'} ({body.cliente_codigo or 's/cod.'})<br/>"
+        f"<b>Vendedor:</b> {body.vendedor_nombre or '—'}<br/>"
+        f"<b>Condición de venta:</b> {body.condicion_venta_texto or '—'}<br/>"
+        f"<b>Fecha simulación:</b> {datetime.now().strftime('%d/%m/%Y %H:%M')}"
+    )
+    story.append(Paragraph(info_lines, s_norm))
+    if body.comentarios:
+        story.append(Spacer(1, 4))
+        story.append(Paragraph(f"<b>Comentarios:</b> {body.comentarios}", s_norm))
+    story.append(Spacer(1, 10))
+
+    col_widths = [22*mm, 62*mm, 14*mm, 22*mm, 16*mm, 14*mm, 24*mm]
+    tbl = Table(rows, colWidths=col_widths, repeatRows=1)
+    tbl.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#1F3864')),
+        ('TEXTCOLOR',  (0,0), (-1,0), colors.white),
+        ('FONTNAME',   (0,0), (-1,0), 'Helvetica-Bold'),
+        ('FONTSIZE',   (0,0), (-1,-1), 7.5),
+        ('GRID',       (0,0), (-1,-1), 0.5, colors.HexColor('#d1d5db')),
+        ('ALIGN',      (2,1), (-1,-1), 'RIGHT'),
+        ('VALIGN',     (0,0), (-1,-1), 'MIDDLE'),
+        ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, colors.HexColor('#f8fafc')]),
+    ]))
+    story.append(tbl)
+    story.append(Spacer(1, 12))
+
+    tot_rows = [['Subtotal:', f"${subtotal_neto:,.2f}".replace(',', '.')]]
+    if discIva:
+        tot_rows.append(['IVA:', f"${iva_monto:,.2f}".replace(',', '.')])
+    tot_rows.append(['TOTAL c/IVA:', f"${total_final:,.2f}".replace(',', '.')])
+    tot_tbl = Table(tot_rows, colWidths=[40*mm, 32*mm])
+    tot_tbl.setStyle(TableStyle([
+        ('FONTNAME', (0,0), (-1,-2), 'Helvetica'),
+        ('FONTNAME', (0,-1), (-1,-1), 'Helvetica-Bold'),
+        ('FONTSIZE', (0,0), (-1,-1), 9),
+        ('ALIGN',    (0,0), (-1,-1), 'RIGHT'),
+        ('LINEABOVE',(0,-1),(-1,-1), 0.75, colors.black),
+        ('TOPPADDING', (0,-1),(-1,-1), 4),
+    ]))
+    tot_tbl.hAlign = 'RIGHT'
+    story.append(tot_tbl)
+    story.append(Spacer(1, 16))
+    story.append(HRFlowable(width='100%', color=colors.HexColor('#dc2626'), thickness=1))
+    story.append(Spacer(1, 4))
+    story.append(Paragraph('⚠ Esta simulación no genera ni compromete ningún documento en Flexxus ERP ni en Microbell S.A. '
+                            'Las bonificaciones aquí probadas no son válidas hasta convertir el documento en un presupuesto real.',
+                            s_small))
+
+    doc.build(story)
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="application/pdf",
+                              headers={"Content-Disposition": 'inline; filename="simulacion_presupuesto.pdf"'})
 
 # ─── PDF Presupuesto ───────────────────────────────────────────────────────────
 @app.get("/presupuestos/{numero}/pdf")
@@ -9766,7 +13106,7 @@ def presupuesto_pdf(numero: str, db: str = Query("oficial"),
 
     # ── 1. Datos empresa ───────────────────────────────────────────────────────
     razon_soc = 'MICROBELL S.A.'
-    dir_emp   = 'AV. MONROE 5088 PISO 2'
+    dir_emp   = 'PATAGONES 2675 PISO 3 - CABA - C1437JEA'
     tel_emp   = '+54 11 3988-0024'
     email_emp = 'info@microbellsa.com.ar'
     web_emp   = 'www.microbellsa.com'
@@ -9817,6 +13157,7 @@ def presupuesto_pdf(numero: str, db: str = Query("oficial"),
     cod_cli, rs_cli, fec_comp, fec_vto, total_cab, iva1_cab, iva2_cab, \
     comentarios, cod_usu, cod_multi, cod_transp, dir_cli, tipo_iva, tel_cli, \
     dto_pct_cab = cab
+    dir_cli = _domicilio_con_localidad(db_path, cod_cli, dir_cli)
 
     subtotal_cab  = float(total_cab or 0)  # neto después del descuento, sin IVA
     iva1_val      = float(iva1_cab or 0)
@@ -10499,8 +13840,8 @@ def comprobante_pdf_route(tipo: str, numero: str):
 
         emp_left_sw = [
             logo_img,
-            Paragraph('Dirección: AV. MONROE 5088 PISO 2', sN),
-            Paragraph('C.A.B.A. CAPITAL FEDERAL C1431CAP', sN),
+            Paragraph('Dirección: PATAGONES 2675 PISO 3', sN),
+            Paragraph('C.A.B.A. CAPITAL FEDERAL C1437JEA', sN),
             Paragraph('Télefono: +54 11 3988-0024', sN),
             Paragraph('Email: info@microbellsa.com.ar  www.microbellsa.com', sN),
         ]
@@ -10698,8 +14039,8 @@ def comprobante_pdf_route(tipo: str, numero: str):
 
         emp_left = [
             logo_img,
-            Paragraph('Dirección: AV. MONROE 5088 PISO 2', sN),
-            Paragraph('C.A.B.A. CAPITAL FEDERAL C1431CAP', sN),
+            Paragraph('Dirección: PATAGONES 2675 PISO 3', sN),
+            Paragraph('C.A.B.A. CAPITAL FEDERAL C1437JEA', sN),
             Paragraph('Télefono: +54 11 3988-0024', sN),
             Paragraph('Email: info@microbellsa.com.ar  www.microbellsa.com', sN),
         ]
@@ -10933,7 +14274,7 @@ def comprobante_pdf_route(tipo: str, numero: str):
             import os as _os_mp
             _QR_MP_PATH = _os_mp.path.join(_os_mp.path.dirname(__file__), 'qr_mercadopago.jpeg')
             _qr_mp_cell = None
-            if tipo.upper() in ('FA','FCA','FCE','FCCA','FCCE') and _os_mp.path.exists(_QR_MP_PATH):
+            if tipo.upper() in ('FA','FCA','FCE','FCCA','FCCE','FE') and _os_mp.path.exists(_QR_MP_PATH):
                 from reportlab.platypus import Image as _RLImgMP
                 _sMP = ParagraphStyle('sMP', fontSize=6, fontName='Helvetica-Bold',
                                       alignment=TA_CENTER, leading=7, textColor=colors.HexColor('#009ee3'))
@@ -11076,49 +14417,35 @@ def debug_tablas_rubro():
 
 @app.get("/gruposuperrubros")
 def get_gruposuperrubros():
-    c = conn()
-    cur = c.cursor()
-    # Solo los que tienen artículos con remanente > 0
-    cur.execute("""
-        SELECT DISTINCT g.CODIGOGRUPOSUPERRUBRO, g.DESCRIPCION
-        FROM "GRUPOSUPERRUBROS" g
-        WHERE EXISTS (
-            SELECT 1 FROM "ARTICULOS" a
-            JOIN "RUBROS" r ON r.CODIGORUBRO = a.CODIGORUBRO
-            JOIN "SUPERRUBROS" sr ON sr.CODIGOSUPERRUBRO = r.CODIGOSUPERRUBRO
-            WHERE sr.CODIGOGRUPOSUPERRUBRO = g.CODIGOGRUPOSUPERRUBRO
-              AND a.ACTIVO = '1'
-        )
-        ORDER BY g.DESCRIPCION
-    """)
-    rows = cur.fetchall()
-    c.close()
-    return [{"codigo": r[0], "descripcion": r[1]} for r in rows]
+    return _get_pub_filtros()['gsr']
 
 @app.get("/superrubros")
 def get_superrubros(grupo: Optional[str] = None):
+    if not grupo:
+        return _get_pub_filtros()['sr']
+    # Filtrado en cascada (usuario ya seleccionó un GSR): consulta puntual en vivo
     c = conn()
     cur = c.cursor()
-    if grupo:
-        cur.execute("""
-            SELECT DISTINCT sr.CODIGOSUPERRUBRO, sr.DESCRIPCION
-            FROM "SUPERRUBROS" sr
-            WHERE sr.CODIGOGRUPOSUPERRUBRO = ?
-              AND EXISTS (
-                SELECT 1 FROM "ARTICULOS" a
-                JOIN "RUBROS" r ON r.CODIGORUBRO = a.CODIGORUBRO
-                WHERE r.CODIGOSUPERRUBRO = sr.CODIGOSUPERRUBRO AND a.ACTIVO = '1'
-              )
-            ORDER BY sr.DESCRIPCION
-        """, (grupo,))
-    else:
-        cur.execute('SELECT CODIGOSUPERRUBRO, DESCRIPCION, CODIGOGRUPOSUPERRUBRO FROM "SUPERRUBROS" ORDER BY DESCRIPCION')
+    cur.execute("""
+        SELECT DISTINCT sr.CODIGOSUPERRUBRO, sr.DESCRIPCION
+        FROM "SUPERRUBROS" sr
+        WHERE sr.CODIGOGRUPOSUPERRUBRO = ?
+          AND EXISTS (
+            SELECT 1 FROM "ARTICULOS" a
+            JOIN "RUBROS" r ON r.CODIGORUBRO = a.CODIGORUBRO
+            WHERE r.CODIGOSUPERRUBRO = sr.CODIGOSUPERRUBRO AND a.ACTIVO = '1'
+          )
+        ORDER BY sr.DESCRIPCION
+    """, (grupo,))
     rows = cur.fetchall()
     c.close()
     return [{"codigo": r[0], "descripcion": r[1], "grupo": r[2] if len(r)>2 else None} for r in rows]
 
 @app.get("/rubros")
 def get_rubros(superrubro: Optional[str] = None, grupo: Optional[str] = None):
+    if not superrubro and not grupo:
+        return _get_pub_filtros()['rubro']
+    # Filtrado en cascada (usuario ya seleccionó un SR o GSR): consulta puntual en vivo
     c = conn()
     cur = c.cursor()
     params = []
@@ -11246,20 +14573,7 @@ def debug_reservas_articulo(codigoparticular: str, token: Optional[str] = None, 
 
 @app.get("/marcas")
 def get_marcas():
-    c = conn()
-    cur = c.cursor()
-    cur.execute("""
-        SELECT DISTINCT m.CODIGOMARCA, m.DESCRIPCION
-        FROM "MARCAS" m
-        WHERE EXISTS (
-            SELECT 1 FROM "ARTICULOS" a
-            WHERE a.CODIGOMARCA = m.CODIGOMARCA AND a.ACTIVO = '1'
-        )
-        ORDER BY m.DESCRIPCION
-    """)
-    rows = cur.fetchall()
-    c.close()
-    return [{"codigo": r[0], "descripcion": r[1]} for r in rows]
+    return _get_pub_filtros()['marca']
 
 # ─── Debug ────────────────────────────────────────────────────────────────────
 @app.get("/debug/stock")
@@ -12889,6 +16203,853 @@ def debug_contadores_sw():
         return [{"codigo": r[0], "descripcion": (r[1] or "").strip(), "valor": r[2]} for r in rows]
     except Exception as e:
         return {"error": str(e)}
+
+
+# ============================================================================
+# CRÉDITO INTERNO POR ESCALÓN — función real (2026-07-31)
+#
+# ESTADO: implementada para revisión. NO está conectada a ningún endpoint que la
+# dispare desde producción todavía — hay que llamarla explícitamente desde Python
+# (por ejemplo, desde el debug endpoint de prueba controlada que armemos después,
+# una vez que Eduardo dé el visto bueno para probar contra un cliente real/de prueba).
+#
+# Qué hace, en una sola transacción Firebird (todo o nada — si algo falla, rollback
+# completo, no queda ni el CI ni el asiento a medias):
+#   1) Llama al procedimiento OFICIAL de Flexxus FMA_GENERARCREDITOINTERNO (el mismo
+#      que usa la app de escritorio) para crear el comprobante CI — así reusamos su
+#      numeración correcta (CONTADORES), sus validaciones y todos los datos del
+#      cliente, sin reinventar el INSERT.
+#   2) Corrige el texto que el procedimiento oficial hardcodea ('CREDITO POR PAGO')
+#      por una descripción real del origen promocional (oferta/escalón).
+#   3) Genera la cabecera del asiento contable vía FMA_CABEZAASIENTOS (procedimiento
+#      oficial, numeración propia vía PARAMETROS tipo 'AS').
+#   4) Inserta las 2 líneas del asiento: Debe la cuenta de "Descuentos Otorgados"
+#      (51205013 — confirmado con Eduardo, PARAMETROSCUENTAS orden 6001), Haber la
+#      cuenta "Deudores por Ventas" — resuelta dinámicamente igual que lo hace
+#      Flexxus internamente (PARAMETROSCUENTAS PANTALLA='VENTAS' ORDEN=4001), nunca
+#      hardcodeada.
+#   5) Vincula el asiento al comprobante CI vía FMA_COMPROBANTESASIENTOS (procedimiento
+#      oficial, tabla COMPROBANTESASIENTOS).
+#
+# Fuente de cada pieza: /debug/ci_investigacion, /debug/ci_triggers_source,
+# /debug/ci_asientos_investigacion, /debug/ci_procedimiento_generar y
+# /debug/ci_plan_cuentas (investigación de solo lectura hecha antes de escribir esto).
+# ============================================================================
+CUENTA_DEBE_DESCUENTOS_OTORGADOS = 51205013  # PLANDECUENTAS — confirmado con Eduardo 2026-07-31
+
+def _generar_credito_interno_ci(codigo_cliente, codigo_usuario, monto, descripcion, cuenta_debe=None, db_path=None):
+    """Genera un comprobante CI (crédito interno) en Firebird/Flexxus para un cliente,
+    con su asiento contable asociado, en una sola transacción atómica.
+
+    Parámetros:
+      codigo_cliente: CODIGOCLIENTE del cliente que recibe el crédito (str).
+      codigo_usuario: CODIGOUSUARIO del vendedor/usuario que genera el crédito (str).
+      monto: monto POSITIVO del crédito en pesos (float). La función se encarga de
+        pasarlo en negativo al procedimiento oficial de Flexxus (igual que hace la
+        app de escritorio) para que reste saldo deudor del cliente.
+      descripcion: texto real del origen del crédito (ej. "CREDITO POR PROMOCION -
+        Oferta Día del Niño - Escalón 2"), reemplaza el 'CREDITO POR PAGO' que el
+        procedimiento oficial deja hardcodeado.
+      cuenta_debe: código PLANDECUENTAS a debitar. Default: Descuentos Otorgados
+        (51205013).
+      db_path: ruta de la base Firebird a usar (DATABASE u DATABASE_MLT según el
+        pedido/presupuesto haya sido confirmado en 'oficial' o 'sw'). Default: DATABASE
+        — IMPORTANTE pasar el mismo db que usó el pedido, si no el código de cliente
+        puede no existir o referirse a otro cliente en esa base.
+
+    Devuelve: {"numero_ci": <numero de comprobante CI>, "codigo_asiento": <código del
+    asiento generado>}.
+
+    Lanza Exception si algo falla — con rollback automático, no queda nada a medias
+    (ni el CI se genera sin su asiento, ni el asiento sin el CI)."""
+    if not codigo_cliente or not str(codigo_cliente).strip():
+        raise ValueError("codigo_cliente es obligatorio")
+    if not codigo_usuario or not str(codigo_usuario).strip():
+        raise ValueError("codigo_usuario es obligatorio")
+    monto = float(monto or 0)
+    if monto <= 0:
+        raise ValueError("monto debe ser mayor a 0")
+    cuenta_debe = float(cuenta_debe if cuenta_debe is not None else CUENTA_DEBE_DESCUENTOS_OTORGADOS)
+
+    c = conn('WIN1252', db=(db_path or DATABASE))
+    try:
+        cur = c.cursor()
+
+        # 1) Comprobante CI vía el procedimiento oficial de Flexxus
+        cur.execute(
+            'EXECUTE PROCEDURE "FMA_GENERARCREDITOINTERNO" ?, ?, ?',
+            (codigo_cliente, codigo_usuario, -abs(monto))
+        )
+        row = cur.fetchone()
+        if not row or row[0] is None:
+            raise Exception("FMA_GENERARCREDITOINTERNO no devolvió NUMEROCI")
+        numero_ci = row[0]
+
+        # 2) Corregir el texto hardcodeado ('CREDITO POR PAGO') por el motivo real
+        desc = (descripcion or '').strip()[:100] or 'CREDITO POR PROMOCION'
+        cur.execute(
+            'UPDATE "CABEZACOMPROBANTES" SET COMENTARIOS=? '
+            "WHERE TIPOCOMPROBANTE='CI' AND NUMEROCOMPROBANTE=?",
+            (desc, numero_ci)
+        )
+        cur.execute(
+            'UPDATE "CUERPOCOMPROBANTES" SET DESCRIPCION=? '
+            "WHERE TIPOCOMPROBANTE='CI' AND NUMEROCOMPROBANTE=? AND LINEA=1",
+            (desc, numero_ci)
+        )
+
+        # 3) Cabecera del asiento contable (procedimiento oficial, numeración propia)
+        cur.execute('EXECUTE PROCEDURE "FMA_CABEZAASIENTOS"')
+        row = cur.fetchone()
+        if not row or row[0] is None:
+            raise Exception("FMA_CABEZAASIENTOS no devolvió CODIGOASIENTOOUT")
+        codigo_asiento = row[0]
+
+        # 4) Cuenta "Deudores por Ventas" — resuelta dinámicamente, igual que lo hace
+        # Flexxus internamente en FMA_CUERPOASIENTOS (nunca hardcodeada acá)
+        cur.execute(
+            'SELECT FIRST 1 PAC.CUENTA FROM "PARAMETROSCUENTAS" PAC '
+            "WHERE PAC.PANTALLA='VENTAS' AND PAC.ORDEN=4001 ORDER BY PAC.ORDEN"
+        )
+        row = cur.fetchone()
+        if not row or row[0] is None:
+            raise Exception("No se encontró la cuenta 'Deudores por Ventas' parametrizada (PARAMETROSCUENTAS VENTAS/4001)")
+        cuenta_haber = row[0]
+
+        # 5) Líneas del asiento: Debe cuenta de descuento/gasto, Haber Deudores por Ventas
+        cur.execute(
+            'INSERT INTO "CUERPOASIENTOS" '
+            '(CODIGOASIENTO, LINEA, CUENTA, MONTO, ESDEBE, FECHAMODIFICACION, NUMEROTRANSACCION) '
+            'VALUES (?, 1, ?, ?, 1, CURRENT_TIMESTAMP, 0)',
+            (codigo_asiento, cuenta_debe, monto)
+        )
+        cur.execute(
+            'INSERT INTO "CUERPOASIENTOS" '
+            '(CODIGOASIENTO, LINEA, CUENTA, MONTO, ESDEBE, FECHAMODIFICACION, NUMEROTRANSACCION) '
+            'VALUES (?, 2, ?, ?, 0, CURRENT_TIMESTAMP, 0)',
+            (codigo_asiento, cuenta_haber, monto)
+        )
+
+        # 6) Vincular el asiento al comprobante CI (procedimiento oficial)
+        cur.execute(
+            'EXECUTE PROCEDURE "FMA_COMPROBANTESASIENTOS" ?, ?, ?',
+            (codigo_asiento, 'CI', numero_ci)
+        )
+        row = cur.fetchone()
+        if not row or row[0] != 1:
+            raise Exception("FMA_COMPROBANTESASIENTOS no devolvió RESULTADO=1")
+
+        c.commit()
+        return {"numero_ci": numero_ci, "codigo_asiento": codigo_asiento}
+    except Exception:
+        try:
+            c.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        try:
+            c.close()
+        except Exception:
+            pass
+
+
+def _fb_datos_cliente_para_ci_di(cur, codigo_cliente, codigo_usuario):
+    """Repite EXACTAMENTE las mismas consultas que hace el procedimiento oficial
+    FMA_GENERARCREDITOINTERNO (según su código fuente real, ver /debug/ci_procedimiento_generar)
+    para resolver punto de venta, depósito, caja, sucursal, datos del cliente, IVA,
+    moneda y vendedor. La usa _generar_debito_interno_di para poder armar el INSERT a
+    mano, ya que no existe un procedimiento oficial equivalente a FMA_GENERARCREDITOINTERNO
+    para DI (confirmado en /debug/ci_reversion_investigacion, 2026-07-31)."""
+    cur.execute(
+        'SELECT U.CODIGOPUNTOVENTAAUX, D.CODIGODEPOSITO, U.CODIGOCAJA, P.CODIGOSUCURSAL '
+        'FROM "USUARIOS" U '
+        'LEFT JOIN "DEPOSITOS" D ON D.CODIGODEPOSITO = U.CODIGODEPOSITO '
+        'LEFT JOIN "PUNTOSDEVENTA" P ON P.CODIGOPUNTOVENTA = U.CODIGOPUNTOVENTA '
+        'LEFT JOIN "CAJAS" CJ ON CJ.CODIGOCAJA = U.CODIGOCAJA '
+        'WHERE UPPER(U.CODIGOUSUARIO) = UPPER(?)',
+        (codigo_usuario,)
+    )
+    row = cur.fetchone()
+    if not row:
+        raise Exception(f"Usuario '{codigo_usuario}' no encontrado en USUARIOS")
+    codigo_ptovta, codigo_deposito, codigo_caja, codigo_sucursal = row[0], row[1], row[2], row[3]
+
+    cur.execute(
+        'SELECT C.RAZONSOCIAL, C.DIRECCION, C.CONDICIONIVA, '
+        'SUBSTRING(C.TELEFONO FROM 1 FOR 18), C.DOCUMENTO, C.CUIT, C.CODIGOMULTIPLAZO '
+        'FROM "CLIENTES" C WHERE C.CODIGOCLIENTE = ?',
+        (codigo_cliente,)
+    )
+    row = cur.fetchone()
+    if not row:
+        raise Exception(f"Cliente '{codigo_cliente}' no encontrado en CLIENTES")
+    (razonsocial, direccioncliente, condicioniva, telefonocliente,
+     documentocliente, cuitcliente, codigomultiplazo) = row
+
+    alicuotaiva = 0
+    if condicioniva:
+        cur.execute('SELECT T.IVA1 FROM "TIPOIVA" T WHERE T.CODIGOTIPO = ?', (condicioniva,))
+        r = cur.fetchone()
+        alicuotaiva = r[0] if r and r[0] is not None else 0
+
+    cur.execute(
+        'SELECT M.CODIGOMONEDA FROM "MONEDAS" M '
+        'INNER JOIN "MONEDASCAJAS" MC ON M.CODIGOMONEDA = MC.CODIGOMONEDA '
+        'WHERE M.MONEDABASE = 1 AND MC.CAMBIO = 1 AND MC.CODIGOCAJA = ?',
+        (codigo_caja,)
+    )
+    r = cur.fetchone()
+    codigomoneda = r[0] if (r and r[0]) else 'PESOS'
+
+    codigovendedor = None
+    cur.execute(
+        'SELECT C.CODIGOVENDEDOR FROM "CLIENTES" C WHERE C.CODIGOCLIENTE = ? AND C.VENDEDORFIJO = 1',
+        (codigo_cliente,)
+    )
+    r = cur.fetchone()
+    if r and r[0]:
+        codigovendedor = r[0]
+    if not codigovendedor:
+        codigovendedor = codigo_usuario
+
+    return {
+        "codigo_ptovta": codigo_ptovta, "codigo_deposito": codigo_deposito,
+        "codigo_caja": codigo_caja, "codigo_sucursal": codigo_sucursal,
+        "razonsocial": razonsocial, "direccioncliente": direccioncliente,
+        "condicioniva": condicioniva, "telefonocliente": telefonocliente,
+        "documentocliente": documentocliente, "cuitcliente": cuitcliente,
+        "codigomultiplazo": codigomultiplazo, "alicuotaiva": alicuotaiva,
+        "codigomoneda": codigomoneda, "codigovendedor": codigovendedor,
+    }
+
+
+# ============================================================================
+# REVERSIÓN DE CRÉDITO INTERNO (DI) — función real (2026-07-31)
+#
+# ESTADO: implementada para revisión. NO está conectada a ningún endpoint todavía.
+# Por decisión explícita de Eduardo (2026-07-31): esta función NUNCA se dispara sola
+# ni automáticamente al detectar que un pedido ya no alcanza un escalón — se llama
+# solo después de que un humano (Eduardo o MPEREZ) revisa y aprueba la reversión
+# desde el panel de control. El flujo de "detectar el desajuste y dejarlo pendiente
+# de aprobación" todavía no está diseñado — es el próximo paso, aparte de esto.
+#
+# A diferencia de _generar_credito_interno_ci, NO existe un procedimiento oficial de
+# Flexxus equivalente para generar DI (confirmado en /debug/ci_reversion_investigacion:
+# la búsqueda de FMA_GENERARDEBITOINTERNO y similares no encontró nada). El ejemplo
+# real de DI investigado antes (cheque rebotado, "DEVUELTOS") aparenta cargarse a mano
+# desde la pantalla genérica de comprobantes de Flexxus, no vía lógica automatizada.
+#
+# Por eso acá replicamos, campo por campo, EXACTAMENTE el mismo patrón de INSERT que
+# sí está oficialmente validado en el código fuente real de FMA_GENERARCREDITOINTERNO
+# (ver /debug/ci_procedimiento_generar) — mismas columnas, mismos valores por defecto
+# — cambiando solo: TIPOCOMPROBANTE='DI', TOTAL positivo (un DI le vuelve a sumar
+# deuda al cliente, cancelando el crédito previo), numeración propia vía CONTADOR
+# 00015 (en vez de 00014 que usa CI), y el asiento contable invertido (Debe/Haber
+# cambiados respecto al asiento del CI original).
+# ============================================================================
+
+def _generar_debito_interno_di(codigo_cliente, codigo_usuario, monto, descripcion,
+                                 ci_original_numero=None, cuenta_debe=None, db_path=None):
+    """Genera un comprobante DI (Débito Interno) que REVIERTE un crédito interno (CI)
+    previamente otorgado por el sistema de ofertas, cuando el pedido/escalón que lo
+    originó ya no corresponde (pedido modificado por debajo del escalón, o cancelado).
+
+    Parámetros:
+      codigo_cliente, codigo_usuario: igual que en _generar_credito_interno_ci.
+      monto: monto POSITIVO a revertir (float) — debe ser el mismo monto del CI
+        original que se está anulando.
+      descripcion: texto real del motivo (ej. "Reversión pedido 000123 modificado,
+        ya no alcanza Escalón 2 de Oferta Día del Niño").
+      ci_original_numero: número del comprobante CI que se está revirtiendo, para
+        trazabilidad (se agrega a la descripción si no viene ya incluido).
+      cuenta_debe: código PLANDECUENTAS que se había debitado en el CI original
+        (default: Descuentos Otorgados, igual que en _generar_credito_interno_ci) —
+        en la reversión esta cuenta va del lado del HABER (se invierte).
+      db_path: MISMA base Firebird (DATABASE u DATABASE_MLT) que se usó para generar
+        el CI original — obligatorio pasarla igual, o el DI puede terminar en la base
+        equivocada. Default: DATABASE.
+
+    Devuelve: {"numero_di": ..., "codigo_asiento": ...}
+    Lanza Exception si algo falla, con rollback automático — no queda nada a medias."""
+    if not codigo_cliente or not str(codigo_cliente).strip():
+        raise ValueError("codigo_cliente es obligatorio")
+    if not codigo_usuario or not str(codigo_usuario).strip():
+        raise ValueError("codigo_usuario es obligatorio")
+    monto = float(monto or 0)
+    if monto <= 0:
+        raise ValueError("monto debe ser mayor a 0")
+    cuenta_credito_original = float(cuenta_debe if cuenta_debe is not None else CUENTA_DEBE_DESCUENTOS_OTORGADOS)
+
+    desc = (descripcion or '').strip()[:100] or 'REVERSION CREDITO INTERNO'
+    if ci_original_numero and str(ci_original_numero) not in desc:
+        desc = (desc + f" (CI {ci_original_numero})")[:100]
+
+    c = conn('WIN1252', db=(db_path or DATABASE))
+    try:
+        cur = c.cursor()
+        datos = _fb_datos_cliente_para_ci_di(cur, codigo_cliente, codigo_usuario)
+
+        # Numeración propia del DI (CONTADOR 00015), mismo patrón que usa Flexxus para CI
+        cur.execute(
+            'UPDATE "CONTADORES" SET VALOR = VALOR + 1 WHERE CODIGOCONTADOR = ('
+            'SELECT C.CODIGOCONTADOR FROM "PARAMETROSPUNTOSDEVENTA" P '
+            'INNER JOIN "CONTADORES" C ON P.CODIGOCONTADOR = C.CODIGOCONTADOR '
+            "WHERE P.TIPODOCUMENTO = 'DI' AND P.CODIGOPUNTOVENTA = ?)",
+            (datos["codigo_ptovta"],)
+        )
+        cur.execute(
+            'SELECT C.VALOR - 1 FROM "PARAMETROSPUNTOSDEVENTA" P '
+            'INNER JOIN "CONTADORES" C ON P.CODIGOCONTADOR = C.CODIGOCONTADOR '
+            "WHERE P.TIPODOCUMENTO = 'DI' AND P.CODIGOPUNTOVENTA = ?",
+            (datos["codigo_ptovta"],)
+        )
+        row = cur.fetchone()
+        if not row or row[0] is None:
+            raise Exception("No se pudo obtener numeración DI (PARAMETROSPUNTOSDEVENTA/CONTADORES)")
+        numero_di = row[0]
+
+        fecha_sql = ("CAST(EXTRACT(MONTH FROM CURRENT_TIMESTAMP) || '/' || "
+                     "EXTRACT(DAY FROM CURRENT_TIMESTAMP) || '/' || "
+                     "EXTRACT(YEAR FROM CURRENT_TIMESTAMP) AS DATE)")
+
+        # CABEZACOMPROBANTES — mismo patrón exacto que FMA_GENERARCREDITOINTERNO,
+        # con TIPOCOMPROBANTE='DI', TOTAL positivo y COMENTARIOS con el motivo real.
+        sql_cabeza = (
+            'INSERT INTO "CABEZACOMPROBANTES" ('
+            'TIPOCOMPROBANTE, NUMEROCOMPROBANTE, CODIGOCLIENTE, FECHACOMPROBANTE, '
+            'RAZONSOCIAL, DIRECCION, PORCIVA1, PORCIVA2, IVA1, IVA2, TOTAL, PAGADO, '
+            'CUENTACORRIENTE, HORA, CODIGOUSUARIO, TIPOIVA, REMITOFACTURADO, COMENTARIOS, '
+            'TELEFONO, FECHAVENCIMIENTO, IMPRIME, ANULADA, CUIT, COMPRA, CODIGOTRANSPORTE, '
+            'MONTOTRANSPORTE, CODIGOMULTIPLAZO, EXENTO, CLASECOMPROBANTE, CODIGOUSUARIO2, '
+            'COEFICIENTEIVA, FECHAMODIFICACION, DESCCOMPROBANTE, CODIGOMONEDA, COTIZACION, '
+            'NUMEROTRANSACCION, CANTIDADBULTOS, NROPUNTODEVENTA, CODIGOPROYECTO, DESCUENTOPORCENTAJE, '
+            'DESCUENTOMONTO, DESCUENTODESCRIPCION, CANTIDADPAGINAS, LISTAPRECIO, VALIDACTACTE, '
+            'MONTOTOTALII, FECHAVENCIMIENTO2, RECARGOVENCIMIENTO2, FECHAVENCIMIENTO3, RECARGOVENCIMIENTO3'
+            ') VALUES (?, ?, ?, ' + fecha_sql + ', ?, ?, ?, 0, 0, 0, ?, 0, 1, CURRENT_TIMESTAMP, ?, ?, 0, ?, '
+            '?, ' + fecha_sql + ', 0, 0, ?, 0, 2, 0, ?, 0, 0, ?, 0, ' + fecha_sql + ", '', ?, 1, 0, 0, 4, '0', 0, 0, '0 %', "
+            '1, 1, 1, 0, ' + fecha_sql + ', 0, ' + fecha_sql + ', 0)'
+        )
+        cur.execute(sql_cabeza, (
+            'DI', numero_di, codigo_cliente,
+            datos["razonsocial"], datos["direccioncliente"], datos["alicuotaiva"],
+            monto,
+            datos["codigovendedor"], datos["condicioniva"], desc,
+            datos["telefonocliente"],
+            datos["cuitcliente"],
+            datos["codigomultiplazo"],
+            codigo_usuario,
+            datos["codigomoneda"],
+        ))
+
+        # CUERPOCOMPROBANTES — ídem, mismo patrón exacto con línea única CODIGOARTICULO='*'
+        sql_cuerpo = (
+            'INSERT INTO "CUERPOCOMPROBANTES" ('
+            'TIPOCOMPROBANTE, NUMEROCOMPROBANTE, LINEA, CODIGOARTICULO, DESCRIPCION, CANTIDAD, '
+            'DESCUENTO, PRECIOUNITARIO, PRECIOTOTAL, GARANTIA, INTERES, CANTIDADREMITIDA, LOTE, '
+            'ESCONJUNTO, FECHAMODIFICACION, CODIGODEPOSITO, COSTOVENTA, NUMEROTRANSACCION, '
+            'CODIGOPARTICULAR, PORCENTAJEIVA, DESCDESCUENTO, TIPOPRECIO, PORCENTAJEDESCUENTOS, '
+            'MONTOII, COEFICIENTECONVERSION, CODIGOEMPAQUE, DESCRIPCIONEMPAQUE, OBSERVACIONES'
+            ") VALUES (?, ?, 1, '*', ?, 1, 0, ?, ?, 0, 0, 0, '000', 0, " + fecha_sql + ', ?, 0, 0, '
+            "'*', ?, NULL, NULL, 0, 0, 0, '', '', NULL)"
+        )
+        cur.execute(sql_cuerpo, (
+            'DI', numero_di, desc, monto, monto, datos["codigo_deposito"], datos["alicuotaiva"]
+        ))
+
+        # Asiento contable INVERSO al del CI original: Debe Deudores por Ventas,
+        # Haber la cuenta que se había debitado (ej. Descuentos Otorgados).
+        cur.execute('EXECUTE PROCEDURE "FMA_CABEZAASIENTOS"')
+        row = cur.fetchone()
+        if not row or row[0] is None:
+            raise Exception("FMA_CABEZAASIENTOS no devolvió CODIGOASIENTOOUT")
+        codigo_asiento = row[0]
+
+        cur.execute(
+            'SELECT FIRST 1 PAC.CUENTA FROM "PARAMETROSCUENTAS" PAC '
+            "WHERE PAC.PANTALLA='VENTAS' AND PAC.ORDEN=4001 ORDER BY PAC.ORDEN"
+        )
+        row = cur.fetchone()
+        if not row or row[0] is None:
+            raise Exception("No se encontró la cuenta 'Deudores por Ventas' parametrizada (PARAMETROSCUENTAS VENTAS/4001)")
+        cuenta_deudores = row[0]
+
+        cur.execute(
+            'INSERT INTO "CUERPOASIENTOS" '
+            '(CODIGOASIENTO, LINEA, CUENTA, MONTO, ESDEBE, FECHAMODIFICACION, NUMEROTRANSACCION) '
+            'VALUES (?, 1, ?, ?, 1, CURRENT_TIMESTAMP, 0)',
+            (codigo_asiento, cuenta_deudores, monto)
+        )
+        cur.execute(
+            'INSERT INTO "CUERPOASIENTOS" '
+            '(CODIGOASIENTO, LINEA, CUENTA, MONTO, ESDEBE, FECHAMODIFICACION, NUMEROTRANSACCION) '
+            'VALUES (?, 2, ?, ?, 0, CURRENT_TIMESTAMP, 0)',
+            (codigo_asiento, cuenta_credito_original, monto)
+        )
+
+        # Vincular el asiento al comprobante DI (procedimiento oficial)
+        cur.execute(
+            'EXECUTE PROCEDURE "FMA_COMPROBANTESASIENTOS" ?, ?, ?',
+            (codigo_asiento, 'DI', numero_di)
+        )
+        row = cur.fetchone()
+        if not row or row[0] != 1:
+            raise Exception("FMA_COMPROBANTESASIENTOS no devolvió RESULTADO=1")
+
+        c.commit()
+        return {"numero_di": numero_di, "codigo_asiento": codigo_asiento}
+    except Exception:
+        try:
+            c.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        try:
+            c.close()
+        except Exception:
+            pass
+
+
+@app.get("/debug/ci_investigacion")
+def debug_ci_investigacion(_u=Depends(get_admin_user)):
+    """DEBUG TEMPORAL (2026-07-31): investigación de solo lectura (sin ningún INSERT/
+    UPDATE) para la feature de crédito interno por escalón (bono acreditado en cuenta
+    corriente vía comprobante tipo CI, visto en la pantalla Archivos > Contadores de
+    Flexxus: código 00014 "CREDITO INTERNO", y su contraparte 00015 "DEBITO INTERNO").
+    Junta en una sola llamada todo lo necesario para diseñar el INSERT real:
+      1) Columnas de CABEZACOMPROBANTES y CUERPOCOMPROBANTES.
+      2) Fila(s) de CONTADORES que correspondan a CI/DI (numeración propia).
+      3) Si ya existen comprobantes TIPOCOMPROBANTE='CI' o 'DI' cargados (aunque sea
+         de prueba manual desde Flexxus) — cabecera y cuerpo del más reciente de cada
+         uno, para ver la forma REAL que toman sus campos. Si no hay ninguno, lo
+         informa así sabemos que hay que armar el INSERT sin un ejemplo de referencia.
+      4) Triggers sobre CABEZACOMPROBANTES (por si hay lógica automática — numeración,
+         impacto en cuenta corriente, validaciones — que corre sola al insertar)."""
+    out = {}
+    try:
+        c = conn('WIN1252', db=DATABASE)
+        cur = c.cursor()
+
+        # 1) Columnas de ambas tablas
+        for tabla in ('CABEZACOMPROBANTES', 'CUERPOCOMPROBANTES'):
+            try:
+                cur.execute(
+                    "SELECT TRIM(RDB$FIELD_NAME) FROM RDB$RELATION_FIELDS "
+                    "WHERE RDB$RELATION_NAME=? ORDER BY RDB$FIELD_POSITION", (tabla,)
+                )
+                out[f'columnas_{tabla}'] = [r[0] for r in cur.fetchall()]
+            except Exception as e:
+                out[f'columnas_{tabla}_error'] = str(e)
+
+        # 2) Contador(es) CI/DI — búsqueda dirigida + fallback con todos por si el
+        # texto de DESCRIPCION no matchea exacto.
+        try:
+            cur.execute(
+                "SELECT CODIGOCONTADOR, DESCRIPCION, VALOR FROM \"CONTADORES\" "
+                "WHERE UPPER(DESCRIPCION) CONTAINING UPPER(?) "
+                "OR UPPER(DESCRIPCION) CONTAINING UPPER(?) "
+                "ORDER BY CODIGOCONTADOR", ('CREDITO INTERNO', 'DEBITO INTERNO')
+            )
+            out['contadores_ci_di'] = [
+                {"codigo": r[0], "descripcion": (r[1] or '').strip(), "valor": r[2]}
+                for r in cur.fetchall()
+            ]
+        except Exception as e:
+            out['contadores_ci_di_error'] = str(e)
+
+        # 3) Comprobantes CI/DI ya cargados, si existen — cabecera + cuerpo del más
+        # reciente de cada tipo.
+        for tipo in ('CI', 'DI'):
+            try:
+                cur.execute(
+                    'SELECT FIRST 3 * FROM "CABEZACOMPROBANTES" WHERE TIPOCOMPROBANTE=? '
+                    'ORDER BY NUMEROCOMPROBANTE DESC', (tipo,)
+                )
+                rows = cur.fetchall()
+                cols = [d[0] for d in cur.description]
+                out[f'muestra_cabeza_{tipo}'] = [
+                    {cols[i]: (str(row[i]) if row[i] is not None else None) for i in range(len(cols))}
+                    for row in rows
+                ]
+                if rows and 'NUMEROCOMPROBANTE' in cols:
+                    numero0 = rows[0][cols.index('NUMEROCOMPROBANTE')]
+                    cur.execute(
+                        'SELECT FIRST 5 * FROM "CUERPOCOMPROBANTES" WHERE TIPOCOMPROBANTE=? AND NUMEROCOMPROBANTE=?',
+                        (tipo, numero0)
+                    )
+                    rows_c = cur.fetchall()
+                    cols_c = [d[0] for d in cur.description]
+                    out[f'muestra_cuerpo_{tipo}'] = [
+                        {cols_c[i]: (str(r[i]) if r[i] is not None else None) for i in range(len(cols_c))}
+                        for r in rows_c
+                    ]
+                elif not rows:
+                    out[f'muestra_cabeza_{tipo}_nota'] = f'No hay comprobantes TIPOCOMPROBANTE={tipo} cargados todavía.'
+            except Exception as e:
+                out[f'muestra_{tipo}_error'] = str(e)
+
+        # 4) Triggers sobre CABEZACOMPROBANTES
+        try:
+            cur.execute(
+                "SELECT TRIM(RDB$TRIGGER_NAME) FROM RDB$TRIGGERS "
+                "WHERE RDB$RELATION_NAME='CABEZACOMPROBANTES' AND RDB$SYSTEM_FLAG=0"
+            )
+            out['triggers_cabezacomprobantes'] = [r[0] for r in cur.fetchall()]
+        except Exception as e:
+            out['triggers_error'] = str(e)
+
+        c.close()
+    except Exception as e:
+        out['error_general'] = str(e)
+    return out
+
+@app.get("/debug/ci_triggers_source")
+def debug_ci_triggers_source(_u=Depends(get_admin_user)):
+    """DEBUG TEMPORAL (2026-07-31): trae el código fuente PSQL de los 4 triggers reales
+    detectados sobre CABEZACOMPROBANTES (ver 'triggers_cabezacomprobantes' en
+    /debug/ci_investigacion): CABEZACOMPROBANTES_NT, TRIG_PAGADO_VENTAS,
+    CABEZACOMPROBANTES_BI0, MTO_TGCABEZACOMPROBANTES. Solo lectura (RDB$TRIGGERS es
+    tabla de sistema, no toca datos). El objetivo es confirmar si la generación
+    automática del asiento contable (visto en Flexxus vía 'Ver Asiento' para un
+    comprobante CI) ocurre a nivel trigger de base (entonces un INSERT crudo desde
+    Python la replicaría solo) o si corre únicamente desde la app de escritorio Delphi
+    (entonces habría que reproducir esa lógica a mano)."""
+    triggers = [
+        'CABEZACOMPROBANTES_NT',
+        'TRIG_PAGADO_VENTAS',
+        'CABEZACOMPROBANTES_BI0',
+        'MTO_TGCABEZACOMPROBANTES',
+    ]
+    out = {}
+    try:
+        c = conn('WIN1252', db=DATABASE)
+        cur = c.cursor()
+        for t in triggers:
+            try:
+                cur.execute(
+                    "SELECT RDB$TRIGGER_SOURCE FROM RDB$TRIGGERS WHERE RDB$TRIGGER_NAME=?", (t,)
+                )
+                row = cur.fetchone()
+                if row and row[0] is not None:
+                    src = row[0]
+                    if isinstance(src, bytes):
+                        src = src.decode('latin1', errors='replace')
+                    out[t] = src
+                else:
+                    out[t] = None
+            except Exception as e:
+                out[t + '_error'] = str(e)
+        c.close()
+    except Exception as e:
+        out['error_general'] = str(e)
+    return out
+
+@app.get("/debug/ci_asientos_investigacion")
+def debug_ci_asientos_investigacion(_u=Depends(get_admin_user)):
+    """DEBUG TEMPORAL (2026-07-31): sigue la investigación de crédito interno por
+    escalón. El comprobante CI de ejemplo (6399) que vimos resultó ser un crédito
+    generado por un PAGO (cheque de 3ros que superó lo adeudado) — toca caja/valores,
+    por eso el asiento debita 'Cheques de 3° Directos'. Lo que necesitamos nosotros es
+    un crédito por bonificación/promoción comercial, SIN movimiento de caja, que
+    debería debitar una cuenta de gasto (ej. GASTOS DE COMERCIALIZACION) contra el
+    haber de Deudores por Ventas del cliente — un circuito contable distinto.
+    Este endpoint busca:
+      1) Triggers sobre CUERPOCOMPROBANTES (no revisado aún).
+      2) Tablas cuyo nombre sugiera manejo de asientos/contabilidad.
+      3) Procedimientos almacenados (RDB$PROCEDURES) que sugieran generación de
+         asientos o estén vinculados a pagos/cobros (posible lugar donde Delphi
+         genera el asiento contable, si no es un trigger)."""
+    out = {}
+    try:
+        c = conn('WIN1252', db=DATABASE)
+        cur = c.cursor()
+
+        # 1) Triggers sobre CUERPOCOMPROBANTES
+        try:
+            cur.execute(
+                "SELECT TRIM(RDB$TRIGGER_NAME) FROM RDB$TRIGGERS "
+                "WHERE RDB$RELATION_NAME='CUERPOCOMPROBANTES' AND RDB$SYSTEM_FLAG=0"
+            )
+            out['triggers_cuerpocomprobantes'] = [r[0] for r in cur.fetchall()]
+        except Exception as e:
+            out['triggers_cuerpocomprobantes_error'] = str(e)
+
+        # 2) Tablas relacionadas a asientos/contabilidad
+        try:
+            out['tablas_contables'] = []
+            for kw in ('ASIENTO', 'CONTAB', 'DIARIO', 'PLANCTA', 'MAYOR', 'MOVCTA', 'CUENTA'):
+                cur.execute(
+                    "SELECT TRIM(RDB$RELATION_NAME) FROM RDB$RELATIONS "
+                    "WHERE RDB$SYSTEM_FLAG=0 AND UPPER(RDB$RELATION_NAME) CONTAINING UPPER(?)",
+                    (kw,)
+                )
+                for r in cur.fetchall():
+                    if r[0] not in out['tablas_contables']:
+                        out['tablas_contables'].append(r[0])
+        except Exception as e:
+            out['tablas_contables_error'] = str(e)
+
+        # 3) Procedimientos almacenados relacionados a asientos / pagos / cobros
+        try:
+            out['procedimientos_relacionados'] = []
+            for kw in ('ASIENTO', 'CONTAB', 'PAGO', 'COBRO', 'CREDITOINTERNO', 'CTACTE'):
+                cur.execute(
+                    "SELECT TRIM(RDB$PROCEDURE_NAME) FROM RDB$PROCEDURES "
+                    "WHERE UPPER(RDB$PROCEDURE_NAME) CONTAINING UPPER(?)",
+                    (kw,)
+                )
+                for r in cur.fetchall():
+                    if r[0] not in out['procedimientos_relacionados']:
+                        out['procedimientos_relacionados'].append(r[0])
+        except Exception as e:
+            out['procedimientos_relacionados_error'] = str(e)
+
+        # 4) Triggers en TODAS las tablas cuyo nombre sugiera pagos/cobros (posible
+        # lugar real donde se genera el asiento, ya que el ejemplo CI que vimos vino
+        # de un pago, no de la carga directa del comprobante)
+        try:
+            out['triggers_tablas_pagos_cobros'] = []
+            for kw in ('PAGO', 'COBRO', 'RECIBO', 'CHEQUE'):
+                cur.execute(
+                    "SELECT TRIM(RDB$RELATION_NAME) FROM RDB$RELATIONS "
+                    "WHERE RDB$SYSTEM_FLAG=0 AND UPPER(RDB$RELATION_NAME) CONTAINING UPPER(?)",
+                    (kw,)
+                )
+                tablas = [r[0] for r in cur.fetchall()]
+                for tabla in tablas:
+                    cur.execute(
+                        "SELECT TRIM(RDB$TRIGGER_NAME) FROM RDB$TRIGGERS "
+                        "WHERE RDB$RELATION_NAME=? AND RDB$SYSTEM_FLAG=0", (tabla,)
+                    )
+                    trigs = [r[0] for r in cur.fetchall()]
+                    if trigs:
+                        out['triggers_tablas_pagos_cobros'].append({"tabla": tabla, "triggers": trigs})
+        except Exception as e:
+            out['triggers_tablas_pagos_cobros_error'] = str(e)
+
+        c.close()
+    except Exception as e:
+        out['error_general'] = str(e)
+    return out
+
+@app.get("/debug/ci_procedimiento_generar")
+def debug_ci_procedimiento_generar(_u=Depends(get_admin_user)):
+    """DEBUG TEMPORAL (2026-07-31): trae parámetros + código fuente PSQL completo de
+    FMA_GENERARCREDITOINTERNO (hallado en /debug/ci_asientos_investigacion — procedimiento
+    almacenado que genera el crédito interno, posiblemente incluyendo numeración,
+    INSERT en CABEZACOMPROBANTES/CUERPOCOMPROBANTES y el asiento contable en un solo
+    paso). También trae FMA_CABEZAASIENTOS, FMA_CUERPOASIENTOS y
+    FMA_COMPROBANTESASIENTOS por si son invocados desde adentro. Si logramos llamar
+    a este procedimiento vía EXECUTE PROCEDURE desde Python en vez de armar un INSERT
+    crudo, replicaríamos exactamente la lógica real de Flexxus (numeración correcta,
+    asiento contable correcto) sin tener que reconstruirla nosotros."""
+    procs = [
+        'FMA_GENERARCREDITOINTERNO',
+        'FMA_CABEZAASIENTOS',
+        'FMA_CUERPOASIENTOS',
+        'FMA_COMPROBANTESASIENTOS',
+    ]
+    out = {}
+    try:
+        c = conn('WIN1252', db=DATABASE)
+        cur = c.cursor()
+        for p in procs:
+            try:
+                cur.execute(
+                    "SELECT TRIM(RDB$PARAMETER_NAME), RDB$PARAMETER_NUMBER, RDB$PARAMETER_TYPE, "
+                    "TRIM(RDB$FIELD_SOURCE) FROM RDB$PROCEDURE_PARAMETERS "
+                    "WHERE RDB$PROCEDURE_NAME=? ORDER BY RDB$PARAMETER_TYPE, RDB$PARAMETER_NUMBER",
+                    (p,)
+                )
+                out[f'{p}_parametros'] = [
+                    {
+                        "nombre": r[0],
+                        "posicion": r[1],
+                        "tipo": "INPUT" if r[2] == 0 else "OUTPUT",
+                        "dominio": r[3],
+                    }
+                    for r in cur.fetchall()
+                ]
+            except Exception as e:
+                out[f'{p}_parametros_error'] = str(e)
+            try:
+                cur.execute(
+                    "SELECT RDB$PROCEDURE_SOURCE FROM RDB$PROCEDURES WHERE RDB$PROCEDURE_NAME=?", (p,)
+                )
+                row = cur.fetchone()
+                if row and row[0] is not None:
+                    src = row[0]
+                    if isinstance(src, bytes):
+                        src = src.decode('latin1', errors='replace')
+                    out[f'{p}_source'] = src
+                else:
+                    out[f'{p}_source'] = None
+            except Exception as e:
+                out[f'{p}_source_error'] = str(e)
+        c.close()
+    except Exception as e:
+        out['error_general'] = str(e)
+    return out
+
+@app.get("/debug/ci_plan_cuentas")
+def debug_ci_plan_cuentas(_u=Depends(get_admin_user)):
+    """DEBUG TEMPORAL (2026-07-31): última pieza para diseñar el asiento propio del
+    crédito interno por escalón. Necesitamos:
+      1) Columnas de PLANDECUENTAS (para saber cómo se relaciona el CODIGOCUENTA
+         numérico usado en CUERPOASIENTOS con el número de cuenta tipo '5.1.2.05.012'
+         que se ve en la UI de Flexxus).
+      2) La fila de PLANDECUENTAS para la cuenta de gastos de comercialización
+         (buscada por descripción 'COMERCIALIZ' y por número '5.1.2.05%').
+      3) Confirmar cómo se resuelve la cuenta 'Deudores por Ventas' que ya usa
+         Flexxus internamente (vía PARAMETROSCUENTAS PANTALLA='VENTAS' ORDEN=4001,
+         visto en FMA_CUERPOASIENTOS) — reusamos esa misma consulta para el haber."""
+    out = {}
+    try:
+        c = conn('WIN1252', db=DATABASE)
+        cur = c.cursor()
+
+        try:
+            cur.execute(
+                "SELECT TRIM(RDB$FIELD_NAME) FROM RDB$RELATION_FIELDS "
+                "WHERE RDB$RELATION_NAME='PLANDECUENTAS' ORDER BY RDB$FIELD_POSITION"
+            )
+            out['columnas_plandecuentas'] = [r[0] for r in cur.fetchall()]
+        except Exception as e:
+            out['columnas_plandecuentas_error'] = str(e)
+
+        try:
+            cur.execute('SELECT * FROM "PLANDECUENTAS" WHERE UPPER(DESCRIPCION) CONTAINING UPPER(?)', ('COMERCIALIZ',))
+            rows = cur.fetchall()
+            cols = [d[0] for d in cur.description]
+            out['plandecuentas_comercializacion'] = [
+                {cols[i]: (str(row[i]) if row[i] is not None else None) for i in range(len(cols))}
+                for row in rows
+            ]
+        except Exception as e:
+            out['plandecuentas_comercializacion_error'] = str(e)
+
+        try:
+            cur.execute(
+                "SELECT TRIM(RDB$FIELD_NAME) FROM RDB$RELATION_FIELDS "
+                "WHERE RDB$RELATION_NAME='PARAMETROSCUENTAS' ORDER BY RDB$FIELD_POSITION"
+            )
+            out['columnas_parametroscuentas'] = [r[0] for r in cur.fetchall()]
+        except Exception as e:
+            out['columnas_parametroscuentas_error'] = str(e)
+
+        try:
+            cur.execute('SELECT * FROM "PARAMETROSCUENTAS" WHERE PANTALLA=?', ('VENTAS',))
+            rows = cur.fetchall()
+            cols = [d[0] for d in cur.description]
+            out['parametroscuentas_ventas'] = [
+                {cols[i]: (str(row[i]) if row[i] is not None else None) for i in range(len(cols))}
+                for row in rows
+            ]
+        except Exception as e:
+            out['parametroscuentas_ventas_error'] = str(e)
+
+        try:
+            cur.execute(
+                'SELECT FIRST 1 PAC.CUENTA FROM "PARAMETROSCUENTAS" PAC '
+                "WHERE PAC.PANTALLA='VENTAS' AND PAC.ORDEN=4001 ORDER BY PAC.ORDEN"
+            )
+            row = cur.fetchone()
+            cuentaventas = row[0] if row else None
+            out['cuentaventas_codigo'] = cuentaventas
+            if cuentaventas is not None:
+                cur.execute('SELECT * FROM "PLANDECUENTAS" WHERE CODIGOCUENTA=?', (cuentaventas,))
+                rows = cur.fetchall()
+                cols = [d[0] for d in cur.description]
+                out['cuentaventas_detalle'] = [
+                    {cols[i]: (str(row[i]) if row[i] is not None else None) for i in range(len(cols))}
+                    for row in rows
+                ]
+        except Exception as e:
+            out['cuentaventas_error'] = str(e)
+
+        c.close()
+    except Exception as e:
+        out['error_general'] = str(e)
+    return out
+
+@app.get("/debug/ci_reversion_investigacion")
+def debug_ci_reversion_investigacion(_u=Depends(get_admin_user)):
+    """DEBUG TEMPORAL (2026-07-31): investiga cómo revertir un crédito interno (CI) ya
+    generado, para el caso en que el pedido que lo originó se modifique/cancele después
+    y deje de alcanzar el escalón. Hipótesis a confirmar: Flexxus nunca borra/edita un
+    comprobante ya emitido — el mecanismo oficial probablemente sea generar un DI
+    (Débito Interno, la contraparte de CI que ya vimos en CONTADORES código 00015) por
+    el mismo monto, que compensa el efecto en cuenta corriente sin tocar el CI original.
+    Busca:
+      1) Procedimientos almacenados relacionados a generar DI / anular comprobantes /
+         contra-asientos.
+      2) Si existe FMA_GENERARDEBITOINTERNO (o similar), sus parámetros y código fuente.
+      3) Configuración de numeración para TIPODOCUMENTO='DI' en PARAMETROSPUNTOSDEVENTA
+         (para confirmar que está tan lista para usarse como CI)."""
+    out = {}
+    try:
+        c = conn('WIN1252', db=DATABASE)
+        cur = c.cursor()
+
+        try:
+            out['procedimientos_reversion'] = []
+            for kw in ('DEBITOINTERNO', 'GENERARDEBITO', 'ANULA', 'REVERTIR', 'CONTRAASIENTO', 'CANCELA'):
+                cur.execute(
+                    "SELECT TRIM(RDB$PROCEDURE_NAME) FROM RDB$PROCEDURES "
+                    "WHERE UPPER(RDB$PROCEDURE_NAME) CONTAINING UPPER(?)",
+                    (kw,)
+                )
+                for r in cur.fetchall():
+                    if r[0] not in out['procedimientos_reversion']:
+                        out['procedimientos_reversion'].append(r[0])
+        except Exception as e:
+            out['procedimientos_reversion_error'] = str(e)
+
+        for p in out.get('procedimientos_reversion', []):
+            try:
+                cur.execute(
+                    "SELECT TRIM(RDB$PARAMETER_NAME), RDB$PARAMETER_NUMBER, RDB$PARAMETER_TYPE, "
+                    "TRIM(RDB$FIELD_SOURCE) FROM RDB$PROCEDURE_PARAMETERS "
+                    "WHERE RDB$PROCEDURE_NAME=? ORDER BY RDB$PARAMETER_TYPE, RDB$PARAMETER_NUMBER",
+                    (p,)
+                )
+                out[f'{p}_parametros'] = [
+                    {"nombre": r[0], "posicion": r[1], "tipo": "INPUT" if r[2] == 0 else "OUTPUT", "dominio": r[3]}
+                    for r in cur.fetchall()
+                ]
+            except Exception as e:
+                out[f'{p}_parametros_error'] = str(e)
+            try:
+                cur.execute("SELECT RDB$PROCEDURE_SOURCE FROM RDB$PROCEDURES WHERE RDB$PROCEDURE_NAME=?", (p,))
+                row = cur.fetchone()
+                if row and row[0] is not None:
+                    src = row[0]
+                    if isinstance(src, bytes):
+                        src = src.decode('latin1', errors='replace')
+                    out[f'{p}_source'] = src
+                else:
+                    out[f'{p}_source'] = None
+            except Exception as e:
+                out[f'{p}_source_error'] = str(e)
+
+        try:
+            cur.execute(
+                'SELECT P.CODIGOPUNTOVENTA, P.TIPODOCUMENTO, P.CODIGOCONTADOR, C.DESCRIPCION, C.VALOR '
+                'FROM "PARAMETROSPUNTOSDEVENTA" P INNER JOIN "CONTADORES" C ON P.CODIGOCONTADOR = C.CODIGOCONTADOR '
+                "WHERE P.TIPODOCUMENTO IN ('CI', 'DI')"
+            )
+            out['numeracion_ci_di_por_puntoventa'] = [
+                {"punto_venta": r[0], "tipo": r[1], "codigo_contador": r[2], "descripcion_contador": r[3], "valor_actual": r[4]}
+                for r in cur.fetchall()
+            ]
+        except Exception as e:
+            out['numeracion_ci_di_por_puntoventa_error'] = str(e)
+
+        c.close()
+    except Exception as e:
+        out['error_general'] = str(e)
+    return out
 
 @app.get("/debug/info_bd")
 def debug_info_bd():
